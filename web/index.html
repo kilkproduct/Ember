@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#14110f" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>Ember — Small Language Foundry</title>
+  <link rel="manifest" href="/static/manifest.webmanifest" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/styles.css" />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect fill='%23161210' width='64' height='64' rx='12'/><path fill='%23e85d04' d='M32 10c8 12 18 18 18 30a18 18 0 1 1-36 0c0-12 10-18 18-30z'/></svg>" />
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="top">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
+        <path d="M24 4c7 10 16 16 16 26a16 16 0 1 1-32 0C8 20 17 14 24 4z" />
+        <path class="core" d="M24 22c3 4 7 6 7 11a7 7 0 1 1-14 0c0-5 4-7 7-11z" />
+      </svg>
+      <div>
+        <h1>Ember</h1>
+        <p class="tag">Trains on this device</p>
+      </div>
+    </div>
+    <div class="pills">
+      <span class="pill raw" title="No refusal layer, no banned-topic list, no safety fine-tune">uncensored</span>
+      <span class="pill" id="pill-device">on-device</span>
+      <span class="pill" id="pill-speed">tok/s —</span>
+      <span class="pill" id="pill-corpus">0 pages · 0 chars</span>
+      <span class="pill" id="pill-model">vessel unformed</span>
+      <span class="pill" id="pill-fire">idle</span>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab on" data-tab="fuel" role="tab">Fuel</button>
+    <button class="tab" data-tab="vessel" role="tab">Vessel</button>
+    <button class="tab" data-tab="fire" role="tab">Fire</button>
+    <button class="tab" data-tab="voice" role="tab">Voice</button>
+  </nav>
+
+  <main>
+    <!-- FUEL -->
+    <section id="tab-fuel" class="panel on">
+      <div class="grid-2">
+        <article class="card">
+          <header class="card-h">
+            <h2>Auto-forager</h2>
+            <p>Your browser walks public APIs on a loop: the whole Wikipedia family, Reddit archives, Stack Exchange, Gutenberg, HN, Open Library. No keys. No content filter. Autopilot keeps discovering related topics and subreddits until you stop it.</p>
+          </header>
+          <label>Seed topics
+            <input id="seeds" type="text" value="small language models, singapore, cooking, folklore, history" />
+          </label>
+          <label>Subreddits <span class="opt">(optional — otherwise guessed from topics)</span>
+            <input id="subreddits" type="text" placeholder="MachineLearning, singapore, cooking, AskHistorians, worldnews" />
+          </label>
+          <div class="row">
+            <label>Wikipedia
+              <select id="wiki">
+                <option value="family">All Wikimedia sisters</option>
+                <option value="simple.wikipedia.org">Simple English Wikipedia</option>
+                <option value="en.wikipedia.org">English Wikipedia</option>
+                <option value="en.wikiquote.org">Wikiquote</option>
+                <option value="en.wikisource.org">Wikisource</option>
+                <option value="en.wikivoyage.org">Wikivoyage</option>
+                <option value="en.wikibooks.org">Wikibooks</option>
+                <option value="en.wikinews.org">Wikinews</option>
+                <option value="en.wiktionary.org">Wiktionary</option>
+              </select>
+            </label>
+            <label>Page budget / pass
+              <input id="budget" type="number" min="1" max="250" value="40" />
+            </label>
+          </div>
+          <div class="sources">
+            <label class="chk"><input id="src-wiki" type="checkbox" checked /> Wikipedia family</label>
+            <label class="chk"><input id="src-reddit" type="checkbox" checked /> Reddit (Arctic Shift)</label>
+            <label class="chk"><input id="src-pullpush" type="checkbox" checked /> Reddit (PullPush search)</label>
+            <label class="chk"><input id="src-stack" type="checkbox" checked /> Stack Exchange</label>
+            <label class="chk"><input id="src-gutenberg" type="checkbox" checked /> Gutenberg</label>
+            <label class="chk"><input id="src-ol" type="checkbox" checked /> Open Library</label>
+            <label class="chk"><input id="src-hn" type="checkbox" checked /> Hacker News</label>
+            <label class="chk"><input id="src-wander" type="checkbox" checked /> Follow wiki links &amp; categories</label>
+            <label class="chk"><input id="src-autopilot" type="checkbox" checked /> Autopilot (never stop)</label>
+          </div>
+          <div class="actions">
+            <button id="btn-forage" class="btn ember">Start foraging</button>
+            <button id="btn-forage-stop" class="btn ghost" disabled>Stop</button>
+          </div>
+          <pre id="forage-log" class="log" aria-live="polite"></pre>
+        </article>
+
+        <article class="card">
+          <header class="card-h">
+            <h2>Hand fuel</h2>
+            <p>Paste anything you want the model to absorb, or drop a <code>.txt</code> / <code>.md</code> file. Taught lessons live here too, with extra weight.</p>
+          </header>
+          <label>Title
+            <input id="hand-title" type="text" placeholder="Notes on bread" />
+          </label>
+          <label>Text
+            <textarea id="hand-text" rows="8" placeholder="Paste a chapter, a diary, a style you want Ember to steal…"></textarea>
+          </label>
+          <div class="actions">
+            <button id="btn-add-text" class="btn">Add to corpus</button>
+            <label class="btn ghost file">
+              Load file
+              <input id="file-input" type="file" accept=".txt,.md,.json" hidden />
+            </label>
+            <button id="btn-alice" class="btn ghost">Load public-domain starter</button>
+          </div>
+        </article>
+      </div>
+
+      <article class="card">
+        <header class="card-h row-h">
+          <div>
+            <h2>Corpus</h2>
+            <p id="corpus-meta">Nothing in the kiln yet.</p>
+          </div>
+          <button id="btn-clear" class="btn ghost danger">Clear all</button>
+        </header>
+        <div id="corpus-list" class="corpus"></div>
+      </article>
+    </section>
+
+    <!-- VESSEL -->
+    <section id="tab-vessel" class="panel">
+      <div class="grid-2">
+        <article class="card">
+          <header class="card-h">
+            <h2>Shape the vessel</h2>
+            <p>A tiny GPT that trains in this browser — phone or laptop. Phone size stays under ~0.3M params so Safari/Chrome won’t melt. Bigger vessels are for desktop only.</p>
+          </header>
+          <div class="presets">
+            <button class="chip on" data-preset="phone">Phone · default</button>
+            <button class="chip" data-preset="tiny">Tiny</button>
+            <button class="chip" data-preset="small">Small</button>
+            <button class="chip" data-preset="medium">Medium · desktop</button>
+          </div>
+          <div class="sliders">
+            <label>Layers <b id="v-layer-n">2</b>
+              <input id="v-layer" type="range" min="2" max="6" step="1" value="2" />
+            </label>
+            <label>Heads <b id="v-head-n">2</b>
+              <input id="v-head" type="range" min="2" max="8" step="1" value="2" />
+            </label>
+            <label>Embedding <b id="v-embd-n">64</b>
+              <input id="v-embd" type="range" min="32" max="256" step="32" value="64" />
+            </label>
+            <label>Context <b id="v-ctx-n">64</b>
+              <input id="v-ctx" type="range" min="32" max="256" step="32" value="64" />
+            </label>
+            <label>Vocab cap <b id="v-vocab-n">1500</b>
+              <input id="v-vocab" type="range" min="500" max="6000" step="250" value="1500" />
+            </label>
+            <label>Dropout <b id="v-drop-n">0.00</b>
+              <input id="v-drop" type="range" min="0" max="0.4" step="0.05" value="0" />
+            </label>
+          </div>
+          <p class="est" id="param-est">≈ 0.2M parameters</p>
+          <div class="actions">
+            <button id="btn-init" class="btn ember">Cast vessel from corpus</button>
+          </div>
+          <p class="hint">Weights, tokenizer, and corpus live in IndexedDB on this phone. Add to Home Screen to keep it. Forage first, then cast. Keep the screen awake while firing.</p>
+        </article>
+        <article class="card">
+          <header class="card-h">
+            <h2>Memory</h2>
+            <p>Checkpoints are snapshots of weights after a firing. Load one to keep talking or keep training.</p>
+          </header>
+          <div class="row">
+            <label>Name
+              <input id="ckpt-name" type="text" placeholder="first-fire" />
+            </label>
+            <button id="btn-save" class="btn">Save</button>
+          </div>
+          <ul id="ckpt-list" class="ckpt"></ul>
+        </article>
+      </div>
+    </section>
+
+    <!-- FIRE -->
+    <section id="tab-fire" class="panel">
+      <div class="grid-2">
+        <article class="card">
+          <header class="card-h">
+            <h2>Firing schedule</h2>
+            <p>Every step runs on this device. The heat chart shows loss; the header pill shows training tok/s (tokens in the batch per second) and generation tok/s when you sample.</p>
+          </header>
+          <div class="row">
+            <label>Steps
+              <input id="t-steps" type="number" min="10" max="5000" value="150" />
+            </label>
+            <label>Batch
+              <input id="t-batch" type="number" min="1" max="16" value="2" />
+            </label>
+            <label>Learning rate
+              <input id="t-lr" type="number" step="0.0001" value="0.0003" />
+            </label>
+          </div>
+          <div class="row">
+            <label>Sample every
+              <input id="t-every" type="number" min="0" max="200" value="25" />
+            </label>
+            <label>Sample prompt
+              <input id="t-prompt" type="text" placeholder="Once upon a time" />
+            </label>
+          </div>
+          <div class="actions">
+            <button id="btn-fire" class="btn ember">Fire</button>
+            <button id="btn-douse" class="btn ghost" disabled>Douse</button>
+          </div>
+        </article>
+        <article class="card chart-card">
+          <header class="card-h">
+            <h2>Heat</h2>
+            <p id="heat-meta">Loss will draw itself here.</p>
+          </header>
+          <canvas id="loss-chart" width="720" height="280"></canvas>
+        </article>
+      </div>
+      <div class="grid-2">
+        <article class="card">
+          <header class="card-h"><h2>Kiln log</h2></header>
+          <pre id="train-log" class="log tall"></pre>
+        </article>
+        <article class="card">
+          <header class="card-h"><h2>Live samples</h2></header>
+          <div id="samples" class="samples"></div>
+        </article>
+      </div>
+    </section>
+
+    <!-- VOICE -->
+    <section id="tab-voice" class="panel">
+      <div class="grid-2">
+        <article class="card">
+          <header class="card-h">
+            <h2>Speak</h2>
+            <p>No refusal layer. Generation tok/s shows above the text. Tiny on-device models still ramble — teach them if you want a specific voice.</p>
+          </header>
+          <label>Prompt
+            <textarea id="gen-prompt" rows="4" placeholder="In Singapore, the best way to…"></textarea>
+          </label>
+          <div class="row">
+            <label>Tokens
+              <input id="gen-tokens" type="number" min="8" max="300" value="80" />
+            </label>
+            <label>Temperature
+              <input id="gen-temp" type="number" step="0.05" min="0.05" max="2" value="0.9" />
+            </label>
+            <label>Top-k
+              <input id="gen-k" type="number" min="0" max="200" value="40" />
+            </label>
+          </div>
+          <div class="actions">
+            <button id="btn-gen" class="btn ember">Generate</button>
+          </div>
+          <div id="gen-out" class="output"></div>
+        </article>
+        <article class="card">
+          <header class="card-h">
+            <h2>Teach by hand</h2>
+            <p>Write how you want Ember to answer. Lessons are stored with extra weight so the next firing leans toward them.</p>
+          </header>
+          <label>When I say
+            <textarea id="teach-prompt" rows="3" placeholder="What is Ember?"></textarea>
+          </label>
+          <label>You should say
+            <textarea id="teach-resp" rows="5" placeholder="Ember is a tiny GPT I train myself on pages I forage from the public web."></textarea>
+          </label>
+          <label>Weight
+            <input id="teach-weight" type="number" min="1" max="30" value="8" />
+          </label>
+          <div class="actions">
+            <button id="btn-teach" class="btn">Commit lesson</button>
+            <button id="btn-teach-from-gen" class="btn ghost">Use last generation as a draft</button>
+          </div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Ember trains a tiny GPT entirely in your browser (WebGL/CPU) — including on a phone. Corpus and checkpoints stay in IndexedDB. No safety fine-tune. Foraging uses public APIs from this device. Keep the screen awake while firing. You are responsible for what you gather and how you use the weights.</p>
+  </footer>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>
