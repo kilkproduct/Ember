@@ -604,10 +604,18 @@ async function exportCkpt(existingName) {
   const how = await downloadBrain(json, filename);
   if (how === "cancelled") {
     notifyInfo("Export cancelled");
+  } else if (how === "error") {
+    notifyError("Export failed", "The file could not be written. Try again, or save a checkpoint on this device instead.");
   } else {
+    const where =
+      how === "shared"
+        ? "sent via share sheet"
+        : how === "saved"
+          ? "saved to the location you picked"
+          : "download started";
     notifySuccess(
       `Brain exported (${fmtBytes(json.length)})`,
-      `${filename} — ${how === "shared" ? "sent via share sheet" : "download started"}. Import it on any device to restore this exact brain.`
+      `${filename} — ${where}. Import it on any device to restore this exact brain.`
     );
   }
 }
@@ -1129,6 +1137,10 @@ function setupInstall() {
   const btn = $("btn-install");
   const hide = $("btn-install-hide");
   if (!bar || !btn) return;
+  if (window.EmberAndroid) {
+    bar.hidden = true; // already running as the installed Android app
+    return;
+  }
   let deferred = null;
   window.addEventListener("beforeinstallprompt", (e) => {
     e.preventDefault();
@@ -1168,7 +1180,9 @@ async function boot() {
   } catch {
     /* ignore */
   }
-  if ("serviceWorker" in navigator) {
+  // In the Android APK every file is already local (assets) and a service
+  // worker can only risk serving stale code — skip it there.
+  if (!window.EmberAndroid && "serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   }
   setupInstall();

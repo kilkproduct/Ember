@@ -1,6 +1,21 @@
 const DB_NAME = "ember-foundry";
 const VERSION = 1;
 
+function newId() {
+  // crypto.randomUUID needs a secure context; plain-http LAN hosting
+  // (e.g. Termux server on a home network) doesn't have one, and
+  // getRandomValues works everywhere.
+  try {
+    if (globalThis.crypto?.randomUUID) return crypto.randomUUID().slice(0, 12);
+  } catch {
+    /* fall through */
+  }
+  const bytes =
+    globalThis.crypto?.getRandomValues?.(new Uint8Array(6)) ||
+    Uint8Array.from({ length: 6 }, () => Math.floor(Math.random() * 256));
+  return [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
 function idb(db, store, mode, fn) {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(store, mode);
@@ -38,7 +53,7 @@ export class Store {
     const text = (doc.text || "").trim();
     if (!text) throw new Error("empty document");
     const row = {
-      id: doc.id || crypto.randomUUID().slice(0, 12),
+      id: doc.id || newId(),
       title: (doc.title || "untitled").slice(0, 240),
       source: doc.source || "manual",
       url: doc.url || "",

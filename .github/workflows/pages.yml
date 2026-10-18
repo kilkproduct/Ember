@@ -2,7 +2,7 @@ name: GitHub Pages
 
 on:
   push:
-    branches: [main, arena/d6275a66-ai]
+    branches: [main, "arena/**"]
   workflow_dispatch:
 
 permissions:

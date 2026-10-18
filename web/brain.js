@@ -283,11 +283,57 @@ export function brainFileName(name, date = new Date()) {
 }
 
 /**
- * Hand the JSON to the user via the Web Share sheet when available
- * (phones), otherwise a normal download. Returns "shared", "downloaded",
- * or "cancelled" so the UI reports what actually happened.
+ * Encode text as UTF-8 and split into base64 chunks whose byte lengths are
+ * multiples of 3, so each chunk decodes independently on the native side.
+ */
+function utf8Base64Chunks(text, chunkBytes = 3 * 16384) {
+  const bytes = new TextEncoder().encode(text);
+  const chunks = [];
+  for (let i = 0; i < bytes.length; i += chunkBytes) {
+    const slice = bytes.subarray(i, i + chunkBytes);
+    let bin = "";
+    for (let j = 0; j < slice.length; j++) bin += String.fromCharCode(slice[j]);
+    chunks.push(btoa(bin));
+  }
+  return chunks;
+}
+
+/**
+ * Save through the Android bridge (MainActivity.EmberBridge): streams the
+ * file to a temp file natively, then opens the system "save as" picker
+ * (ACTION_CREATE_DOCUMENT) so the user picks where the .json lands —
+ * Downloads, Drive, SD card… Resolves via window.__emberSaveResult.
+ */
+async function saveViaAndroidBridge(bridge, json, filename) {
+  const done = new Promise((resolve) => {
+    window.__emberSaveResult = (r) => resolve(r);
+  });
+  try {
+    bridge.saveFileBegin(filename, "application/json");
+    for (const chunk of utf8Base64Chunks(json)) bridge.saveFileChunk(chunk);
+    bridge.saveFileFinish();
+  } catch {
+    delete window.__emberSaveResult;
+    return "error";
+  }
+  const r = await done;
+  delete window.__emberSaveResult;
+  return r === "saved" ? "saved" : r === "cancelled" ? "cancelled" : "error";
+}
+
+/**
+ * Hand the JSON to the user. In the Android APK (WebView) there is no
+ * `navigator.share` and `<a download>` on a blob URL is silently ignored,
+ * so exports go through the native bridge's save picker. In a browser,
+ * use the Web Share sheet when available (phones), else a download.
+ * Returns "shared", "downloaded", "saved", "cancelled", or "error" so
+ * the UI reports what actually happened.
  */
 export async function downloadBrain(json, filename) {
+  const bridge = typeof window !== "undefined" ? window.EmberAndroid : undefined;
+  if (bridge && typeof bridge.saveFileBegin === "function") {
+    return saveViaAndroidBridge(bridge, json, filename);
+  }
   const file = new File([json], filename, { type: "application/json" });
   try {
     if (navigator.canShare?.({ files: [file] })) {

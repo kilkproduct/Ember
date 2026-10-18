@@ -13,6 +13,7 @@ Object.defineProperty(globalThis, "navigator", { value: dom.window.navigator, co
 
 const notify = await import("../web/notify.js");
 const help = await import("../web/help.js");
+const brain = await import("../web/brain.js");
 const doc = globalThis.document;
 
 test("notifications stack, dedupe, badge, and record history", () => {
@@ -79,4 +80,75 @@ test("help buttons are injected next to settings and the popover explains them",
   // clicking again closes it
   btn.click();
   assert.equal(pop.hidden, true);
+});
+
+// --- Android APK bridge paths (WebView has no downloads/notifications) ---
+
+function installFakeBridge(overrides = {}) {
+  const calls = { chunks: [], notify: [] };
+  const bridge = {
+    saveFileBegin(name, mime) {
+      calls.begin = [name, mime];
+      calls.chunks = [];
+    },
+    saveFileChunk(b64) {
+      calls.chunks.push(b64);
+    },
+    saveFileFinish() {
+      setTimeout(() => window.__emberSaveResult?.(overrides.saveResult || "saved"), 0);
+    },
+    notify(title, body) {
+      calls.notify.push([title, body]);
+    },
+    notificationsGranted() {
+      return overrides.granted !== false;
+    },
+    requestNotifications() {
+      setTimeout(() => window.__emberNotifyPerm?.(overrides.perm || "granted"), 0);
+    },
+  };
+  window.EmberAndroid = bridge;
+  return calls;
+}
+
+test("brain export uses the native save bridge in the APK (exact UTF-8 bytes)", async () => {
+  const calls = installFakeBridge();
+  try {
+    const json = JSON.stringify({ note: "bødy ✓ — ünïcödé", n: 42 });
+    const how = await brain.downloadBrain(json, "ember-brain-test.json");
+    assert.equal(how, "saved");
+    assert.deepEqual(calls.begin, ["ember-brain-test.json", "application/json"]);
+    const decoded = Buffer.concat(calls.chunks.map((c) => Buffer.from(c, "base64"))).toString("utf8");
+    assert.equal(decoded, json, "chunked base64 must reassemble to the exact file bytes");
+  } finally {
+    delete window.EmberAndroid;
+  }
+});
+
+test("brain export reports picker cancellation honestly", async () => {
+  installFakeBridge({ saveResult: "cancelled" });
+  try {
+    assert.equal(await brain.downloadBrain("{}", "x.json"), "cancelled");
+  } finally {
+    delete window.EmberAndroid;
+  }
+});
+
+test("osNotify and permission requests go through the APK bridge", async () => {
+  const calls = installFakeBridge();
+  try {
+    assert.equal(await notify.osNotify("Groq is empty", "Local kiln keeps going."), true);
+    assert.deepEqual(calls.notify, [["Groq is empty", "Local kiln keeps going."]]);
+    assert.equal(await notify.requestNotifyPermission(), "granted");
+  } finally {
+    delete window.EmberAndroid;
+  }
+
+  installFakeBridge({ granted: false, perm: "denied" });
+  try {
+    assert.equal(await notify.osNotify("t", "b"), false, "must not claim success when not granted");
+    assert.equal(await notify.requestNotifyPermission(), "denied");
+  } finally {
+    delete window.EmberAndroid;
+  }
 });

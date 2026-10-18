@@ -189,11 +189,40 @@ export const notifyInfo = (t, b) => notify("info", t, b);
 export const notifyWarn = (t, b) => notify("warn", t, b);
 export const notifyError = (t, b) => notify("error", t, b);
 
+/** The Android APK's native bridge, when running inside it. */
+function androidBridge() {
+  try {
+    return typeof window !== "undefined" ? window.EmberAndroid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Ask for OS notification permission. Returns one of:
  * "granted" | "denied" | "default" | "unavailable".
+ * In the Android APK (WebView has no Notification API) this goes through
+ * the native bridge, which runs the real Android permission flow and
+ * calls back via window.__emberNotifyPerm.
  */
 export async function requestNotifyPermission() {
+  const bridge = androidBridge();
+  if (bridge && typeof bridge.requestNotifications === "function") {
+    try {
+      if (typeof bridge.notificationsGranted === "function" && bridge.notificationsGranted()) {
+        return "granted";
+      }
+      const done = new Promise((resolve) => {
+        window.__emberNotifyPerm = (r) => resolve(r);
+      });
+      bridge.requestNotifications();
+      const r = await done;
+      delete window.__emberNotifyPerm;
+      return r === "granted" ? "granted" : "denied";
+    } catch {
+      return "unavailable";
+    }
+  }
   try {
     if (!("Notification" in window)) return "unavailable";
     if (Notification.permission === "granted") return "granted";
@@ -205,11 +234,24 @@ export async function requestNotifyPermission() {
 }
 
 /**
- * Best-effort OS-level notification. Prefers the service worker (works on
- * Android/PWA), falls back to the Notification constructor (desktop).
- * Returns true if an OS notification was actually shown.
+ * Best-effort OS-level notification. In the APK: native bridge. In a
+ * browser: service worker first (works on Android/PWA), then the
+ * Notification constructor (desktop). Returns true if an OS
+ * notification was actually shown.
  */
 export async function osNotify(title, body = "") {
+  const bridge = androidBridge();
+  if (bridge && typeof bridge.notify === "function") {
+    try {
+      if (typeof bridge.notificationsGranted === "function" && !bridge.notificationsGranted()) {
+        return false;
+      }
+      bridge.notify(String(title), String(body));
+      return true;
+    } catch {
+      return false;
+    }
+  }
   try {
     if (!("Notification" in window) || Notification.permission !== "granted") return false;
     if ("serviceWorker" in navigator) {
