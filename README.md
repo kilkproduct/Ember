@@ -15,6 +15,29 @@ This is not a chat product with a hidden API. The weights are yours. A 1M-parame
 
 ## Run
 
+### No PC (phone only)
+
+You do **not** need a computer. Training already happens in the browser.
+
+**Easiest:** open a hosted copy of Ember on the phone (GitHub Pages after this repo is published, or any link that serves the `web/` folder). Then **Add to Home Screen**.
+
+**Android, fully offline host:** install [Termux](https://termux.dev) from F-Droid, then:
+
+```bash
+pkg update && pkg install git python
+git clone https://github.com/kilkproduct/AI.git
+cd AI
+git checkout arena/d6275a66-ai
+pip install -r requirements.txt
+python -m uvicorn ember.server:app --host 0.0.0.0 --port 8000
+```
+
+Open `http://127.0.0.1:8000` in Chrome on that same phone.
+
+**iPhone:** Safari cannot run a Python server. Use a hosted URL (GitHub Pages, or a friend/cloud link). Add to Home Screen. Keep the screen awake while firing.
+
+### With a computer
+
 ```bash
 python -m venv .venv
 source .venv/bin/activate

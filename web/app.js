@@ -1,7 +1,7 @@
-import { createForager, STARTER } from "/static/scrape.js";
-import { openStore } from "/static/store.js";
-import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "/static/engine.js";
-import { Tokenizer } from "/static/tokenizer.js";
+import { createForager, STARTER } from "./scrape.js";
+import { openStore } from "./store.js";
+import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
+import { Tokenizer } from "./tokenizer.js";
 
 const $ = (id) => document.getElementById(id);
 const isPhone =

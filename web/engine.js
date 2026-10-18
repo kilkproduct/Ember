@@ -1,4 +1,4 @@
-import { Tokenizer } from "/static/tokenizer.js";
+import { Tokenizer } from "./tokenizer.js";
 
 function gelu(x) {
   // tanh GELU, fully differentiable in tfjs
