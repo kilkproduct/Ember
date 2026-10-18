@@ -18,6 +18,7 @@
 </head>
 <body>
   <div class="grain" aria-hidden="true"></div>
+  <div id="toast" class="toast" hidden></div>
   <div id="install-bar" class="install-bar" hidden>
     <span>Install Ember as an app so you can train without Termux next time.</span>
     <button id="btn-install" class="btn ember" type="button">Install</button>
@@ -46,6 +47,7 @@
 
   <nav class="tabs" role="tablist">
     <button class="tab on" data-tab="fuel" role="tab">Fuel</button>
+    <button class="tab" data-tab="teachers" role="tab">Teachers</button>
     <button class="tab" data-tab="vessel" role="tab">Vessel</button>
     <button class="tab" data-tab="fire" role="tab">Fire</button>
     <button class="tab" data-tab="voice" role="tab">Voice</button>
@@ -94,6 +96,7 @@
             <label class="chk"><input id="src-hn" type="checkbox" checked /> Hacker News</label>
             <label class="chk"><input id="src-wander" type="checkbox" checked /> Follow wiki links &amp; categories</label>
             <label class="chk"><input id="src-autopilot" type="checkbox" checked /> Autopilot (never stop)</label>
+            <label class="chk"><input id="src-autofire" type="checkbox" /> Auto-fire locally after each forage pass</label>
           </div>
           <div class="actions">
             <button id="btn-forage" class="btn ember">Start foraging</button>
@@ -134,6 +137,37 @@
         </header>
         <div id="corpus-list" class="corpus"></div>
       </article>
+    </section>
+
+    <!-- TEACHERS -->
+    <section id="tab-teachers" class="panel">
+      <article class="card">
+        <header class="card-h">
+          <h2>Cloud teachers</h2>
+          <p>These AIs <b>write fuel</b> on cloud GPUs / LPUs. Ember still <b>trains on this phone</b>. Each teacher has its own switch and usage window. When credits or the window run out, that switch flips off, you get a notification, and local firing continues.</p>
+        </header>
+        <div class="row">
+          <label>Usage window default
+            <select id="teach-window-default">
+              <option value="daily">Daily</option>
+              <option value="5h">5 hours</option>
+              <option value="12h">12 hours</option>
+              <option value="weekly">Weekly</option>
+              <option value="monthly">Monthly</option>
+              <option value="session">This session</option>
+            </select>
+          </label>
+          <label class="chk" style="margin-top:1.6rem"><input id="teach-notify" type="checkbox" checked /> Notify when a teacher is empty</label>
+        </div>
+        <div class="actions">
+          <button id="btn-teach-run" class="btn ember">Auto-teach (use enabled teachers)</button>
+          <button id="btn-teach-stop" class="btn ghost" disabled>Stop teachers</button>
+          <button id="btn-notify-perm" class="btn ghost">Allow notifications</button>
+        </div>
+        <p class="hint">Keys never leave this device. Many providers block browser CORS — if a teacher errors, that is usually CORS or a missing free key, not Ember training.</p>
+        <pre id="teach-log" class="log" aria-live="polite"></pre>
+      </article>
+      <div id="teacher-grid" class="teacher-grid"></div>
     </section>
 
     <!-- VESSEL -->
@@ -195,6 +229,24 @@
             </label>
           </div>
           <ul id="ckpt-list" class="ckpt"></ul>
+          <header class="card-h" style="margin-top:1rem">
+            <h2>GitHub vault</h2>
+            <p>Optional. Private repo, read-only token to pull, write token only if you tap Push. Ember checks SHA so it won’t re-download the same brain.</p>
+          </header>
+          <label>Repo <span class="opt">owner/name</span>
+            <input id="gh-repo" type="text" placeholder="kilkproduct/AI" />
+          </label>
+          <label>Path
+            <input id="gh-path" type="text" placeholder="brains/ember.json" />
+          </label>
+          <label>Token <span class="opt">fine-grained PAT, stored only on this device</span>
+            <input id="gh-token" type="password" autocomplete="off" placeholder="github_pat_…" />
+          </label>
+          <label class="chk"><input id="gh-pull-start" type="checkbox" /> Pull on start if SHA changed</label>
+          <div class="actions">
+            <button id="btn-gh-pull" class="btn">Pull brain</button>
+            <button id="btn-gh-push" class="btn ghost">Push brain</button>
+          </div>
         </article>
       </div>
     </section>
@@ -271,6 +323,9 @@
             </label>
             <label>Top-k
               <input id="gen-k" type="number" min="0" max="200" value="40" />
+            </label>
+            <label>Top-p
+              <input id="gen-p" type="number" step="0.05" min="0" max="1" value="0.95" />
             </label>
           </div>
           <div class="actions">

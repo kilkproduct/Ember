@@ -8,6 +8,8 @@ const SHELL = [
   "./tokenizer.js",
   "./store.js",
   "./scrape.js",
+  "./teachers.js",
+  "./github.js",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",

@@ -30,13 +30,17 @@ export class Tokenizer {
     }
   }
 
+  get docId() {
+    return 4;
+  }
+
   train(texts, vocabSize = 1500) {
     this.idToToken = [...SPECIAL];
     this.tokenToId = Object.fromEntries(SPECIAL.map((t, i) => [t, i]));
     const chars = new Set();
     const counts = new Map();
     for (const text of texts) {
-      for (const ch of text) chars.add(ch);
+      for (const ch of text) if (ch !== "\0") chars.add(ch);
       for (const tok of text.match(TOKEN_RE) || []) {
         counts.set(tok, (counts.get(tok) || 0) + 1);
       }
@@ -45,9 +49,10 @@ export class Tokenizer {
     const remaining = Math.max(0, vocabSize - this.vocabSize);
     const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
     let left = remaining;
-    for (const [tok] of ranked) {
+    for (const [tok, n] of ranked) {
       if (left <= 0) break;
       if (tok.length < 2 || this.tokenToId[tok] != null) continue;
+      if (n < 2 && tok.length > 12) continue;
       this._add(tok);
       left -= 1;
     }

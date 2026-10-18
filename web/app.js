@@ -2,6 +2,8 @@ import { createForager, STARTER } from "./scrape.js";
 import { openStore } from "./store.js";
 import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
 import { Tokenizer } from "./tokenizer.js";
+import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
+import { githubPull, githubPush, githubHead } from "./github.js";
 
 const $ = (id) => document.getElementById(id);
 const isPhone =
@@ -23,6 +25,7 @@ const state = {
   store: null,
   trainer: new DeviceTrainer(),
   checkpoints: [],
+  desk: null,
 };
 
 function logEl(el, line) {
@@ -276,6 +279,11 @@ $("btn-forage").addEventListener("click", async () => {
     do {
       const result = await forager.forageOnce({ ...optsBase(), seeds });
       await refresh();
+      if ($("src-autofire")?.checked && state.trainer.ready && !state.firing) {
+        logEl($("forage-log"), "auto-fire 40 steps on new fuel");
+        $("t-steps").value = 40;
+        $("btn-fire").click();
+      }
       if (!$("src-autopilot").checked || state.forageStop) break;
       if (result.extraTopics.length) {
         seeds = result.extraTopics.slice(0, 6).join(", ");
@@ -313,6 +321,9 @@ $("btn-init").addEventListener("click", async () => {
   if (!stats.documents) {
     alert("Forage or paste some text first.");
     return;
+  }
+  if (state.trainer.ready && state.trainer.step > 0) {
+    if (!confirm("Casting again wipes the current brain. Export first. Continue?")) return;
   }
   $("btn-init").disabled = true;
   $("btn-init").textContent = "Casting…";
@@ -476,7 +487,9 @@ $("btn-fire").addEventListener("click", async () => {
   const batch = Math.max(1, Math.min(isPhone ? 8 : 32, +$("t-batch").value));
   const every = +$("t-every").value;
   const until = state.trainer.step + steps;
-  logEl($("train-log"), `fire ${steps} steps · batch ${batch} · ${tf.getBackend()}`);
+  state.trainer.baseLr = +$("t-lr").value || 3e-4;
+  state.trainer.setSchedule(until);
+  logEl($("train-log"), `fire ${steps} steps · batch ${batch} · cosine LR · ${tf.getBackend()}`);
   try {
     while (!state.stopTrain && state.trainer.step < until) {
       const m = await state.trainer.trainStep(batch);
@@ -484,12 +497,26 @@ $("btn-fire").addEventListener("click", async () => {
       if (state.losses.length > 400) state.losses.shift();
       drawChart();
       $("heat-meta").textContent =
-        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)} · best ${m.best_loss.toFixed(3)} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)}`;
+        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)} · ema ${m.ema.toFixed(3)} · best ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)}`;
       $("pill-speed").textContent = `train ${fmtTps(m.train_tps)}`;
       $("pill-fire").textContent = `firing ${m.step}/${until}`;
-      if (m.step % 5 === 0) logEl($("train-log"), `step ${m.step}  loss ${m.loss.toFixed(4)}  ${fmtTps(m.train_tps)}`);
+      if (m.step % 5 === 0) logEl($("train-log"), `step ${m.step}  loss ${m.loss.toFixed(4)}  ema ${m.ema.toFixed(4)}  ${fmtTps(m.train_tps)}`);
+      if (m.step % 50 === 0) {
+        try {
+          await saveCkpt();
+          logEl($("train-log"), `auto-saved checkpoint at step ${m.step}`);
+        } catch {
+          /* ignore */
+        }
+      }
       if (every && m.step % every === 0) {
-        const sample = await state.trainer.generate($("t-prompt").value, { maxNew: 40, temperature: 0.9, topK: 40 });
+        const sample = await state.trainer.generate($("t-prompt").value, {
+          maxNew: 40,
+          temperature: 0.9,
+          topK: 40,
+          topP: 0.95,
+          repetition: 1.15,
+        });
         const box = document.createElement("div");
         box.className = "sample";
         const s = document.createElement("span");
@@ -526,6 +553,8 @@ $("btn-gen").addEventListener("click", async () => {
       maxNew: +$("gen-tokens").value,
       temperature: +$("gen-temp").value,
       topK: +$("gen-k").value,
+      topP: +($("gen-p")?.value || 0.95),
+      repetition: 1.15,
     });
     state.lastGeneration = out.text;
     $("gen-out").innerHTML = "";
@@ -567,6 +596,195 @@ $("btn-teach-from-gen").addEventListener("click", () => {
   $("teach-prompt").value = $("gen-prompt").value;
   $("teach-resp").value = state.lastGeneration;
 });
+
+function toast(msg) {
+  const el = $("toast");
+  if (!el) return;
+  el.hidden = false;
+  el.textContent = msg;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => {
+    el.hidden = true;
+  }, 6000);
+}
+
+function renderTeachers() {
+  const grid = $("teacher-grid");
+  if (!grid || !state.desk) return;
+  grid.innerHTML = "";
+  const defWin = $("teach-window-default")?.value || "daily";
+  for (const t of TEACHERS) {
+    const s = state.desk.state[t.id];
+    state.desk._rollWindow(t.id);
+    const card = document.createElement("article");
+    card.className = "teacher" + (s.exhausted ? " dead" : "");
+    const sw = document.createElement("label");
+    sw.className = "switch";
+    const title = document.createElement("h3");
+    title.textContent = t.name;
+    const tog = document.createElement("input");
+    tog.type = "checkbox";
+    tog.checked = !!s.on && !s.exhausted;
+    tog.addEventListener("change", () => state.desk.setOn(t.id, tog.checked).then(renderTeachers));
+    sw.append(title, tog);
+    const compute = document.createElement("div");
+    compute.className = "compute";
+    compute.textContent = t.compute;
+    const hint = document.createElement("p");
+    hint.className = "hint";
+    hint.textContent = t.hint;
+    const win = document.createElement("label");
+    win.textContent = "Window";
+    const sel = document.createElement("select");
+    for (const w of WINDOWS) {
+      const o = document.createElement("option");
+      o.value = w.id;
+      o.textContent = w.label;
+      if (s.window === w.id) o.selected = true;
+      sel.appendChild(o);
+    }
+    sel.addEventListener("change", async () => {
+      s.window = sel.value;
+      s.resetAt = 0;
+      state.desk._rollWindow(t.id);
+      await state.desk.save();
+      renderTeachers();
+    });
+    win.appendChild(sel);
+    const max = document.createElement("label");
+    max.textContent = "Max calls / window";
+    const maxIn = document.createElement("input");
+    maxIn.type = "number";
+    maxIn.min = "1";
+    maxIn.max = "500";
+    maxIn.value = s.max;
+    maxIn.addEventListener("change", async () => {
+      s.max = Math.max(1, +maxIn.value || t.defaultMax);
+      await state.desk.save();
+      renderTeachers();
+    });
+    max.appendChild(maxIn);
+    card.append(sw, compute, hint, win, max);
+    for (const field of t.needs) {
+      const lab = document.createElement("label");
+      lab.textContent = field === "accountId" ? "Account ID" : "API token";
+      const inp = document.createElement("input");
+      inp.type = field === "token" ? "password" : "text";
+      inp.autocomplete = "off";
+      inp.value = s[field] || "";
+      inp.placeholder = field === "token" ? "paste free-tier key" : "Cloudflare account id";
+      inp.addEventListener("change", async () => {
+        s[field] = inp.value.trim();
+        await state.desk.save();
+      });
+      lab.appendChild(inp);
+      card.appendChild(lab);
+    }
+    const used = document.createElement("div");
+    used.className = "used";
+    const left = state.desk.remaining(t.id);
+    const until = s.resetAt ? new Date(s.resetAt).toLocaleString() : "—";
+    used.textContent = s.exhausted
+      ? `empty · ${s.lastError || "no credits"} · resets ${until}`
+      : `${s.used || 0}/${s.max} used · ${left} left · reset ${until}`;
+    card.appendChild(used);
+    grid.appendChild(card);
+  }
+  if (defWin) {
+    /* default select only applies to new toggles via change handler on the default dropdown */
+  }
+}
+
+$("teach-window-default")?.addEventListener("change", async () => {
+  const w = $("teach-window-default").value;
+  for (const t of TEACHERS) {
+    if (!state.desk.state[t.id].on) state.desk.state[t.id].window = w;
+  }
+  await state.desk.save();
+  renderTeachers();
+});
+
+$("btn-notify-perm")?.addEventListener("click", async () => {
+  try {
+    const p = await Notification.requestPermission();
+    toast(p === "granted" ? "Notifications on" : "Notifications blocked");
+  } catch {
+    toast("Notifications not available in this browser");
+  }
+});
+
+$("btn-teach-run")?.addEventListener("click", async () => {
+  if (!state.desk) return;
+  $("btn-teach-run").disabled = true;
+  $("btn-teach-stop").disabled = false;
+  await state.desk.runLoop(() => $("seeds").value);
+  $("btn-teach-run").disabled = false;
+  $("btn-teach-stop").disabled = true;
+  refresh();
+});
+
+$("btn-teach-stop")?.addEventListener("click", () => {
+  if (state.desk) state.desk.stop = true;
+});
+
+function ghSettings() {
+  return {
+    repo: $("gh-repo")?.value.trim() || "",
+    path: $("gh-path")?.value.trim() || "brains/ember.json",
+    token: $("gh-token")?.value.trim() || "",
+    pullStart: !!$("gh-pull-start")?.checked,
+  };
+}
+
+async function saveGhSettings() {
+  if (!state.store) return;
+  await state.store.setKv("github", ghSettings());
+}
+
+async function loadGhSettings() {
+  const s = await state.store.getKv("github");
+  if (!s) return;
+  if ($("gh-repo")) $("gh-repo").value = s.repo || "";
+  if ($("gh-path")) $("gh-path").value = s.path || "brains/ember.json";
+  if ($("gh-token")) $("gh-token").value = s.token || "";
+  if ($("gh-pull-start")) $("gh-pull-start").checked = !!s.pullStart;
+}
+
+async function pullGithubBrain() {
+  const { repo, path, token } = ghSettings();
+  const [owner, name] = repo.split("/");
+  if (!owner || !name || !token) throw new Error("Set owner/repo, path, and token.");
+  const localSha = (await state.store.getKv("github-sha")) || null;
+  const head = await githubHead(owner, name, path, token);
+  if (head.sha && head.sha === localSha && state.trainer.ready) {
+    toast("GitHub brain already up to date");
+    return;
+  }
+  const { sha, brain } = await githubPull(owner, name, path, token);
+  if (!brain) throw new Error("No file at that path yet. Push first.");
+  await applyBrain(brain);
+  await state.store.setKv(`ckpt:${brain.name || "github"}`, brain);
+  await state.store.setKv("github-sha", sha);
+  await refresh();
+  toast("Pulled brain from GitHub");
+}
+
+async function pushGithubBrain() {
+  const pack = await packBrain();
+  const { repo, path, token } = ghSettings();
+  const [owner, name] = repo.split("/");
+  if (!owner || !name || !token) throw new Error("Set owner/repo, path, and token.");
+  const head = await githubHead(owner, name, path, token);
+  const sha = await githubPush(owner, name, path, token, pack, head.sha);
+  await state.store.setKv("github-sha", sha);
+  toast("Pushed brain to GitHub");
+}
+
+["gh-repo", "gh-path", "gh-token", "gh-pull-start"].forEach((id) => {
+  $(id)?.addEventListener("change", () => saveGhSettings().catch(() => {}));
+});
+$("btn-gh-pull")?.addEventListener("click", () => pullGithubBrain().catch((e) => alert(e.message)));
+$("btn-gh-push")?.addEventListener("click", () => pushGithubBrain().catch((e) => alert(e.message)));
 
 function setupInstall() {
   const bar = $("install-bar");
@@ -612,6 +830,17 @@ async function boot() {
   }
   setupInstall();
   state.store = await openStore();
+  state.desk = new TeacherDesk(state.store, {
+    onLog: (line) => logEl($("teach-log"), line),
+    onDoc: (doc) => state.store.addDoc(doc),
+    onExhaust: ({ name, why }) => {
+      if ($("teach-notify")?.checked) toast(`${name}: ${why}`);
+      renderTeachers();
+    },
+    onStatus: () => renderTeachers(),
+  });
+  await state.desk.load();
+  renderTeachers();
   let backend;
   try {
     backend = await initBackend();
@@ -627,6 +856,14 @@ async function boot() {
   }
   paramEstimate();
   await refresh();
+  await loadGhSettings();
+  if ($("gh-pull-start")?.checked) {
+    try {
+      await pullGithubBrain();
+    } catch (e) {
+      console.warn(e);
+    }
+  }
 }
 
 boot().catch((e) => console.warn(e));
