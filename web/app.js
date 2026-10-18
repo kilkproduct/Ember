@@ -84,11 +84,17 @@ function renderCkpts() {
     const li = document.createElement("li");
     const name = document.createElement("span");
     name.textContent = `${c.name}  (${Math.max(1, Math.round(c.bytes / 1024))} kb)`;
+    const actions = document.createElement("span");
     const load = document.createElement("button");
     load.className = "btn ghost";
     load.textContent = "Load";
     load.addEventListener("click", () => loadCkpt(c.name));
-    li.append(name, load);
+    const exp = document.createElement("button");
+    exp.className = "btn ghost";
+    exp.textContent = "Export";
+    exp.addEventListener("click", () => exportCkpt(c.name).catch((e) => alert(e.message)));
+    actions.append(load, exp);
+    li.append(name, actions);
     ul.appendChild(li);
   }
 }
@@ -330,29 +336,36 @@ $("btn-init").addEventListener("click", async () => {
   }
 });
 
-async function saveCkpt() {
-  if (!state.trainer.model) {
-    alert("Nothing to save.");
-    return;
-  }
-  const name = ($("ckpt-name").value.trim() || `step-${state.trainer.step}`).slice(0, 80);
+async function packBrain(name) {
+  if (!state.trainer.model) throw new Error("Nothing to export. Cast and fire first.");
   const weights = await state.trainer.model.getWeights();
-  const blob = {
+  const stats = await state.store.stats();
+  const pack = {
+    kind: "ember-brain-v1",
+    name: (name || $("ckpt-name").value.trim() || `step-${state.trainer.step}`).slice(0, 80),
     cfg: state.trainer.cfg,
     step: state.trainer.step,
     bestLoss: state.trainer.bestLoss,
     tokenizer: state.trainer.tokenizer.toJSON(),
     weights,
+    corpus: (stats.docs || []).map((d) => ({
+      title: d.title,
+      text: d.text,
+      source: d.source,
+      url: d.url,
+      weight: d.weight,
+      kind: d.kind,
+    })),
     mtime: Date.now(),
   };
-  blob.bytes = JSON.stringify(blob).length;
-  await state.store.setKv(`ckpt:${name}`, blob);
-  refresh();
+  pack.bytes = JSON.stringify(pack).length;
+  return pack;
 }
 
-async function loadCkpt(name) {
-  const blob = await state.store.getKv(`ckpt:${name}`);
-  if (!blob) return alert("missing checkpoint");
+async function applyBrain(blob) {
+  if (!blob?.weights || !blob?.cfg || !blob?.tokenizer) {
+    throw new Error("Not an Ember brain file.");
+  }
   if (state.trainer.model) state.trainer.model.dispose();
   state.trainer.cfg = blob.cfg;
   state.trainer.tokenizer = Tokenizer.fromJSON(blob.tokenizer);
@@ -364,12 +377,88 @@ async function loadCkpt(name) {
   state.trainer.bestLoss = blob.bestLoss || Infinity;
   state.trainer.ready = true;
   state.trainer.backend = tf.getBackend();
+  if (Array.isArray(blob.corpus)) {
+    for (const d of blob.corpus) {
+      try {
+        await state.store.addDoc(d);
+      } catch {
+        /* skip empty */
+      }
+    }
+  }
   const stats = await state.store.stats();
   state.trainer.refreshCorpus(corpusTexts(stats.docs || []));
   renderModelPills();
 }
 
+async function saveCkpt() {
+  const pack = await packBrain();
+  await state.store.setKv(`ckpt:${pack.name}`, pack);
+  refresh();
+}
+
+async function loadCkpt(name) {
+  const blob = await state.store.getKv(`ckpt:${name}`);
+  if (!blob) return alert("missing checkpoint");
+  await applyBrain(blob);
+}
+
+async function shareOrDownload(pack) {
+  const json = JSON.stringify(pack);
+  const filename = `ember-${pack.name || "brain"}.json`;
+  const file = new File([json], filename, { type: "application/json" });
+  try {
+    if (navigator.canShare?.({ files: [file] })) {
+      await navigator.share({
+        files: [file],
+        title: "Ember brain",
+        text: "Ember checkpoint — import this on another device.",
+      });
+      return;
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+  }
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
+  a.download = filename;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+async function exportCkpt(existingName) {
+  let pack;
+  if (existingName) {
+    pack = await state.store.getKv(`ckpt:${existingName}`);
+    if (!pack) throw new Error("missing checkpoint");
+  } else {
+    pack = await packBrain();
+    await state.store.setKv(`ckpt:${pack.name}`, pack);
+  }
+  await shareOrDownload(pack);
+  refresh();
+}
+
 $("btn-save").addEventListener("click", () => saveCkpt().catch((e) => alert(e.message)));
+$("btn-export").addEventListener("click", () => exportCkpt().catch((e) => alert(e.message)));
+$("ckpt-import").addEventListener("change", async (e) => {
+  const file = e.target.files?.[0];
+  e.target.value = "";
+  if (!file) return;
+  try {
+    const blob = JSON.parse(await file.text());
+    await applyBrain(blob);
+    const name = (blob.name || file.name.replace(/\.json$/i, "")).slice(0, 80);
+    blob.name = name;
+    blob.mtime = Date.now();
+    blob.bytes = JSON.stringify(blob).length;
+    await state.store.setKv(`ckpt:${name}`, blob);
+    await refresh();
+    alert("Brain imported. You can generate without retraining.");
+  } catch (err) {
+    alert(err.message || "Could not import that file.");
+  }
+});
 
 $("btn-fire").addEventListener("click", async () => {
   if (!state.trainer.ready) {
@@ -479,12 +568,49 @@ $("btn-teach-from-gen").addEventListener("click", () => {
   $("teach-resp").value = state.lastGeneration;
 });
 
+function setupInstall() {
+  const bar = $("install-bar");
+  const btn = $("btn-install");
+  const hide = $("btn-install-hide");
+  if (!bar || !btn) return;
+  let deferred = null;
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault();
+    deferred = e;
+    bar.hidden = false;
+  });
+  btn.addEventListener("click", async () => {
+    if (deferred) {
+      deferred.prompt();
+      await deferred.userChoice;
+      deferred = null;
+      bar.hidden = true;
+      return;
+    }
+    alert(
+      "Chrome: menu ⋮ → Add to Home screen / Install app.\nSafari: Share → Add to Home Screen.\nAfter that, open the Ember icon — Termux does not need to be running."
+    );
+  });
+  hide.addEventListener("click", () => {
+    bar.hidden = true;
+  });
+  if (window.matchMedia("(display-mode: standalone)").matches) {
+    bar.hidden = true;
+  } else if (isPhone) {
+    bar.hidden = false;
+  }
+}
+
 async function boot() {
   try {
     if (navigator.storage?.persist) await navigator.storage.persist();
   } catch {
     /* ignore */
   }
+  if ("serviceWorker" in navigator) {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  }
+  setupInstall();
   state.store = await openStore();
   let backend;
   try {

@@ -1,11 +1,5 @@
 #!/usr/bin/env bash
 set -euo pipefail
-cd "$(dirname "$0")"
-if [[ -x /tmp/ember-venv/bin/python ]]; then
-  PY=/tmp/ember-venv/bin/python
-elif [[ -x .venv/bin/python ]]; then
-  PY=.venv/bin/python
-else
-  PY=python3
-fi
-exec "$PY" -m uvicorn ember.server:app --host 0.0.0.0 --port 8000
+cd "$(dirname "$0")/web"
+# Static app — no FastAPI/pydantic needed (those fail to build on Termux/Android).
+exec python3 -m http.server 8000 --bind 0.0.0.0

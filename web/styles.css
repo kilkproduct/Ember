@@ -36,7 +36,23 @@ body {
   z-index: 0;
 }
 
-.top, .tabs, main, .foot { position: relative; z-index: 1; }
+.top, .tabs, main, .foot, .install-bar { position: relative; z-index: 1; }
+
+.install-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  align-items: center;
+  margin: 0.8rem 1.8rem 0;
+  padding: 0.7rem 0.9rem;
+  background: #2a231e;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  font-size: 0.88rem;
+  color: var(--ink);
+}
+.install-bar[hidden] { display: none; }
+.install-bar span { flex: 1; min-width: 12rem; }
 
 .top {
   display: flex;
