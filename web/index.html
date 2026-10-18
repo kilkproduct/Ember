@@ -9,6 +9,7 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <title>Ember — Small Language Foundry</title>
   <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,700&family=IBM+Plex+Mono:wght@400;500&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -17,6 +18,11 @@
 </head>
 <body>
   <div class="grain" aria-hidden="true"></div>
+  <div id="install-bar" class="install-bar" hidden>
+    <span>Install Ember as an app so you can train without Termux next time.</span>
+    <button id="btn-install" class="btn ember" type="button">Install</button>
+    <button id="btn-install-hide" class="btn ghost" type="button">Later</button>
+  </div>
   <header class="top">
     <div class="brand">
       <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
@@ -173,13 +179,20 @@
         <article class="card">
           <header class="card-h">
             <h2>Memory</h2>
-            <p>Checkpoints are snapshots of weights after a firing. Load one to keep talking or keep training.</p>
+            <p>Save on this phone, or <b>export</b> a file to Drive / iCloud / Files and <b>import</b> it on another device so you don’t retrain.</p>
           </header>
           <div class="row">
             <label>Name
               <input id="ckpt-name" type="text" placeholder="first-fire" />
             </label>
-            <button id="btn-save" class="btn">Save</button>
+            <button id="btn-save" class="btn">Save here</button>
+          </div>
+          <div class="actions">
+            <button id="btn-export" class="btn ember">Export to file / cloud</button>
+            <label class="btn ghost file">
+              Import file
+              <input id="ckpt-import" type="file" accept="application/json,.json" hidden />
+            </label>
           </div>
           <ul id="ckpt-list" class="ckpt"></ul>
         </article>
@@ -291,7 +304,7 @@
   <footer class="foot">
     <p>Ember trains a tiny GPT entirely in your browser (WebGL/CPU) — including on a phone. Corpus and checkpoints stay in IndexedDB. No safety fine-tune. Foraging uses public APIs from this device. Keep the screen awake while firing. You are responsible for what you gather and how you use the weights.</p>
   </footer>
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="vendor/tf.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

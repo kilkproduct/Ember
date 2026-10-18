@@ -15,7 +15,18 @@ This is not a chat product with a hidden API. The weights are yours. A 1M-parame
 
 ## Run
 
-### No PC (phone only)
+### Android APK (no PC, no website)
+
+The app is a **self-contained APK**. It is not hosted. GitHub only *compiles* it; you install the file on the phone.
+
+1. Phone browser, logged into GitHub → this repo → **Actions** → **Build APK** → **Run workflow**.
+2. Wait until the green check appears.
+3. Open that run → **Artifacts** → **Ember** → download the zip → unzip → tap `app-debug.apk`.
+4. Allow **Install unknown apps** for Chrome/Files if Android asks.
+
+After that, open **Ember** like any app. Termux is not required. Forage still needs internet; training does not.
+
+### No PC (phone only, without APK)
 
 You do **not** need a computer. Training already happens in the browser.
 
@@ -28,9 +39,11 @@ pkg update && pkg install git python
 git clone https://github.com/kilkproduct/AI.git
 cd AI
 git checkout arena/d6275a66-ai
-pip install -r requirements.txt
-python -m uvicorn ember.server:app --host 0.0.0.0 --port 8000
+cd web
+python -m http.server 8000 --bind 0.0.0.0
 ```
+
+Do **not** `pip install -r requirements.txt` on Termux — FastAPI/Pydantic try to compile Rust and fail on Android. The app is static files; Python’s built-in server is enough.
 
 Open `http://127.0.0.1:8000` in Chrome on that same phone.
 
