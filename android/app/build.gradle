@@ -1,0 +1,43 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.kilkproduct.ember"
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.kilkproduct.ember"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "0.2.0"
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+}
+
+dependencies {
+    implementation "androidx.webkit:webkit:1.11.0"
+}
+
+def webDir = rootProject.file("../web")
+tasks.register("copyWeb", Copy) {
+    from webDir
+    into "src/main/assets/www"
+    exclude "**/*.map"
+}
+preBuild.dependsOn copyWeb
