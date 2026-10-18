@@ -33,8 +33,11 @@ export async function githubPull(owner, repo, path, token) {
 
 export async function githubPush(owner, repo, path, token, brain, sha) {
   const content = btoa(unescape(encodeURIComponent(JSON.stringify(brain))));
+  // v2 brains keep name/step under metadata/training_state; v1 had them flat.
+  const bName = brain.metadata?.name || brain.name || "";
+  const bStep = brain.training_state?.step ?? brain.step ?? 0;
   const body = {
-    message: `ember brain ${brain.name || ""} step ${brain.step || 0}`.trim(),
+    message: `ember brain ${bName} step ${bStep}`.trim(),
     content,
     sha: sha || undefined,
   };

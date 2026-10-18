@@ -1,0 +1,13 @@
+{
+  "name": "ember-tests",
+  "private": true,
+  "type": "module",
+  "description": "Node tests for the Ember browser engine. Run: npm install && npm test",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.22.0",
+    "jsdom": "^25.0.0"
+  }
+}

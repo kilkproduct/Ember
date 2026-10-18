@@ -5,6 +5,7 @@ export class Tokenizer {
   constructor() {
     this.idToToken = [...SPECIAL];
     this.tokenToId = Object.fromEntries(SPECIAL.map((t, i) => [t, i]));
+    this._maxTokLen = 1;
   }
 
   get vocabSize() {
@@ -22,21 +23,30 @@ export class Tokenizer {
   get eosId() {
     return 3;
   }
+  get docId() {
+    return 4;
+  }
 
   _add(tok) {
     if (this.tokenToId[tok] == null) {
       this.tokenToId[tok] = this.idToToken.length;
       this.idToToken.push(tok);
+      if (tok.length > this._maxTokLen) this._maxTokLen = tok.length;
     }
   }
 
-  get docId() {
-    return 4;
+  _reindex() {
+    this.tokenToId = Object.fromEntries(this.idToToken.map((tok, i) => [tok, i]));
+    this._maxTokLen = 1;
+    for (const tok of this.idToToken) {
+      if (tok.length > this._maxTokLen) this._maxTokLen = tok.length;
+    }
   }
 
   train(texts, vocabSize = 1500) {
     this.idToToken = [...SPECIAL];
     this.tokenToId = Object.fromEntries(SPECIAL.map((t, i) => [t, i]));
+    this._maxTokLen = 1;
     const chars = new Set();
     const counts = new Map();
     for (const text of texts) {
@@ -61,11 +71,37 @@ export class Tokenizer {
   encode(text) {
     const ids = [];
     for (const tok of text.match(TOKEN_RE) || []) {
-      if (this.tokenToId[tok] != null) {
-        ids.push(this.tokenToId[tok]);
+      const whole = this.tokenToId[tok];
+      if (whole != null) {
+        ids.push(whole);
         continue;
       }
-      for (const ch of tok) ids.push(this.tokenToId[ch] ?? this.unkId);
+      // Greedy longest-match inside the regex token, so vocab pieces are
+      // reused inside unseen words ("singaporeans" -> "singapore" + "ans"
+      // rather than 12 single characters). Falls back to single chars,
+      // then <unk>. decode(encode(x)) === x whenever every char is known.
+      let i = 0;
+      while (i < tok.length) {
+        const maxLen = Math.min(this._maxTokLen, tok.length - i);
+        let hit = null;
+        let hitLen = 0;
+        for (let len = maxLen; len >= 2; len--) {
+          const cand = tok.slice(i, i + len);
+          const id = this.tokenToId[cand];
+          if (id != null) {
+            hit = id;
+            hitLen = len;
+            break;
+          }
+        }
+        if (hit != null) {
+          ids.push(hit);
+          i += hitLen;
+        } else {
+          ids.push(this.tokenToId[tok[i]] ?? this.unkId);
+          i += 1;
+        }
+      }
     }
     return ids;
   }
@@ -86,9 +122,12 @@ export class Tokenizer {
   }
 
   static fromJSON(data) {
+    if (!data || !Array.isArray(data.idToToken) || !data.idToToken.length) {
+      throw new Error("brain file has no vocabulary (idToToken)");
+    }
     const t = new Tokenizer();
-    t.idToToken = data.idToToken;
-    t.tokenToId = Object.fromEntries(t.idToToken.map((tok, i) => [tok, i]));
+    t.idToToken = data.idToToken.map((x) => String(x));
+    t._reindex();
     return t;
   }
 }

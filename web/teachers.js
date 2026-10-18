@@ -4,6 +4,8 @@
  * plus whatever 401/429 the provider returns.
  */
 
+import { osNotify } from "./notify.js";
+
 export const WINDOWS = [
   { id: "daily", label: "Daily", ms: 24 * 3600 * 1000, calendar: true },
   { id: "5h", label: "5 hours", ms: 5 * 3600 * 1000 },
@@ -156,12 +158,13 @@ function defaultState() {
 }
 
 export class TeacherDesk {
-  constructor(store, { onLog, onDoc, onExhaust, onStatus }) {
+  constructor(store, { onLog, onDoc, onExhaust, onStatus, osNotifyEnabled }) {
     this.store = store;
     this.onLog = onLog || (() => {});
     this.onDoc = onDoc;
     this.onExhaust = onExhaust || (() => {});
     this.onStatus = onStatus || (() => {});
+    this.osNotifyEnabled = osNotifyEnabled || (() => true);
     this.state = defaultState();
     this.stop = true;
     this.running = false;
@@ -218,13 +221,13 @@ export class TeacherDesk {
   }
 
   async notify(title, body) {
-    try {
-      if (Notification.permission === "granted") {
-        new Notification(title, { body, icon: "icon-192.png" });
-      }
-    } catch {
-      /* ignore */
-    }
+    // Route through the service worker: `new Notification()` throws
+    // "Illegal constructor" on Android Chrome / installed PWAs and does
+    // not exist in the APK WebView, so the old direct call never fired
+    // on the devices Ember targets. osNotify() also no-ops cleanly when
+    // permission was never granted; the log line below plus the app's
+    // onExhaust toast are the guaranteed in-app fallback.
+    if (this.osNotifyEnabled()) await osNotify(title, body);
     this.onLog(`! ${title}: ${body}`);
   }
 

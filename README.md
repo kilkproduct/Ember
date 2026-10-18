@@ -86,3 +86,13 @@ First generate is slower (shader compile). Batch 2 × context 64 = 128 training 
 - Changing architecture recasts the vessel and forgets previous fire — save a checkpoint first.
 - Heads must divide embedding size (the presets already do).
 - Do not switch apps mid-fire on iOS; Safari may throttle background tabs.
+- Every setting has an **ⓘ button** next to it explaining what it does, what happens when you raise/lower it, and when the change takes effect.
+- **Notifications**: the 🔔 (top right) keeps a history of training/export/import results and errors. OS notifications go through the service worker (the only path that works on Android); if they're unavailable, in-app notifications still work.
+- **Brain export**: *Export brain (.json)* writes the real learned weights + vocabulary (versioned format, see [`docs/brain-format.md`](docs/brain-format.md)). Imports are fully validated before anything is replaced, so a bad file can't destroy a working brain. Legacy `ember-brain-v1` files still import.
+
+## Tests
+
+```bash
+cd tests && npm install && npm test   # engine training/generation, brain round-trips, UI wiring (Node + TF.js CPU + jsdom)
+python3 tests/test_python_side.py     # Python tokenizer/corpus (stdlib only)
+```

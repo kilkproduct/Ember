@@ -28,9 +28,11 @@ class EmberConfig:
         """Rough parameter count used by the UI before the model exists."""
         v, d, l, t = self.vocab_size, self.n_embd, self.n_layer, self.block_size
         embed = v * d + t * d
-        # attn qkv + proj + mlp (4d) + 2 LayerNorms per block, plus final LN + head
-        per = 4 * d * d + 2 * d + 8 * d * d + 2 * d
-        return embed + l * per + 2 * d + d * v
+        # Per block: attn (3d^2 weights + 3d bias) + proj (d^2 + d) +
+        # mlp (4d^2 + 4d, 4d^2 + d) + 2 LayerNorms (4d) = 12d^2 + 13d.
+        # The LM head is tied to wte, so it adds nothing beyond `embed`.
+        per = 12 * d * d + 13 * d
+        return embed + l * per + 2 * d  # + final LayerNorm
 
 
 class CausalSelfAttention(nn.Module):

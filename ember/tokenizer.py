@@ -16,6 +16,7 @@ class EmberTokenizer:
     def __init__(self) -> None:
         self.token_to_id: dict[str, int] = {t: i for i, t in enumerate(SPECIAL)}
         self.id_to_token: list[str] = list(SPECIAL)
+        self._max_tok_len = 1
 
     @property
     def vocab_size(self) -> int:
@@ -45,11 +46,14 @@ class EmberTokenizer:
         if tok not in self.token_to_id:
             self.token_to_id[tok] = len(self.id_to_token)
             self.id_to_token.append(tok)
+            if len(tok) > self._max_tok_len:
+                self._max_tok_len = len(tok)
 
     def train(self, texts: list[str], vocab_size: int = 4000) -> None:
         """Build a vocab from raw documents. Always keeps every seen character."""
         self.token_to_id = {t: i for i, t in enumerate(SPECIAL)}
         self.id_to_token = list(SPECIAL)
+        self._max_tok_len = 1
         chars: set[str] = set()
         word_counts: Counter[str] = Counter()
         for text in texts:
@@ -84,9 +88,25 @@ class EmberTokenizer:
             if tok in self.token_to_id:
                 ids.append(self.token_to_id[tok])
                 continue
-            # fall back to characters so nothing is lost
-            for ch in tok:
-                ids.append(self.token_to_id.get(ch, self.unk_id))
+            # Greedy longest-match inside the regex token so vocab pieces are
+            # reused inside unseen words, falling back to single characters
+            # (then <unk>) so nothing is silently lost. Mirrors web/tokenizer.js.
+            i = 0
+            while i < len(tok):
+                hit_id = None
+                hit_len = 0
+                for length in range(min(self._max_tok_len, len(tok) - i), 1, -1):
+                    cand = tok[i : i + length]
+                    if cand in self.token_to_id:
+                        hit_id = self.token_to_id[cand]
+                        hit_len = length
+                        break
+                if hit_id is not None:
+                    ids.append(hit_id)
+                    i += hit_len
+                else:
+                    ids.append(self.token_to_id.get(tok[i], self.unk_id))
+                    i += 1
         if add_special:
             ids.append(self.eos_id)
         return ids
@@ -120,4 +140,5 @@ class EmberTokenizer:
         tok = cls()
         tok.id_to_token = list(data["id_to_token"])
         tok.token_to_id = {t: i for i, t in enumerate(tok.id_to_token)}
+        tok._max_tok_len = max((len(t) for t in tok.id_to_token), default=1)
         return tok
