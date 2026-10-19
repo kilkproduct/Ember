@@ -73,6 +73,104 @@ Baseline: `d1b27d7`, tests 62/62 JS + Python OK. Companion docs:
   Atomic special tokens remain possible later behind
   `tokenizer.version: 2` if measurements ever justify it.
 
+## What was implemented (Phases B–E)
+
+- **Phase B — boundary masking.** `forward()`/`loss()` accept an
+  additive per-batch boundary mask + per-target weights. The trainer
+  builds block-diagonal masks (null = zero overhead when a window has
+  no boundary) and `targetOk` streams (format 1: first token after
+  `<doc>` masked, `<doc>` itself stays a target). `validate()` uses the
+  same masked objective. UI: *Doc boundaries* select (Respect / Legacy
+  packed). Tests prove exactness: doc-B logits are invariant to doc-A
+  replacement with the mask on (and leak with it off — sensitivity
+  control); weighted loss equals manual CE on selected positions.
+- **Phase C — stream format 2 + Reddit structure.** Records:
+  `<doc>` + masked header (`<sub>`, `<title>`, `<body>`/`<comment>`,
+  `<user>`/`<assistant>`) + content + `<eos>` (trainable). One document
+  per comment (was 8 glued); metadata preserved scraper → store →
+  brain corpus with explicit nulls; thread units consecutive in the
+  stream (post first, comments by time) and never straddle the
+  train/validation split. Brain files record
+  `training_state.stream_format` (additive; absent = 1; unknown =
+  rejected). New casts default to format 2; imported brains keep
+  theirs. 16-doc topic-training pack + Fuel button. Per-source token
+  accounting (`trainer.sourceTokens`).
+- **Phase D — FFN width config.** `cfg.ffnMult` (default 4 = all
+  existing brains; recorded in brain files only when non-default).
+  Training-memory floor (16 B/param) shown in the Vessel estimate
+  before casting. Bench `sizes` mode for controlled comparisons.
+- **Phase E — balancing + conditioning.** Optional sqrt-capped (≤4×)
+  upweighting of minority sources at stream build (factors logged).
+  Generation: `stopOnBoundary` option, Voice ending select, optional
+  `r/subreddit` conditioning prefix for format-2 brains (labeled in
+  output; warned when an old brain ignores it).
+
 ## Experiment log
 
-_Filled in during Phases D–F with real bench output._
+All runs: sandbox CPU (ratios matter, absolutes don't), byte-BPE,
+`tests/bench.mjs`. Topic corpus = 48 synthetic docs, 6 topics × 8,
+template sentences from per-topic word banks.
+
+### Sizes (bench `sizes`, 30 steps, batch 2)
+
+| Config | Params | Train floor | Val (start→end) | ms/step | Gen tok/s |
+| --- | --- | --- | --- | --- | --- |
+| classic 3L/96 ctx96 ffn4 | 0.404M | 7.5 MB | 6.46 → 2.27 | 3481 | 17.1 |
+| slim 3L/96 ctx96 ffn2 | 0.292M (−28%) | 5.8 MB | 6.44 → 2.63 | 3285 (−6%) | 20.9 (+22%) |
+| wider 4L/144 ctx96 ffn4 | 1.105M (2.7×) | 18.8 MB | 6.39 → 2.38 | 6297 (+81%) | 7.6 |
+| longer 3L/96 ctx192 ffn4 | 0.413M | 7.6 MB | 6.41 → 2.46 | 7541 (+117%) | 16.8 |
+
+Reading: at this budget (30 steps, tiny corpus) **bigger is not
+better** — the 2.7× wider model and the 2× context both cost ~2× step
+time for no validation gain (documents are shorter than ctx96, so
+extra context cannot help). Slim FFN trades some early validation
+loss for 28% fewer parameters and faster generation. The classic
+phone shape remains the default; nothing here justifies changing it.
+
+### Boundary regimes (bench `boundary`, 90 steps; `boundary-long`, 220; `boundary-eval`, 160)
+
+- `boundary` (90 steps): on-topic word rate 7% (packed) / 11%
+  (masked fmt1) / 8% (fmt2); natural stops 1–2 of 6. Noise-level
+  differences.
+- `boundary-long` (220 steps): on-topic 7% vs 7%; stops 5/6 vs 3/6.
+- `boundary-eval` (160 steps, both scored identically on held-out
+  documents presented alone): single-doc CE **1.469 packed vs 1.463
+  format 2**; continuation on-topic 3% vs 5% (n=10). Within noise.
+
+**Honest conclusion:** at toy scale, no generation-quality difference
+between packed and boundary-respecting training is measurable. The
+synthetic documents share identical templates, so attending to the
+previous document is nearly harmless there — the eval cannot punish
+leakage the way a real multi-topic corpus would. What IS proven
+exactly (unit tests, not vibes): cross-document attention is
+mathematically zero with masking; ~1.2% of targets (more for short
+comments) are no longer unpredictable cross-document jumps; `<eos>`
+occurs in training (was 0) and format-2 samples stop on it
+(`stoppedOn=3`). The quality question needs a real corpus and longer
+training — see next experiment.
+
+### Regression checks
+
+- Default bench: legacy train step 511 ms (vs 574 ms last turn —
+  masking overhead is within noise), tok/char unchanged (0.347 /
+  0.183), E2E journey OK both tokenizers.
+- Tests: 77/77 JS + Python OK. New coverage: boundaries (5),
+  structure/metadata/stream format/brain fields (9).
+
+## Remaining limitations & next experiment
+
+- **Unproven:** topic coherence improvement on real text. Next
+  experiment: on-device A/B with a real mixed corpus (e.g. several
+  subreddits + the topic pack + wiki), packed vs format-2, ≥1000
+  steps, evaluated with single-doc held-out CE (`boundary-eval`
+  method) + fixed-prompt samples. The bench harness supports this
+  shape; the sandbox CPU makes it slow, a phone's GPU backend is the
+  practical place.
+- Format-2 headers cost tokens (~6–12/record); with tiny comments and
+  ctx64 that's a real fraction of context. Atomic special tokens
+  (tokenizer v2) would cut this but churn brain compatibility —
+  revisit only with measurements.
+- Reddit parents are ordered by timestamp, not true reply-tree order
+  (parentId is preserved for a future tree-aware builder).
+- Balanced sampling is implemented and unit-tested but its quality
+  effect is unmeasured; same A/B as above should cover it.

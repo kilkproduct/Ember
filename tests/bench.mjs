@@ -252,6 +252,93 @@ if (process.argv[2] === "boundary") {
   process.exit(0);
 }
 
+if (process.argv[2] === "boundary-long") {
+  // Same A/C regimes as `boundary` but trained ~2.4x longer, where the
+  // models have actually fit the topic clusters; measures on-topic
+  // rate over 60-token generations (drift over length).
+  const tdocs = topicCorpus();
+  const cfg = { nLayer: 2, nHead: 2, nEmbd: 64, blockSize: 64, vocabSize: 1500, dropout: 0 };
+  const REGIMES = [
+    ["legacy packed (pre-Phase B)", { streamFormat: 1, mask: false }],
+    ["format 2 structured + masking", { streamFormat: 2, mask: true }],
+  ];
+  console.log(`boundary-long: ${tdocs.length} topic docs, 220 steps, batch 4, lr 3e-3, byte-bpe, CPU`);
+  for (const [label, r] of REGIMES) {
+    const trainer = new DeviceTrainer();
+    await trainer.initDocs(tdocs, cfg, 3e-3, { valFraction: 0.2, tokenizerType: "byte-bpe", streamFormat: r.streamFormat });
+    trainer.docBoundaryMask = r.mask;
+    trainer.maskBoundaryLoss = r.mask;
+    trainer.setSchedule(trainer.step + 220);
+    for (let i = 0; i < 220; i++) await trainer.trainStep(4);
+    const v = await trainer.validate();
+    let totRate = 0, stops = 0;
+    const lines = [];
+    for (const [topic, prompt] of TOPIC_PROMPTS) {
+      const g = await trainer.generate(prompt, { maxNew: 60, temperature: 0.8, topK: 40, topP: 0.95, seed: 7 });
+      const rate = onTopicRate(prompt + " " + g.text, topic);
+      totRate += rate;
+      if (g.stoppedOn != null) stops++;
+      lines.push(`   [${topic}] on-topic ${(rate * 100).toFixed(0)}% "${prompt}${g.text.slice(0, 100)}"`);
+    }
+    console.log(`${label}: train ema ${trainer.emaLoss.toFixed(3)} · val(own) ${v.loss.toFixed(3)} · on-topic ${(totRate / TOPIC_PROMPTS.length * 100).toFixed(0)}% · natural stops ${stops}/${TOPIC_PROMPTS.length}`);
+    for (const l of lines.slice(0, 3)) console.log(l);
+    trainer.model.dispose();
+  }
+  process.exit(0);
+}
+
+if (process.argv[2] === "boundary-eval") {
+  // Fair cross-regime evaluation: train packed vs format-2+masked, then
+  // score BOTH identically — mean CE on held-out documents presented
+  // ALONE (single-document windows, content positions only). Also a
+  // low-temperature continuation probe from held-out doc openings.
+  const tdocs = topicCorpus();
+  const cfg = { nLayer: 2, nHead: 2, nEmbd: 64, blockSize: 64, vocabSize: 1500, dropout: 0 };
+  const { normalizeDocs: nd, splitDocs: sd } = await import("../web/engine.js");
+  const { val: valDocs } = sd(nd(tdocs), 0.2);
+  console.log(`boundary-eval: ${tdocs.length} topic docs (${valDocs.length} held out), 160 steps, batch 4, lr 3e-3, byte-bpe, CPU`);
+  async function singleDocLoss(trainer) {
+    const block = cfg.blockSize;
+    let sum = 0, n = 0;
+    for (const d of valDocs) {
+      const ids = trainer.tokenizer.encode(d.text);
+      for (let s = 0; s + block < ids.length; s += block) {
+        const xt = tf.tensor2d([ids.slice(s, s + block)], [1, block], "int32");
+        const yt = tf.tensor2d([ids.slice(s + 1, s + block + 1)], [1, block], "int32");
+        const lt = tf.tidy(() => trainer.model.loss(xt, yt, false));
+        sum += (await lt.data())[0]; n++;
+        lt.dispose(); xt.dispose(); yt.dispose();
+      }
+    }
+    return n ? sum / n : NaN;
+  }
+  const REGIMES = [
+    ["legacy packed (pre-Phase B)", { streamFormat: 1, mask: false }],
+    ["format 2 structured + masking", { streamFormat: 2, mask: true }],
+  ];
+  for (const [label, r] of REGIMES) {
+    const trainer = new DeviceTrainer();
+    await trainer.initDocs(tdocs, cfg, 3e-3, { valFraction: 0.2, tokenizerType: "byte-bpe", streamFormat: r.streamFormat });
+    trainer.docBoundaryMask = r.mask;
+    trainer.maskBoundaryLoss = r.mask;
+    trainer.setSchedule(trainer.step + 160);
+    for (let i = 0; i < 160; i++) await trainer.trainStep(4);
+    const solo = await singleDocLoss(trainer);
+    // continuation probe: first 6 words of each held-out doc, cool sampling
+    let rate = 0, m = 0;
+    for (const d of valDocs) {
+      const topic = Object.keys(TOPIC_BANKS).find((t) => d.title.startsWith(t));
+      if (!topic) continue;
+      const prompt = d.text.split(" ").slice(0, 6).join(" ");
+      const g = await trainer.generate(prompt, { maxNew: 30, temperature: 0.5, topK: 20, topP: 0.9, seed: 11 });
+      rate += onTopicRate(g.text, topic); m++;
+    }
+    console.log(`${label}: train ema ${trainer.emaLoss.toFixed(3)} · single-doc held-out CE ${solo.toFixed(3)} · continuation on-topic ${m ? (rate / m * 100).toFixed(0) : "?"}% (n=${m})`);
+    trainer.model.dispose();
+  }
+  process.exit(0);
+}
+
 console.log(`corpus: ${docs.length} docs, ${corpusChars} chars; config ${JSON.stringify(CFG)} (batch 2, CPU)`);
 await bench("legacy tokenizer", "legacy");
 try {

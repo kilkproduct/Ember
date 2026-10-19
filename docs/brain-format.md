@@ -65,12 +65,23 @@ the old brain as a `pre-tokenizer-switch-*` checkpoint first.
     "blockSize": 64,                // context length in tokens  (8..4096)
     "vocabSize": 1400,              // == vocabulary.id_to_token.length
     "dropout": 0.0                  // training dropout rate     (0..0.9)
+    // "ffnMult": 2                 // OPTIONAL, additive (Turn 7): FFN hidden
+                                    // width = round(ffnMult × nEmbd). Absent
+                                    // on all older brains == 4. Written only
+                                    // when != 4, so default brains stay
+                                    // importable by older Ember builds.
   },
 
   "training_state": {
     "step": 150,                    // optimizer steps taken so far
     "best_loss": 2.431,             // best training loss seen, or null
-    "base_lr": 0.0003               // learning-rate the brain was fired with
+    "base_lr": 0.0003,              // learning-rate the brain was fired with
+    "stream_format": 2              // additive (Turn 7): 1 = legacy <doc>-
+                                    // prefixed stream; 2 = structured records
+                                    // with headers + <eos>. Absent == 1.
+                                    // Unknown values are REJECTED on import —
+                                    // retraining with the wrong layout would
+                                    // silently corrupt what the brain learned.
   },
 
   "vocabulary": {
@@ -102,6 +113,11 @@ the old brain as a `pre-tokenizer-switch-*` checkpoint first.
 
   "corpus": [                        // OPTIONAL — only when "include corpus" was on
     { "title": "...", "text": "...", "source": "manual", "url": "", "weight": 1, "kind": "page" }
+    // docs may carry an additive "meta" object (Turn 7, Reddit records):
+    // { "subreddit": "bikewrench"|null, "threadId": "abc"|null,
+    //   "parentId": "def"|null, "createdUtc": 1700000000|null }
+    // Missing values are explicit nulls — never invented. Older readers
+    // ignore the field.
   ]
 }
 ```
