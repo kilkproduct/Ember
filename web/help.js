@@ -224,6 +224,13 @@ export const HELP = {
     start: "50. Validation needs at least 5 ordinary documents in the corpus; with fewer, there's nothing to hold out and this does nothing.",
     applies: FIRE,
   },
+  "t-boundaries": {
+    title: "Doc boundaries",
+    what: "“Respect boundaries” (default): inside a training window, text may not attend across a document boundary (<doc>/<eos>), and the loss ignores each new document's first token plus any metadata header tokens — the next page's opening word is not something the previous page should have to predict. Documents still share windows for efficiency; they just can't see or grade each other. “Legacy packed stream” is the old behavior: the whole corpus is one continuous text.",
+    why: "Packed-without-masking teaches the model that random topic jumps naturally follow everything, and later text attends to an unrelated previous document. Boundary masking is what makes “stay on topic, restart cleanly at a new document” learnable at all.",
+    start: "Respect boundaries. Switch to Legacy only to reproduce an old brain's training regime for comparison. Validation uses the same setting, so its numbers are comparable within a run.",
+    applies: FIRE,
+  },
   "t-sampler": {
     title: "Sampler",
     what: "How training windows are picked from the corpus. “Random windows” draws random positions with replacement — some passages are visited often, some never. “Shuffled pass” deals out non-overlapping windows in random order, each exactly once per pass, then reshuffles.",

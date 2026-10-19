@@ -828,6 +828,9 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
   const clipRaw = Number($("t-clip")?.value);
   state.trainer.gradClip = Number.isFinite(clipRaw) && clipRaw > 0 ? clipRaw : 0;
   state.trainer.samplerMode = $("t-sampler")?.value === "epoch" ? "epoch" : "random";
+  const respectBounds = $("t-boundaries")?.value !== "legacy";
+  state.trainer.docBoundaryMask = respectBounds;
+  state.trainer.maskBoundaryLoss = respectBounds;
   const valEvery = Math.max(0, Math.floor(+$("t-val")?.value) || 0);
   state.stopTrain = false;
   state.firing = true;
@@ -836,7 +839,7 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
   const every = +$("t-every").value;
   const until = state.trainer.step + steps;
   state.trainer.setSchedule(until);
-  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
+  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
   const st0 = state.trainer.status();
   logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} tokens trained so far`);
   renderModelPills();
@@ -947,6 +950,7 @@ $("btn-fire-reset")?.addEventListener("click", () => {
   if ($("t-clip")) $("t-clip").value = 1;
   if ($("t-val")) $("t-val").value = 50;
   if ($("t-sampler")) $("t-sampler").value = "random";
+  if ($("t-boundaries")) $("t-boundaries").value = "respect";
   notifyInfo("Firing schedule reset to defaults");
 });
 

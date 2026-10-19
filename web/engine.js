@@ -154,7 +154,7 @@ export class EmberNet {
     for (const v of this.parameters()) v.dispose();
   }
 
-  forward(idx, training = false) {
+  forward(idx, training = false, extraMask = null) {
     const cfg = this.cfg;
     const [B, T] = idx.shape;
     const C = cfg.nEmbd;
@@ -164,7 +164,10 @@ export class EmberNet {
     const tok = tf.gather(this.wte, idx.reshape([B * T])).reshape([B, T, C]);
     const pos = tf.gather(this.wpe, tf.range(0, T, 1, "int32"));
     let x = drop(tok.add(pos), dropRate, training);
-    const mask = causalMask(T);
+    // extraMask: optional [B,1,T,T] additive mask (document-boundary
+    // blocking during training). Generation passes null — identical
+    // math to before, so existing brains are unaffected at inference.
+    const mask = extraMask ? causalMask(T).add(extraMask) : causalMask(T);
     for (const b of this.blocks) {
       const h = layerNorm(x, b.ln1g, b.ln1b);
       const qkv = linear(h, b.attnW, b.attnB);
@@ -187,15 +190,21 @@ export class EmberNet {
     return linear(x, this.wte, null, true);
   }
 
-  loss(idx, targets, training = true) {
-    const logits = this.forward(idx, training);
+  loss(idx, targets, training = true, { extraMask = null, targetWeights = null } = {}) {
+    const logits = this.forward(idx, training, extraMask);
     const [B, T, V] = logits.shape;
     // Cross-entropy via one-hot: tf.gatherND has NO registered gradient in
     // TF.js, so picking the target log-probs with gatherND (the old code)
     // made every opt.minimize() throw and the model could never train.
     const logp = tf.logSoftmax(logits.reshape([B * T, V]), -1);
     const oneHot = tf.oneHot(targets.reshape([-1]).cast("int32"), V);
-    return logp.mul(oneHot).sum(-1).neg().mean();
+    const perToken = logp.mul(oneHot).sum(-1).neg();
+    if (!targetWeights) return perToken.mean();
+    // Weighted mean: positions with weight 0 (document-boundary jumps,
+    // metadata headers) contribute no loss and no gradient. Guard the
+    // all-masked batch (denominator 0) to a zero loss rather than NaN.
+    const w = targetWeights.reshape([-1]).cast("float32");
+    return perToken.mul(w).sum().div(w.sum().maximum(1));
   }
 
   /** Legacy nested-array weights (brain format v1). Kept for compatibility. */
@@ -404,6 +413,15 @@ export class DeviceTrainer {
     this.lastValLoss = null;
     this.lastValPpl = null;
     this.valFraction = 0.1;
+    // document-boundary handling (Phase B/C): streamFormat 1 = legacy
+    // <doc>-prefixed concatenation; 2 = structured records with headers
+    // + <eos>. The two masks can be toggled for A/B experiments; both
+    // default ON (respect boundaries).
+    this.streamFormat = 1;
+    this.docBoundaryMask = true; // attention may not cross documents
+    this.maskBoundaryLoss = true; // no loss on boundary/metadata targets
+    this.targetOk = null; // per-token 0/1: may this token be a target?
+    this.valTargetOk = null;
   }
 
   _disposeCurrent() {
@@ -451,7 +469,7 @@ export class DeviceTrainer {
    * turning into a wall of <unk>. Only the model weights are kept honest —
    * validation documents never produce gradients (see setDocs/validate).
    */
-  async initDocs(docs, cfg, lr = 3e-4, { valFraction = 0.1, tokenizerType = "legacy" } = {}) {
+  async initDocs(docs, cfg, lr = 3e-4, { valFraction = 0.1, tokenizerType = "legacy", streamFormat = 1 } = {}) {
     this.setLr(lr);
     const clean = normalizeDocs(docs);
     if (!clean.length) throw new Error("No documents to cast from. Add fuel first.");
@@ -473,6 +491,7 @@ export class DeviceTrainer {
     this.scheduleUntil = 0;
     this._resetTrainingStats();
     this.valFraction = valFraction;
+    this.streamFormat = streamFormat === 2 ? 2 : 1;
     this.setDocs(clean);
   }
 
@@ -493,7 +512,7 @@ export class DeviceTrainer {
    * only performs the swap, so a bad import can never destroy the
    * working brain.
    */
-  adopt(model, tokenizer, { step = 0, bestLoss = Infinity, baseLr = null } = {}) {
+  adopt(model, tokenizer, { step = 0, bestLoss = Infinity, baseLr = null, streamFormat = 1 } = {}) {
     if (baseLr != null) this.setLr(baseLr);
     this._disposeCurrent();
     this.model = model;
@@ -508,10 +527,21 @@ export class DeviceTrainer {
     this.scheduleStart = this.step;
     this.scheduleUntil = this.step;
     this._resetTrainingStats();
+    this.streamFormat = streamFormat === 2 ? 2 : 1;
+    this.targetOk = null;
     this.valTokens = null; // caller re-supplies the corpus via refreshDocs
+    this.valTargetOk = null;
   }
 
-  /** Encode documents into one <doc>-separated token stream. */
+  /**
+   * Encode documents into one token stream + a parallel targetOk array
+   * (1 = this token may be a prediction target, 0 = masked out of the
+   * loss). Stream format 1 (legacy): each document is prefixed with
+   * <doc>. The <doc> token itself stays a target (predicting it is how
+   * format-1 brains learn document endings for generation stopping);
+   * the first content token after it is masked — a new document's
+   * opening is not predictable from the previous document.
+   */
   _stream(docs, { expandWeights, shuffle }) {
     const order = [...docs];
     if (shuffle) {
@@ -521,15 +551,24 @@ export class DeviceTrainer {
       }
     }
     const ids = [];
+    const targetOk = [];
     for (const d of order) {
       const enc = this.tokenizer.encode(d.text);
       const reps = expandWeights ? d.weight : 1;
       for (let r = 0; r < reps; r++) {
         ids.push(this.tokenizer.docId);
-        ids.push(...enc);
+        targetOk.push(1);
+        enc.forEach((tok, k) => {
+          ids.push(tok);
+          targetOk.push(k === 0 ? 0 : 1);
+        });
       }
     }
-    return ids.length ? ids : [this.tokenizer.bosId];
+    if (!ids.length) {
+      ids.push(this.tokenizer.bosId);
+      targetOk.push(1);
+    }
+    return { ids, targetOk };
   }
 
   /**
@@ -540,12 +579,20 @@ export class DeviceTrainer {
   setDocs(docs) {
     const clean = normalizeDocs(docs);
     const { train, val } = splitDocs(clean, this.valFraction);
-    this.tokens = this._stream(train, { expandWeights: true, shuffle: true });
-    this.valTokens = val.length
-      ? this._stream(val, { expandWeights: false, shuffle: false })
-      : null;
+    const trainStream = this._stream(train, { expandWeights: true, shuffle: true });
+    this.tokens = trainStream.ids;
+    this.targetOk = trainStream.targetOk;
+    if (val.length) {
+      const valStream = this._stream(val, { expandWeights: false, shuffle: false });
+      this.valTokens = valStream.ids;
+      this.valTargetOk = valStream.targetOk;
+    } else {
+      this.valTokens = null;
+      this.valTargetOk = null;
+    }
     if (this.valTokens && this.valTokens.length < (this.cfg?.blockSize || 64) + 1) {
       this.valTokens = null; // too small for even one validation window
+      this.valTargetOk = null;
     }
     this._epochQueue = [];
     this.lastValLoss = null;
@@ -594,29 +641,81 @@ export class DeviceTrainer {
     return lr;
   }
 
-  _tiledTokens() {
+  /** Training stream + targetOk, repeated if shorter than one window. */
+  _tiled() {
     const block = this.cfg.blockSize;
     let toks = this.tokens;
+    let ok =
+      this.targetOk && this.targetOk.length === toks.length
+        ? this.targetOk
+        : new Array(toks.length).fill(1);
     if (toks.length < block + 2) {
       const reps = Math.ceil((block + 2) / Math.max(toks.length, 1)) + 1;
       toks = Array.from({ length: reps }, () => toks).flat();
+      ok = Array.from({ length: reps }, () => ok).flat();
     }
-    return toks;
+    return { toks, ok };
   }
 
-  _batchFromStarts(toks, starts) {
+  /**
+   * [B,1,T,T] additive mask that blocks attention across document
+   * boundaries inside a packed batch row, or null when no row contains
+   * a boundary (the common case — zero overhead). A boundary cut sits
+   * before a <doc> token and after an <eos> token, matching both
+   * stream formats. Documents may share a window (packing stays
+   * efficient) but can no longer see each other.
+   */
+  _boundaryMask(rows) {
+    const B = rows.length;
+    const T = rows[0].length;
+    const docId = this.tokenizer.docId;
+    const eosId = this.tokenizer.eosId;
+    let any = false;
+    const data = new Float32Array(B * T * T);
+    for (let b = 0; b < B; b++) {
+      const row = rows[b];
+      const seg = new Int32Array(T);
+      for (let p = 1; p < T; p++) {
+        seg[p] = seg[p - 1] + (row[p] === docId || row[p - 1] === eosId ? 1 : 0);
+      }
+      if (seg[T - 1] === 0) continue;
+      any = true;
+      for (let i = 0; i < T; i++) {
+        for (let j = 0; j < T; j++) {
+          if (seg[j] !== seg[i]) data[(b * T + i) * T + j] = -1e9;
+        }
+      }
+    }
+    return any ? tf.tensor(data, [B, 1, T, T]) : null;
+  }
+
+  _batchFromStarts(toks, starts, targetOk = null) {
     const block = this.cfg.blockSize;
     const x = starts.map((i) => toks.slice(i, i + block));
     const y = starts.map((i) => toks.slice(i + 1, i + 1 + block));
+    let wt = null;
+    if (this.maskBoundaryLoss && targetOk) {
+      const w = [];
+      let anyMasked = false;
+      for (const i of starts) {
+        const row = targetOk.slice(i + 1, i + 1 + block);
+        if (!anyMasked && row.includes(0)) anyMasked = true;
+        w.push(row);
+      }
+      if (anyMasked) wt = tf.tensor2d(w, [starts.length, block], "float32");
+    }
+    const mt = this.docBoundaryMask ? this._boundaryMask(x) : null;
     return {
       xt: tf.tensor2d(x, [starts.length, block], "int32"),
       yt: tf.tensor2d(y, [starts.length, block], "int32"),
+      wt,
+      mt,
     };
   }
 
   _batch(batchSize) {
     const block = this.cfg.blockSize;
-    const toks = this._tiledTokens();
+    const { toks, ok } = this._tiled();
     if (this.samplerMode === "epoch") {
       // Shuffled NON-overlapping windows, each served exactly once per
       // pass over the stream (then reshuffled). Guarantees coverage;
@@ -640,34 +739,38 @@ export class DeviceTrainer {
       }
       const hi = Math.max(toks.length - block - 1, 1);
       while (starts.length < batchSize) starts.push(Math.floor(Math.random() * hi));
-      return this._batchFromStarts(toks, starts);
+      return this._batchFromStarts(toks, starts, ok);
     }
     const hi = toks.length - block - 1;
     const starts = Array.from({ length: batchSize }, () =>
       Math.floor(Math.random() * Math.max(hi, 1))
     );
-    return this._batchFromStarts(toks, starts);
+    return this._batchFromStarts(toks, starts, ok);
   }
 
   async trainStep(batchSize) {
     if (!this.model) throw new Error("Cast the vessel first.");
     const lr = this._lr();
     const t0 = performance.now();
-    const { xt, yt } = this._batch(batchSize);
+    const { xt, yt, wt, mt } = this._batch(batchSize);
     let lossT;
     let grads;
     try {
       ({ value: lossT, grads } = tf.variableGrads(
-        () => this.model.loss(xt, yt, true),
+        () => this.model.loss(xt, yt, true, { extraMask: mt, targetWeights: wt }),
         this.model.parameters()
       ));
     } catch (e) {
       xt.dispose();
       yt.dispose();
+      wt?.dispose();
+      mt?.dispose();
       throw e;
     }
     xt.dispose();
     yt.dispose();
+    wt?.dispose();
+    mt?.dispose();
     const loss = (await lossT.data())[0];
     lossT.dispose();
     // Global gradient norm doubles as the finiteness tripwire: a NaN in
@@ -734,8 +837,10 @@ export class DeviceTrainer {
   /**
    * Held-out loss + perplexity on FIXED, evenly spaced validation
    * windows (dropout off, no gradients, weights untouched). Same windows
-   * every call, so numbers are comparable across a run. Returns null
-   * when no validation set exists. Deliberately cheap: 8×2 windows.
+   * every call, so numbers are comparable across a run. Uses the same
+   * document-boundary attention/loss masking as training, so it measures
+   * the objective actually being optimized. Returns null when no
+   * validation set exists. Deliberately cheap: 8×2 windows.
    */
   async validate({ batches = 8, batchSize = 2 } = {}) {
     if (!this.model || !this.valTokens) return null;
@@ -754,12 +859,16 @@ export class DeviceTrainer {
         starts.push(total === 1 ? 0 : Math.floor((k * maxStart) / (total - 1)));
       }
       if (!starts.length) break;
-      const { xt, yt } = this._batchFromStarts(toks, starts);
-      const lossT = tf.tidy(() => this.model.loss(xt, yt, false));
+      const { xt, yt, wt, mt } = this._batchFromStarts(toks, starts, this.valTargetOk);
+      const lossT = tf.tidy(() =>
+        this.model.loss(xt, yt, false, { extraMask: mt, targetWeights: wt })
+      );
       const l = (await lossT.data())[0];
       lossT.dispose();
       xt.dispose();
       yt.dispose();
+      wt?.dispose();
+      mt?.dispose();
       if (!Number.isFinite(l)) return null;
       lossSum += l * starts.length;
       windows += starts.length;
@@ -875,6 +984,9 @@ export class DeviceTrainer {
       grad_clip: this.gradClip,
       sampler: this.samplerMode,
       passes: this.passesCompleted,
+      stream_format: this.streamFormat,
+      doc_boundary_mask: this.docBoundaryMask,
+      mask_boundary_loss: this.maskBoundaryLoss,
       backend: this.backend,
       train_tps: this.lastTrainTps,
       gen_tps: this.lastGenTps,

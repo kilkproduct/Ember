@@ -166,11 +166,13 @@ test("epoch sampler serves every non-overlapping window exactly once per pass", 
   const seen = [];
   let guard = 0;
   while (trainer.passesCompleted < 1 && guard++ < 50) {
-    const { xt, yt } = trainer._batch(5);
+    const { xt, yt, wt, mt } = trainer._batch(5);
     const rows = await xt.array();
     for (const row of rows) seen.push(row[0]);
     xt.dispose();
     yt.dispose();
+    wt?.dispose();
+    mt?.dispose();
   }
   assert.equal(trainer.passesCompleted, 1);
   const expected = Array.from({ length: 12 }, (_, k) => (17 * k) % trainer.tokenizer.vocabSize);
