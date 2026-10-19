@@ -1,4 +1,4 @@
-const CACHE = "ember-v1";
+const CACHE = "ember-v2";
 const SHELL = [
   "./",
   "./index.html",
@@ -10,6 +10,9 @@ const SHELL = [
   "./scrape.js",
   "./teachers.js",
   "./github.js",
+  "./brain.js",
+  "./notify.js",
+  "./help.js",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",
@@ -35,28 +38,57 @@ self.addEventListener("activate", (event) => {
   self.clients.claim();
 });
 
+// Clicking an OS notification (e.g. "teacher empty", "firing complete")
+// brings the app forward instead of doing nothing.
+self.addEventListener("notificationclick", (event) => {
+  event.notification.close();
+  event.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((clients) => {
+      for (const c of clients) {
+        if ("focus" in c) return c.focus();
+      }
+      return self.clients.openWindow("./");
+    })
+  );
+});
+
+async function networkFirst(req) {
+  // App code (HTML/JS/CSS): always try the network first so updates land
+  // immediately; fall back to cache when offline. The old cache-first
+  // strategy meant installed PWAs kept running stale code forever.
+  const cache = await caches.open(CACHE);
+  try {
+    const res = await fetch(req);
+    if (res.ok) cache.put(req, res.clone());
+    return res;
+  } catch {
+    return (await cache.match(req)) || cache.match("./index.html");
+  }
+}
+
+async function cacheFirst(req) {
+  const cache = await caches.open(CACHE);
+  const hit = await cache.match(req);
+  if (hit) return hit;
+  const res = await fetch(req);
+  if (res.ok) cache.put(req, res.clone());
+  return res;
+}
+
 self.addEventListener("fetch", (event) => {
   const req = event.request;
   if (req.method !== "GET") return;
   const url = new URL(req.url);
-  const cachedFirst =
-    url.origin === location.origin ||
+  const sameOrigin = url.origin === location.origin;
+  const cdn =
     url.hostname === "cdn.jsdelivr.net" ||
     url.hostname === "fonts.googleapis.com" ||
     url.hostname === "fonts.gstatic.com";
-  if (!cachedFirst) return;
-  event.respondWith(
-    caches.match(req).then((hit) => {
-      if (hit) return hit;
-      return fetch(req)
-        .then((res) => {
-          if (res.ok) {
-            const copy = res.clone();
-            caches.open(CACHE).then((c) => c.put(req, copy));
-          }
-          return res;
-        })
-        .catch(() => hit || caches.match("./index.html"));
-    })
-  );
+  if (!sameOrigin && !cdn) return;
+  const isCode =
+    sameOrigin &&
+    (url.pathname.endsWith("/") ||
+      /\.(?:html|js|css|webmanifest)$/.test(url.pathname)) &&
+    !url.pathname.includes("/vendor/");
+  event.respondWith(isCode ? networkFirst(req) : cacheFirst(req));
 });

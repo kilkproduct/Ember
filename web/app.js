@@ -1,9 +1,26 @@
-import { createForager, STARTER } from "./scrape.js";
+import { createForager, STARTER, TOPIC_PACK, TRANSLATION_PACK, RESEARCH_PACK, SKILLS_PACK } from "./scrape.js";
 import { openStore } from "./store.js";
-import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
-import { Tokenizer } from "./tokenizer.js";
+import { corpusHealth, searchDocs } from "./corpus.js";
+import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, fmtTps, formatLessonPrompt } from "./engine.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
 import { githubPull, githubPush, githubHead } from "./github.js";
+import {
+  serializeBrain,
+  validateBrain,
+  buildTokenizer,
+  brainFileName,
+  downloadBrain,
+} from "./brain.js";
+import {
+  initNotify,
+  notifySuccess,
+  notifyInfo,
+  notifyWarn,
+  notifyError,
+  requestNotifyPermission,
+  osNotify,
+} from "./notify.js";
+import { initHelp, attachHelp } from "./help.js";
 
 const $ = (id) => document.getElementById(id);
 const isPhone =
@@ -19,13 +36,16 @@ const PRESETS = {
 const state = {
   forageStop: true,
   losses: [],
+  vals: [], // [{at: losses.length when measured, loss}] for the heat chart
   lastGeneration: "",
   stopTrain: false,
   firing: false,
+  generating: false,
   store: null,
   trainer: new DeviceTrainer(),
   checkpoints: [],
   desk: null,
+  appliedSliders: null, // vessel slider snapshot matching the live brain
 };
 
 function logEl(el, line) {
@@ -40,14 +60,17 @@ function fmtChars(n) {
   return String(n);
 }
 
-function corpusTexts(docs) {
-  const parts = [];
-  for (const d of docs) {
-    const w = Math.max(1, d.weight || 1);
-    for (let i = 0; i < w; i++) parts.push(d.text);
-  }
-  return parts;
+function fmtBytes(n) {
+  if (n > 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
+  if (n > 1000) return `${(n / 1000).toFixed(0)} KB`;
+  return `${n} B`;
 }
+
+// (Documents now travel to the trainer as {text, weight, kind} objects so
+// the train/validation split can work at document level — see
+// DeviceTrainer.setDocs. Weight expansion happens inside the trainer.)
+
+// ---------- corpus / checkpoints rendering ----------
 
 function renderCorpus(stats) {
   $("pill-corpus").textContent = `${stats.documents} pages · ${fmtChars(stats.characters)} chars`;
@@ -57,6 +80,30 @@ function renderCorpus(stats) {
   $("corpus-meta").textContent = stats.documents
     ? `${stats.documents} documents, ${fmtChars(stats.characters)} characters${src ? " — " + src : ""}`
     : "Nothing in the kiln yet. Lives on this device (IndexedDB).";
+  // Corpus health: what quality problems does this fuel have? Token
+  // count is an estimate (ratio from the live tokenizer when cast,
+  // else a generic 0.30 tok/char) — labeled "est." wherever shown.
+  const stNow = state.trainer.status();
+  const ratio =
+    stNow.ready && stats.characters > 0
+      ? Math.min(1, Math.max(0.05, (stNow.corpus_tokens + stNow.val_tokens) / stats.characters))
+      : 0.3;
+  const health = corpusHealth(stats.docs || [], { tokensPerChar: ratio });
+  state.lastHealth = health;
+  const healthEl = $("corpus-health");
+  if (healthEl) {
+    healthEl.textContent = stats.documents
+      ? `≈${fmtChars(health.estTokens)} tokens (est.) · median doc ${fmtChars(health.medianChars)} chars` +
+        (health.issues.length ? ` · ⚠ ${health.issues.join(" · ")}` : " · no duplicates or tiny-doc problems detected")
+      : "";
+  }
+  const dedupRow = $("dedup-row");
+  if (dedupRow) {
+    dedupRow.hidden = health.exactDuplicateDocs === 0;
+    if (health.exactDuplicateDocs > 0) {
+      $("btn-dedup").textContent = `Remove ${health.exactDuplicateDocs} exact duplicate${health.exactDuplicateDocs > 1 ? "s" : ""} (keeps one copy, merges weights)`;
+    }
+  }
   const list = $("corpus-list");
   list.innerHTML = "";
   for (const d of stats.documents_preview || []) {
@@ -66,7 +113,7 @@ function renderCorpus(stats) {
     h.textContent = d.title;
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `${d.source} · ${fmtChars(d.chars)} · ×${d.weight}`;
+    meta.textContent = `${d.source}${d.meta?.subreddit ? ` · r/${d.meta.subreddit}` : ""} · ${fmtChars(d.chars)} · ×${d.weight}`;
     const p = document.createElement("p");
     p.textContent = d.excerpt;
     const rm = document.createElement("button");
@@ -95,7 +142,9 @@ function renderCkpts() {
     const exp = document.createElement("button");
     exp.className = "btn ghost";
     exp.textContent = "Export";
-    exp.addEventListener("click", () => exportCkpt(c.name).catch((e) => alert(e.message)));
+    exp.addEventListener("click", () =>
+      exportCkpt(c.name).catch((e) => notifyError("Export failed", e.message))
+    );
     actions.append(load, exp);
     li.append(name, actions);
     ul.appendChild(li);
@@ -106,13 +155,22 @@ function renderModelPills() {
   const st = state.trainer.status();
   if (st.ready) {
     const m = (st.n_params / 1e6).toFixed(2);
-    $("pill-model").textContent = `${m}M · ${st.backend} · step ${st.step}`;
+    $("pill-model").textContent = `${m}M · ${st.backend} · step ${st.step} · ${st.tokenizer_type === "byte-bpe" ? "BPE tok" : "legacy tok"}`;
   } else {
     $("pill-model").textContent = "vessel unformed";
   }
   $("pill-fire").textContent = state.firing ? "firing" : st.ready ? "ready" : "idle";
   const tps = st.gen_tps || st.train_tps;
   $("pill-speed").textContent = tps ? fmtTps(tps) : "tok/s —";
+  // controls that would race or dispose the model mid-run
+  $("btn-gen").disabled = !st.ready || state.firing || state.generating;
+  $("btn-gen").title = !st.ready
+    ? "Cast a vessel first (Vessel tab)"
+    : state.firing
+      ? "Wait for firing to finish, or Douse it"
+      : "";
+  $("btn-init").disabled = state.firing;
+  $("btn-fire").disabled = state.firing || state.generating;
 }
 
 async function refresh() {
@@ -122,6 +180,38 @@ async function refresh() {
   renderCkpts();
   renderModelPills();
   return stats;
+}
+
+// ---------- vessel controls ----------
+
+function vesselSliderValues() {
+  return {
+    layer: +$("v-layer").value,
+    head: +$("v-head").value,
+    embd: +$("v-embd").value,
+    ctx: +$("v-ctx").value,
+    vocab: +$("v-vocab").value,
+    drop: +$("v-drop").value,
+    ffn: Number($("v-ffn")?.value || 4),
+    tokenizer: $("v-tokenizer")?.value || "byte-bpe",
+  };
+}
+
+function updateVesselDirty() {
+  const note = $("vessel-dirty");
+  if (!note) return;
+  if (!state.trainer.ready || !state.appliedSliders) {
+    note.hidden = true;
+    return;
+  }
+  const cur = vesselSliderValues();
+  const dirty = Object.keys(cur).some((k) => cur[k] !== state.appliedSliders[k]);
+  note.hidden = !dirty;
+}
+
+function markVesselApplied() {
+  state.appliedSliders = vesselSliderValues();
+  updateVesselDirty();
 }
 
 function paramEstimate() {
@@ -138,10 +228,28 @@ function paramEstimate() {
   $("v-drop-n").textContent = Number($("v-drop").value).toFixed(2);
   if (nEmbd % nHead !== 0) {
     $("param-est").textContent = "Heads must divide embedding size";
+    updateVesselDirty();
     return;
   }
-  const n = estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize });
-  $("param-est").textContent = `≈ ${(n / 1e6).toFixed(2)}M parameters · trains on this ${isPhone ? "phone" : "device"}`;
+  const ffnMult = Number($("v-ffn")?.value || 4);
+  const n = estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult });
+  const trainMB = (estimateTrainBytes({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult }) / 1048576).toFixed(1);
+  $("param-est").textContent = `≈ ${(n / 1e6).toFixed(2)}M parameters · ~${trainMB} MB training memory (weights + optimizer, before activations) · trains on this ${isPhone ? "phone" : "device"}`;
+  updateVesselDirty();
+}
+
+function syncVesselSliders(cfg, tokenizerType) {
+  // Range inputs snap to their step grid; read values back afterwards.
+  $("v-layer").value = cfg.nLayer;
+  $("v-head").value = cfg.nHead;
+  $("v-embd").value = cfg.nEmbd;
+  $("v-ctx").value = cfg.blockSize;
+  $("v-vocab").value = cfg.vocabSize;
+  $("v-drop").value = cfg.dropout || 0;
+  if ($("v-ffn")) $("v-ffn").value = String(cfg.ffnMult || 4);
+  if (tokenizerType && $("v-tokenizer")) $("v-tokenizer").value = tokenizerType;
+  document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.remove("on"));
+  paramEstimate();
 }
 
 function applyPreset(name) {
@@ -152,7 +260,7 @@ function applyPreset(name) {
   $("v-ctx").value = p.ctx;
   $("v-vocab").value = p.vocab;
   $("v-drop").value = p.drop;
-  document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c.dataset.preset === name));
+  document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.toggle("on", c.dataset.preset === name));
   if (name === "phone") {
     $("t-batch").value = 2;
     $("t-steps").value = 150;
@@ -170,15 +278,17 @@ function drawChart() {
   ctx.fillRect(0, 0, w, h);
   const pts = state.losses;
   if (pts.length < 2) return;
-  const min = Math.min(...pts);
-  const max = Math.max(...pts);
+  const vals = state.vals.filter((v) => v.at >= 1 && v.at <= pts.length);
+  const all = vals.length ? [...pts, ...vals.map((v) => v.loss)] : pts;
+  const min = Math.min(...all);
+  const max = Math.max(...all);
   const span = Math.max(max - min, 1e-4);
+  const X = (i) => (i / (pts.length - 1)) * (w - 24) + 12;
+  const Y = (y) => h - 16 - ((y - min) / span) * (h - 32);
   ctx.beginPath();
   pts.forEach((y, i) => {
-    const x = (i / (pts.length - 1)) * (w - 24) + 12;
-    const yy = h - 16 - ((y - min) / span) * (h - 32);
-    if (i === 0) ctx.moveTo(x, yy);
-    else ctx.lineTo(x, yy);
+    if (i === 0) ctx.moveTo(X(i), Y(y));
+    else ctx.lineTo(X(i), Y(y));
   });
   const grad = ctx.createLinearGradient(0, 0, w, 0);
   grad.addColorStop(0, "#e85d04");
@@ -186,9 +296,30 @@ function drawChart() {
   ctx.strokeStyle = grad;
   ctx.lineWidth = 2.2;
   ctx.stroke();
+  if (vals.length) {
+    // held-out validation loss (teal): measured on documents the model
+    // never trains on, so it tracks generalization, not memorization.
+    ctx.beginPath();
+    vals.forEach((v, i) => {
+      const x = X(v.at - 1);
+      const y = Y(v.loss);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "#2ec4b6";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    ctx.fillStyle = "#2ec4b6";
+    for (const v of vals) {
+      ctx.beginPath();
+      ctx.arc(X(v.at - 1), Y(v.loss), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   ctx.fillStyle = "#d4a574";
   ctx.font = "12px IBM Plex Mono, monospace";
-  ctx.fillText(`loss ${pts[pts.length - 1].toFixed(3)}`, 12, 18);
+  const lastVal = vals.length ? ` · val ${vals[vals.length - 1].loss.toFixed(3)}` : "";
+  ctx.fillText(`loss ${pts[pts.length - 1].toFixed(3)}${lastVal}`, 12, 18);
 }
 
 document.querySelectorAll(".tab").forEach((btn) => {
@@ -201,39 +332,168 @@ document.querySelectorAll(".tab").forEach((btn) => {
 ["v-layer", "v-head", "v-embd", "v-ctx", "v-vocab", "v-drop"].forEach((id) => {
   $(id).addEventListener("input", paramEstimate);
 });
-document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
+$("v-tokenizer")?.addEventListener("change", updateVesselDirty);
+$("v-ffn")?.addEventListener("change", paramEstimate);
+document.querySelectorAll(".chip[data-preset]").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
+
+// Voice sampling presets: just fill the numeric inputs (nothing hidden),
+// so what the preset does is exactly what the fields show.
+const GEN_PRESETS = {
+  precise: { temp: 0.5, k: 20, p: 0.9, rep: 1.1 },
+  balanced: { temp: 0.9, k: 40, p: 0.95, rep: 1.15 },
+  creative: { temp: 1.2, k: 80, p: 0.98, rep: 1.05 },
+};
+document.querySelectorAll(".chip[data-gen-preset]").forEach((c) =>
+  c.addEventListener("click", () => {
+    const p = GEN_PRESETS[c.dataset.genPreset];
+    if (!p) return;
+    $("gen-temp").value = p.temp;
+    $("gen-k").value = p.k;
+    $("gen-p").value = p.p;
+    if ($("gen-rep")) $("gen-rep").value = p.rep;
+    document
+      .querySelectorAll(".chip[data-gen-preset]")
+      .forEach((x) => x.classList.toggle("on", x === c));
+  })
+);
+
+// ---------- fuel ----------
 
 $("btn-add-text").addEventListener("click", async () => {
   const text = $("hand-text").value.trim();
-  if (!text) return;
-  await state.store.addDoc({
-    text,
-    title: $("hand-title").value.trim() || "untitled",
-    source: "manual",
-    kind: "page",
-  });
-  $("hand-text").value = "";
-  refresh();
+  if (!text) {
+    notifyWarn("Nothing to add", "Paste some text first.");
+    return;
+  }
+  try {
+    await state.store.addDoc({
+      text,
+      title: $("hand-title").value.trim() || "untitled",
+      source: "manual",
+      kind: "page",
+    });
+    $("hand-text").value = "";
+    await refresh();
+    notifySuccess("Added to corpus");
+  } catch (e) {
+    notifyError("Could not add text", e.message);
+  }
 });
 
 $("file-input").addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
-  if (!file) return;
-  const text = await file.text();
-  await state.store.addDoc({ text, title: file.name, source: "file", kind: "page" });
   e.target.value = "";
-  refresh();
+  if (!file) return;
+  try {
+    const text = await file.text();
+    await state.store.addDoc({ text, title: file.name, source: "file", kind: "page" });
+    await refresh();
+    notifySuccess(`Loaded ${file.name} into the corpus`);
+  } catch (err) {
+    notifyError("Could not load that file", err.message);
+  }
 });
 
 $("btn-alice").addEventListener("click", async () => {
-  await state.store.addDoc(STARTER);
-  refresh();
+  try {
+    await state.store.addDoc(STARTER);
+    await refresh();
+    notifySuccess("Starter text added — cast a vessel, then Fire");
+  } catch (e) {
+    notifyError("Could not add starter text", e.message);
+  }
 });
 
+$("btn-topic-pack")?.addEventListener("click", async () => {
+  try {
+    let added = 0;
+    for (const doc of TOPIC_PACK) {
+      await state.store.addDoc({ ...doc, source: "topic-pack" });
+      added++;
+    }
+    await refresh();
+    notifySuccess(
+      `Topic-training pack added (${added} short documents) — examples of staying on topic, ending cleanly, and changing subject only on cue. Cast or Fire to train on them.`
+    );
+  } catch (e) {
+    notifyError("Could not add the topic pack", e.message);
+  }
+});
+
+// Skill packs: lesson-formatted training data for general-purpose tasks.
+async function addSkillPack(pack, source, doneMessage) {
+  try {
+    for (const doc of pack) await state.store.addDoc({ ...doc, source });
+    await refresh();
+    notifySuccess(doneMessage);
+  } catch (e) {
+    notifyError("Could not add the lesson pack", e.message);
+  }
+}
+$("btn-translation-pack")?.addEventListener("click", () =>
+  addSkillPack(
+    TRANSLATION_PACK,
+    "translation-pack",
+    `Translation lessons added (${TRANSLATION_PACK.length}: English↔Spanish plus French, German, Malay, Chinese). Cast with the byte-BPE tokenizer (it covers every script), Fire, then use Voice → Task: Translate. A starter scaffold — add your own parallel sentences as Teach lessons for real coverage.`
+  )
+);
+$("btn-research-pack")?.addEventListener("click", () =>
+  addSkillPack(
+    RESEARCH_PACK,
+    "research-pack",
+    `Research lessons added (${RESEARCH_PACK.length}: answering questions from a passage, including "the passage does not say"). After firing, Voice → Task: Answer from my documents grounds answers in your own corpus.`
+  )
+);
+$("btn-skills-pack")?.addEventListener("click", () =>
+  addSkillPack(
+    SKILLS_PACK,
+    "skills-pack",
+    `General-skills lessons added (${SKILLS_PACK.length}: summarize, explain simply, rewrite politely, keywords, grammar, story continuation). Fire to train; add your own Teach lessons in the same shapes to extend them.`
+  )
+);
+
 $("btn-clear").addEventListener("click", async () => {
-  if (!confirm("Empty the entire corpus on this device?")) return;
+  if (!confirm("Empty the entire corpus on this device? (Weights already trained are kept.)")) return;
   await state.store.clear();
-  refresh();
+  await refresh();
+  notifyInfo("Corpus emptied");
+});
+
+// Explicit, user-triggered cleanup: for each group of identical texts
+// keep ONE copy (the heaviest), fold the duplicates' weights into it,
+// and delete the rest. Nothing unique is ever removed.
+$("btn-dedup")?.addEventListener("click", async () => {
+  const health = state.lastHealth;
+  const groups = (health?.exactGroups || []).filter((g) => g.length > 1);
+  if (!groups.length) {
+    notifyInfo("No exact duplicates right now");
+    return;
+  }
+  if (!confirm(`Remove ${health.exactDuplicateDocs} duplicate copie(s)? One copy of each text is kept and the duplicates' weights are merged into it.`)) return;
+  try {
+    const stats = await state.store.stats();
+    const byId = new Map((stats.docs || []).map((d) => [d.id, d]));
+    let removed = 0;
+    for (const group of groups) {
+      const docs = group.map((id) => byId.get(id)).filter(Boolean);
+      if (docs.length < 2) continue;
+      const keeper = docs.reduce((a, b) => ((b.weight || 1) > (a.weight || 1) ? b : a));
+      const totalWeight = Math.min(50, docs.reduce((s, d) => s + (d.weight || 1), 0));
+      if (totalWeight !== (keeper.weight || 1)) {
+        await state.store.addDoc({ ...keeper, weight: totalWeight });
+      }
+      for (const d of docs) {
+        if (d.id !== keeper.id) {
+          await state.store.remove(d.id);
+          removed += 1;
+        }
+      }
+    }
+    await refresh();
+    notifySuccess(`Removed ${removed} duplicate${removed === 1 ? "" : "s"}`, "One copy of each text remains, with merged weights.");
+  } catch (e) {
+    notifyError("Dedup failed", e.message);
+  }
 });
 
 const forager = createForager({
@@ -246,6 +506,7 @@ const forager = createForager({
       source: doc.source,
       url: doc.url || "",
       kind: doc.kind || "page",
+      meta: doc.meta || null, // subreddit/thread structure, when the source has it
     });
   },
 });
@@ -274,6 +535,7 @@ $("btn-forage").addEventListener("click", async () => {
       wander: $("src-wander").checked,
     };
   };
+  let failed = false;
   try {
     let seeds = $("seeds").value;
     do {
@@ -281,8 +543,10 @@ $("btn-forage").addEventListener("click", async () => {
       await refresh();
       if ($("src-autofire")?.checked && state.trainer.ready && !state.firing) {
         logEl($("forage-log"), "auto-fire 40 steps on new fuel");
-        $("t-steps").value = 40;
-        $("btn-fire").click();
+        // NOTE: passes steps directly — never rewrites the Steps input.
+        startFire(40, { jump: false, source: "auto-fire" }).catch((e) =>
+          logEl($("forage-log"), `! auto-fire failed: ${e.message}`)
+        );
       }
       if (!$("src-autopilot").checked || state.forageStop) break;
       if (result.extraTopics.length) {
@@ -298,11 +562,17 @@ $("btn-forage").addEventListener("click", async () => {
       await new Promise((r) => setTimeout(r, 600));
     } while (!state.forageStop);
   } catch (e) {
+    failed = true;
     logEl($("forage-log"), `! ${e.message}`);
+    notifyError("Foraging stopped with an error", e.message);
   } finally {
     state.forageStop = true;
     $("btn-forage").disabled = false;
     $("btn-forage-stop").disabled = true;
+    if (!failed) {
+      const stats = await state.store.stats();
+      notifyInfo("Foraging finished", `Corpus now holds ${stats.documents} pages · ${fmtChars(stats.characters)} chars.`);
+    }
   }
 });
 
@@ -310,86 +580,149 @@ $("btn-forage-stop").addEventListener("click", () => {
   state.forageStop = true;
 });
 
+// ---------- cast ----------
+
 $("btn-init").addEventListener("click", async () => {
+  if (state.firing) {
+    notifyWarn("Still firing", "Douse the fire before recasting.");
+    return;
+  }
   const nHead = +$("v-head").value;
   const nEmbd = +$("v-embd").value;
   if (nEmbd % nHead !== 0) {
-    alert("Heads must divide embedding size.");
+    notifyError("Heads must divide embedding size", `Embedding ${nEmbd} ÷ Heads ${nHead} is not whole. Adjust one of them (ⓘ explains why).`);
     return;
   }
   const stats = await state.store.stats();
   if (!stats.documents) {
-    alert("Forage or paste some text first.");
+    notifyWarn("No fuel yet", "Forage or paste some text in the Fuel tab first.");
     return;
   }
+  let lr;
+  try {
+    lr = state.trainer.setLr(+$("t-lr").value || 3e-4);
+  } catch (e) {
+    notifyError("Bad learning rate", e.message);
+    return;
+  }
+  const tokenizerType = $("v-tokenizer")?.value === "legacy" ? "legacy" : "byte-bpe";
+  const switchingTok = state.trainer.ready && state.trainer.tokenizer.type !== tokenizerType;
   if (state.trainer.ready && state.trainer.step > 0) {
-    if (!confirm("Casting again wipes the current brain. Export first. Continue?")) return;
+    const msg = switchingTok
+      ? `Switching tokenizer (${state.trainer.tokenizer.type} → ${tokenizerType}) starts a FRESH brain — learned weights can't move across tokenizers. The current brain (step ${state.trainer.step}) will first be saved on this device as a checkpoint, and your corpus is kept. Continue?`
+      : "Casting again wipes the current brain (step " + state.trainer.step + "). Export it first if you want to keep it. Continue?";
+    if (!confirm(msg)) return;
   }
   $("btn-init").disabled = true;
   $("btn-init").textContent = "Casting…";
   try {
-    await state.trainer.init(corpusTexts(stats.docs), {
+    if (switchingTok && state.trainer.step > 0) {
+      // Rollback point: the old brain stays loadable after the switch.
+      const rollback = `pre-tokenizer-switch-step-${state.trainer.step}`;
+      await saveCkpt(rollback, { quiet: true });
+      notifyInfo("Old brain saved", `Checkpoint “${rollback}” is on this device — Load it any time to go back.`);
+    }
+    await state.trainer.initDocs(stats.docs, {
       nLayer: +$("v-layer").value,
       nHead,
       nEmbd,
       blockSize: +$("v-ctx").value,
       vocabSize: +$("v-vocab").value,
       dropout: +$("v-drop").value,
-    }, +$("t-lr").value || 3e-4);
+      ffnMult: Number($("v-ffn")?.value || 4),
+    }, lr, { tokenizerType, streamFormat: 2 }); // new vessels train on structured records
+    state.losses = [];
+    state.vals = [];
+    drawChart();
+    $("heat-meta").textContent = "Fresh vessel. Loss will draw itself here once you Fire.";
+    markVesselApplied();
     renderModelPills();
-    logEl($("train-log"), `cast ${state.trainer.status().n_params} params on ${tf.getBackend()}`);
+    const st = state.trainer.status();
+    logEl($("train-log"), `cast ${st.n_params} params on ${tf.getBackend()} · ${st.tokenizer_type} tokenizer · vocab ${st.vocab_size} · corpus ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out for validation` : ""}`);
+    notifySuccess("Vessel cast", `${(st.n_params / 1e6).toFixed(2)}M params · vocab ${st.vocab_size} (${st.tokenizer_type}) · ${st.corpus_tokens} corpus tokens ready. Press Fire to train.`);
     document.querySelector('[data-tab="fire"]').click();
   } catch (e) {
-    alert(e.message);
+    notifyError("Casting failed", e.message);
   } finally {
     $("btn-init").disabled = false;
     $("btn-init").textContent = "Cast vessel from corpus";
+    renderModelPills();
   }
 });
 
-async function packBrain(name) {
-  if (!state.trainer.model) throw new Error("Nothing to export. Cast and fire first.");
-  const weights = await state.trainer.model.getWeights();
-  const stats = await state.store.stats();
-  const pack = {
-    kind: "ember-brain-v1",
-    name: (name || $("ckpt-name").value.trim() || `step-${state.trainer.step}`).slice(0, 80),
-    cfg: state.trainer.cfg,
-    step: state.trainer.step,
-    bestLoss: state.trainer.bestLoss,
-    tokenizer: state.trainer.tokenizer.toJSON(),
-    weights,
-    corpus: (stats.docs || []).map((d) => ({
-      title: d.title,
-      text: d.text,
-      source: d.source,
-      url: d.url,
-      weight: d.weight,
-      kind: d.kind,
-    })),
-    mtime: Date.now(),
-  };
-  pack.bytes = JSON.stringify(pack).length;
-  return pack;
+// ---------- brain save / export / import ----------
+
+function wantedBrainName() {
+  return ($("ckpt-name").value.trim() || `step-${state.trainer.step}`).slice(0, 80);
 }
 
-async function applyBrain(blob) {
-  if (!blob?.weights || !blob?.cfg || !blob?.tokenizer) {
-    throw new Error("Not an Ember brain file.");
+async function packBrain(name, { includeCorpus }) {
+  const stats = includeCorpus ? await state.store.stats() : null;
+  const brain = await serializeBrain(state.trainer, {
+    name,
+    corpusDocs: includeCorpus ? stats.docs || [] : null,
+  });
+  return brain;
+}
+
+async function storeCkpt(name, brain) {
+  const json = JSON.stringify(brain);
+  const stored = { ...brain, mtime: Date.now(), bytes: json.length };
+  await state.store.setKv(`ckpt:${name}`, stored);
+  return stored;
+}
+
+async function saveCkpt(name, { quiet = false } = {}) {
+  // On-device checkpoints are weights-only: the corpus already lives in
+  // IndexedDB next to them, so embedding another full copy in every
+  // checkpoint just eats phone storage. The corpus checkbox governs
+  // file/GitHub EXPORTS, where the corpus must travel with the brain.
+  const brain = await packBrain(name, { includeCorpus: false });
+  const stored = await storeCkpt(name, brain);
+  await refresh();
+  if (!quiet) notifySuccess(`Checkpoint “${name}” saved on this device`, fmtBytes(stored.bytes));
+  return stored;
+}
+
+/**
+ * Validate-then-swap brain import. The new model is fully built and
+ * smoke-tested BEFORE the current brain is disposed, so a corrupt or
+ * incompatible file can never destroy a working brain.
+ * Returns the normalized brain info.
+ */
+async function applyBrain(raw) {
+  const norm = validateBrain(raw); // throws friendly errors; touches nothing
+  const tok = buildTokenizer(norm); // legacy for v1/v2, byte-BPE for v3
+  const cfg = { ...norm.cfg, vocabSize: tok.vocabSize };
+  const model = new EmberNet(cfg);
+  try {
+    model.setWeights(norm.weights);
+    // smoke test: one real forward pass must produce finite logits
+    const probe = tf.tidy(() =>
+      model.forward(tf.tensor2d([[tok.bosId, tok.bosId]], [1, 2], "int32"))
+    );
+    const vals = await probe.data();
+    probe.dispose();
+    if (![...vals].some((v) => Number.isFinite(v))) {
+      throw new Error("imported brain produced no finite outputs");
+    }
+  } catch (e) {
+    model.dispose();
+    throw e;
   }
-  if (state.trainer.model) state.trainer.model.dispose();
-  state.trainer.cfg = blob.cfg;
-  state.trainer.tokenizer = Tokenizer.fromJSON(blob.tokenizer);
-  state.trainer.cfg.vocabSize = state.trainer.tokenizer.vocabSize;
-  state.trainer.model = new EmberNet(state.trainer.cfg);
-  state.trainer.opt = tf.train.adam(+$("t-lr").value || 3e-4);
-  state.trainer.model.setWeights(blob.weights);
-  state.trainer.step = blob.step || 0;
-  state.trainer.bestLoss = blob.bestLoss || Infinity;
-  state.trainer.ready = true;
-  state.trainer.backend = tf.getBackend();
-  if (Array.isArray(blob.corpus)) {
-    for (const d of blob.corpus) {
+  try {
+    state.trainer.adopt(model, tok, {
+      step: norm.step,
+      bestLoss: norm.bestLoss ?? Infinity,
+      baseLr: norm.baseLr,
+      streamFormat: norm.streamFormat || 1, // the brain's learned layout, never guessed
+    });
+  } catch (e) {
+    model.dispose();
+    throw e;
+  }
+  if (norm.corpus?.length) {
+    for (const d of norm.corpus) {
       try {
         await state.store.addDoc(d);
       } catch {
@@ -398,169 +731,374 @@ async function applyBrain(blob) {
     }
   }
   const stats = await state.store.stats();
-  state.trainer.refreshCorpus(corpusTexts(stats.docs || []));
+  state.trainer.refreshDocs(stats.docs || []);
+  syncVesselSliders(cfg, norm.tokenizer?.type || "legacy");
+  markVesselApplied();
+  state.losses = [];
+  state.vals = [];
+  drawChart();
   renderModelPills();
-}
-
-async function saveCkpt() {
-  const pack = await packBrain();
-  await state.store.setKv(`ckpt:${pack.name}`, pack);
-  refresh();
+  return norm;
 }
 
 async function loadCkpt(name) {
-  const blob = await state.store.getKv(`ckpt:${name}`);
-  if (!blob) return alert("missing checkpoint");
-  await applyBrain(blob);
-}
-
-async function shareOrDownload(pack) {
-  const json = JSON.stringify(pack);
-  const filename = `ember-${pack.name || "brain"}.json`;
-  const file = new File([json], filename, { type: "application/json" });
-  try {
-    if (navigator.canShare?.({ files: [file] })) {
-      await navigator.share({
-        files: [file],
-        title: "Ember brain",
-        text: "Ember checkpoint — import this on another device.",
-      });
-      return;
-    }
-  } catch (e) {
-    if (e && e.name === "AbortError") return;
+  if (state.firing) {
+    notifyWarn("Still firing", "Douse the fire before loading a brain.");
+    return;
   }
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([json], { type: "application/json" }));
-  a.download = filename;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+  const blob = await state.store.getKv(`ckpt:${name}`);
+  if (!blob) {
+    notifyError("Missing checkpoint", `“${name}” is not stored on this device.`);
+    return;
+  }
+  if (state.trainer.ready && state.trainer.step > 0) {
+    if (!confirm(`Replace the current brain (step ${state.trainer.step}) with “${name}”? Unsaved training will be lost.`)) return;
+  }
+  try {
+    const norm = await applyBrain(blob);
+    await refresh();
+    notifySuccess(`Brain “${name}” loaded`, `Step ${norm.step} · you can generate without retraining.`);
+  } catch (e) {
+    notifyError("Could not load that brain", e.message);
+  }
 }
 
 async function exportCkpt(existingName) {
   let pack;
+  let name;
   if (existingName) {
     pack = await state.store.getKv(`ckpt:${existingName}`);
     if (!pack) throw new Error("missing checkpoint");
+    name = existingName;
   } else {
-    pack = await packBrain();
-    await state.store.setKv(`ckpt:${pack.name}`, pack);
+    name = wantedBrainName();
+    pack = await packBrain(name, { includeCorpus: $("export-corpus")?.checked ?? true });
   }
-  await shareOrDownload(pack);
-  refresh();
+  const json = JSON.stringify(pack);
+  // validate what we are about to hand over — a file that can't be
+  // re-imported must never be reported as a successful export.
+  validateBrain(JSON.parse(json));
+  const filename = brainFileName(name);
+  const how = await downloadBrain(json, filename);
+  if (how === "cancelled") {
+    notifyInfo("Export cancelled");
+  } else if (how === "error") {
+    notifyError("Export failed", "The file could not be written. Try again, or save a checkpoint on this device instead.");
+  } else {
+    const where =
+      how === "shared"
+        ? "sent via share sheet"
+        : how === "saved"
+          ? "saved to the location you picked"
+          : "download started";
+    notifySuccess(
+      `Brain exported (${fmtBytes(json.length)})`,
+      `${filename} — ${where}. Import it on any device to restore this exact brain.`
+    );
+  }
 }
 
-$("btn-save").addEventListener("click", () => saveCkpt().catch((e) => alert(e.message)));
-$("btn-export").addEventListener("click", () => exportCkpt().catch((e) => alert(e.message)));
+$("btn-save").addEventListener("click", () =>
+  saveCkpt(wantedBrainName()).catch((e) => notifyError("Save failed", e.message))
+);
+$("btn-export").addEventListener("click", async () => {
+  if (!state.trainer.model) {
+    notifyWarn("Nothing to export", "Cast and fire a vessel first — there is no brain yet.");
+    return;
+  }
+  $("btn-export").disabled = true;
+  $("btn-export").textContent = "Exporting…";
+  try {
+    await exportCkpt();
+    await refresh();
+  } catch (e) {
+    notifyError("Export failed", e.message);
+  } finally {
+    $("btn-export").disabled = false;
+    $("btn-export").textContent = "Export brain (.json)";
+  }
+});
+
 $("ckpt-import").addEventListener("change", async (e) => {
   const file = e.target.files?.[0];
   e.target.value = "";
   if (!file) return;
+  if (state.firing) {
+    notifyWarn("Still firing", "Douse the fire before importing a brain.");
+    return;
+  }
+  let raw;
   try {
-    const blob = JSON.parse(await file.text());
-    await applyBrain(blob);
-    const name = (blob.name || file.name.replace(/\.json$/i, "")).slice(0, 80);
-    blob.name = name;
-    blob.mtime = Date.now();
-    blob.bytes = JSON.stringify(blob).length;
-    await state.store.setKv(`ckpt:${name}`, blob);
-    await refresh();
-    alert("Brain imported. You can generate without retraining.");
+    raw = JSON.parse(await file.text());
+  } catch {
+    notifyError("Import failed", "That file is not valid JSON.");
+    return;
+  }
+  // Validate everything BEFORE asking about replacement, so a bad file
+  // fails fast with a precise reason and the current brain stays intact.
+  let norm;
+  try {
+    norm = validateBrain(raw);
   } catch (err) {
-    alert(err.message || "Could not import that file.");
+    notifyError("Import failed — current brain untouched", err.message);
+    return;
+  }
+  if (state.trainer.ready && state.trainer.step > 0) {
+    if (!confirm(`“${norm.name}” (step ${norm.step}) will replace the current brain (step ${state.trainer.step}). Continue?`)) return;
+  }
+  try {
+    await applyBrain(raw);
+    await storeCkpt(norm.name || file.name.replace(/\.json$/i, "").slice(0, 80), raw);
+    await refresh();
+    notifySuccess("Brain imported", `“${norm.name}” at step ${norm.step} — you can generate without retraining.`);
+  } catch (err) {
+    notifyError("Import failed — current brain untouched", err.message);
   }
 });
 
-$("btn-fire").addEventListener("click", async () => {
+// ---------- fire ----------
+
+async function startFire(stepsOverride = null, { jump = true, source = "manual" } = {}) {
+  if (state.firing) return;
   if (!state.trainer.ready) {
-    alert("Cast the vessel first.");
+    notifyWarn("Cast the vessel first", "Go to the Vessel tab → Cast vessel from corpus.");
     return;
   }
+  const stepsRaw = stepsOverride != null ? stepsOverride : +$("t-steps").value;
+  const steps = Math.floor(Number(stepsRaw));
+  if (!Number.isFinite(steps) || steps < 1 || steps > 5000) {
+    notifyError("Bad step count", "Steps must be between 1 and 5000.");
+    return;
+  }
+  const batchCap = isPhone ? 8 : 32;
+  const batchWanted = Math.floor(+$("t-batch").value) || 2;
+  const batch = Math.max(1, Math.min(batchCap, batchWanted));
+  try {
+    state.trainer.setLr(+$("t-lr").value || 3e-4);
+  } catch (e) {
+    notifyError("Bad learning rate", e.message);
+    return;
+  }
+  // balancing changes stream composition, so it must be set BEFORE the
+  // corpus refresh below (boundary/clip flags apply per-batch instead);
+  // lesson-loss masking is also baked into the stream, same reason
+  state.trainer.balanceMode = $("t-balance")?.value === "sqrt" ? "sqrt" : "off";
+  state.trainer.maskLessonPrompts = $("t-lessonloss")?.value === "response";
   const stats = await state.store.stats();
-  state.trainer.refreshCorpus(corpusTexts(stats.docs || []));
+  state.trainer.refreshDocs(stats.docs || []);
+  const clipRaw = Number($("t-clip")?.value);
+  state.trainer.gradClip = Number.isFinite(clipRaw) && clipRaw > 0 ? clipRaw : 0;
+  state.trainer.samplerMode = $("t-sampler")?.value === "epoch" ? "epoch" : "random";
+  const respectBounds = $("t-boundaries")?.value !== "legacy";
+  state.trainer.docBoundaryMask = respectBounds;
+  state.trainer.maskBoundaryLoss = respectBounds;
+  const valEvery = Math.max(0, Math.floor(+$("t-val")?.value) || 0);
   state.stopTrain = false;
   state.firing = true;
-  $("btn-fire").disabled = true;
   $("btn-douse").disabled = false;
-  document.querySelector('[data-tab="fire"]').click();
-  const steps = +$("t-steps").value;
-  const batch = Math.max(1, Math.min(isPhone ? 8 : 32, +$("t-batch").value));
+  if (jump) document.querySelector('[data-tab="fire"]').click();
   const every = +$("t-every").value;
   const until = state.trainer.step + steps;
-  state.trainer.baseLr = +$("t-lr").value || 3e-4;
   state.trainer.setSchedule(until);
-  logEl($("train-log"), `fire ${steps} steps · batch ${batch} · cosine LR · ${tf.getBackend()}`);
+  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat}${state.trainer.maskLessonPrompts ? " · lesson loss: response-only" : ""} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
+  const st0 = state.trainer.status();
+  logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} tokens trained so far`);
+  const srcParts = Object.entries(st0.source_tokens || {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([k, v]) => `${k} ${v}${st0.source_boosts?.[k] > 1 ? ` (×${st0.source_boosts[k]} boost)` : ""}`);
+  if (srcParts.length) logEl($("train-log"), `stream by source: ${srcParts.join(" · ")}${st0.balance_mode === "sqrt" ? " · balancing on" : ""}`);
+  renderModelPills();
+  let outcome = "completed";
   try {
     while (!state.stopTrain && state.trainer.step < until) {
       const m = await state.trainer.trainStep(batch);
       state.losses.push(m.loss);
-      if (state.losses.length > 400) state.losses.shift();
+      if (state.losses.length > 400) {
+        state.losses.shift();
+        state.vals = state.vals.map((v) => ({ ...v, at: v.at - 1 })).filter((v) => v.at >= 1);
+      }
+      if (valEvery && m.step % valEvery === 0) {
+        try {
+          const v = await state.trainer.validate();
+          if (v) {
+            state.vals.push({ at: state.losses.length, loss: v.loss });
+            logEl($("train-log"), `step ${m.step}  val loss ${v.loss.toFixed(4)}  ppl ${v.ppl.toFixed(1)}  (${v.windows} held-out windows)`);
+          }
+        } catch (err) {
+          logEl($("train-log"), `! validation failed: ${err.message}`);
+        }
+      }
       drawChart();
+      const valTxt = state.vals.length ? ` · val ${state.vals[state.vals.length - 1].loss.toFixed(3)}` : "";
       $("heat-meta").textContent =
-        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)} · ema ${m.ema.toFixed(3)} · best ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)}`;
+        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)}${valTxt} · ema ${m.ema.toFixed(3)} · best ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · |grad| ${m.grad_norm != null ? m.grad_norm.toFixed(2) : "—"}${m.clipped ? " (clipped)" : ""} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)} · ${fmtChars(m.tokens_processed)} tok trained`;
       $("pill-speed").textContent = `train ${fmtTps(m.train_tps)}`;
       $("pill-fire").textContent = `firing ${m.step}/${until}`;
+      $("pill-model").textContent = `${(state.trainer.model.nParams() / 1e6).toFixed(2)}M · ${tf.getBackend()} · step ${m.step}`;
       if (m.step % 5 === 0) logEl($("train-log"), `step ${m.step}  loss ${m.loss.toFixed(4)}  ema ${m.ema.toFixed(4)}  ${fmtTps(m.train_tps)}`);
       if (m.step % 50 === 0) {
         try {
-          await saveCkpt();
-          logEl($("train-log"), `auto-saved checkpoint at step ${m.step}`);
-        } catch {
-          /* ignore */
+          // one rolling autosave (weights only) — never a pile of full
+          // corpus+weights copies eating the phone's storage.
+          const brain = await packBrain("autosave", { includeCorpus: false });
+          await storeCkpt("autosave", brain);
+          logEl($("train-log"), `auto-saved (rolling) at step ${m.step}`);
+          refresh().catch(() => {});
+        } catch (err) {
+          logEl($("train-log"), `! autosave failed: ${err.message}`);
         }
       }
       if (every && m.step % every === 0) {
-        const sample = await state.trainer.generate($("t-prompt").value, {
-          maxNew: 40,
-          temperature: 0.9,
-          topK: 40,
-          topP: 0.95,
-          repetition: 1.15,
-        });
-        const box = document.createElement("div");
-        box.className = "sample";
-        const s = document.createElement("span");
-        s.className = "step";
-        s.textContent = `step ${m.step} · gen ${fmtTps(sample.tokensPerSec)}`;
-        const t = document.createElement("div");
-        t.textContent = sample.text || "(silence)";
-        box.append(s, t);
-        $("samples").prepend(box);
-        while ($("samples").children.length > 8) $("samples").lastChild.remove();
+        try {
+          // Fixed seed + fixed settings: samples across steps and across
+          // runs are comparable evidence, not lucky draws.
+          const sample = await state.trainer.generate($("t-prompt").value, {
+            maxNew: 40,
+            temperature: 0.9,
+            topK: 40,
+            topP: 0.95,
+            repetition: 1.15,
+            seed: 1234,
+          });
+          const box = document.createElement("div");
+          box.className = "sample";
+          const s = document.createElement("span");
+          s.className = "step";
+          s.textContent = `step ${m.step} · gen ${fmtTps(sample.tokensPerSec)}`;
+          const t = document.createElement("div");
+          t.textContent = sample.text || "(silence)";
+          box.append(s, t);
+          $("samples").prepend(box);
+          while ($("samples").children.length > 8) $("samples").lastChild.remove();
+        } catch (err) {
+          logEl($("train-log"), `! sample failed: ${err.message}`);
+        }
       }
       await tf.nextFrame();
     }
-    logEl($("train-log"), `doused at step ${state.trainer.step}`);
+    if (state.stopTrain) outcome = "doused";
+    logEl($("train-log"), `${outcome} at step ${state.trainer.step}`);
   } catch (e) {
+    outcome = "failed";
     logEl($("train-log"), `! ${e.message}`);
+    notifyError("Training stopped", `${e.message} Weights from completed steps are kept — lower the learning rate or batch and Fire again.`);
   } finally {
     state.firing = false;
-    $("btn-fire").disabled = false;
     $("btn-douse").disabled = true;
     renderModelPills();
   }
-});
+  if (outcome === "completed") {
+    const st = state.trainer.status();
+    notifySuccess(
+      `Firing complete — step ${st.step}`,
+      `Best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}${st.val_loss != null ? ` · val ${st.val_loss.toFixed(3)} (ppl ${st.val_ppl.toFixed(0)})` : ""} · ${fmtChars(st.tokens_processed)} tokens trained · train ${fmtTps(st.train_tps)}. Save or export the brain to keep it.`
+    );
+    osNotify("Ember: firing complete", `Step ${st.step} · best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}`);
+  } else if (outcome === "doused") {
+    notifyInfo(`Doused at step ${state.trainer.step}`, "Progress so far is kept in the vessel. Save a checkpoint to persist it.");
+  }
+}
+
+$("btn-fire").addEventListener("click", () =>
+  startFire(null, { jump: true }).catch((e) => notifyError("Training stopped", e.message))
+);
 
 $("btn-douse").addEventListener("click", () => {
   state.stopTrain = true;
 });
 
+$("btn-fire-reset")?.addEventListener("click", () => {
+  $("t-steps").value = 150;
+  $("t-batch").value = 2;
+  $("t-lr").value = 0.0003;
+  $("t-every").value = 25;
+  if ($("t-clip")) $("t-clip").value = 1;
+  if ($("t-val")) $("t-val").value = 50;
+  if ($("t-sampler")) $("t-sampler").value = "random";
+  if ($("t-boundaries")) $("t-boundaries").value = "respect";
+  if ($("t-balance")) $("t-balance").value = "off";
+  if ($("t-lessonloss")) $("t-lessonloss").value = "both";
+  notifyInfo("Firing schedule reset to defaults");
+});
+
+// ---------- voice ----------
+
 $("btn-gen").addEventListener("click", async () => {
-  $("btn-gen").disabled = true;
+  if (state.firing) {
+    notifyWarn("Still firing", "Wait for training to finish, or Douse it, then generate.");
+    return;
+  }
+  if (!state.trainer.ready) {
+    notifyWarn("No vessel yet", "Cast a vessel (Vessel tab) and Fire it before generating.");
+    return;
+  }
+  if (state.trainer.step === 0) {
+    notifyWarn("This brain has never been fired", "It will produce untrained noise. Fire at least ~150 steps first for a fair sample.");
+  }
+  state.generating = true;
+  renderModelPills();
   $("gen-out").textContent = "thinking…";
   try {
-    const out = await state.trainer.generate($("gen-prompt").value, {
+    const seedRaw = $("gen-seed")?.value.trim();
+    const seed = seedRaw !== "" && Number.isFinite(+seedRaw) ? Math.floor(+seedRaw) : null;
+    const repRaw = Number($("gen-rep")?.value);
+    // Task modes phrase the request in the exact lesson format the
+    // skill packs teach (formatLessonPrompt), so the brain is asked in
+    // a shape it was actually trained on. "documents" additionally
+    // grounds the prompt in retrieved corpus passages (research).
+    const promptText = $("gen-prompt").value;
+    const task = $("gen-task")?.value || "continue";
+    let instruction = null;
+    let taskNote = "";
+    if (task === "translate") {
+      const lang = ($("gen-lang")?.value || "").trim() || "Spanish";
+      instruction = `Translate from English to ${lang}: ${promptText}`;
+      taskNote = ` · task: translate → ${lang}`;
+    } else if (task === "summarize") {
+      instruction = `Summarize in one sentence: ${promptText}`;
+      taskNote = " · task: summarize";
+    } else if (task === "documents") {
+      const stats = await state.store.stats();
+      const hits = searchDocs(stats.docs || [], promptText, { k: 2 });
+      if (!hits.length) {
+        $("gen-out").textContent =
+          "No documents in your corpus match that question yet. Forage or add fuel on the topic first — this mode answers from your documents, it does not invent sources.";
+        notifyWarn("No matching documents", "Add fuel on this topic, then ask again.");
+        return;
+      }
+      const ctxText = hits.map((h) => h.doc.text.slice(0, 600)).join("\n---\n");
+      instruction = `Passage: ${ctxText}\nQuestion: ${promptText}`;
+      taskNote = ` · task: answer from documents (${hits.map((h) => h.doc.title).join("; ")})`;
+    }
+    // optional subreddit conditioning: only format-2 brains were trained
+    // with <sub> headers, so only they get the prefix (shown honestly in
+    // the meta line below; never silently injected for old brains).
+    // Applies to plain continuation only — task modes use lesson shape.
+    const subWanted = ($("gen-sub")?.value || "").trim().replace(/^r\//, "");
+    const subApplied = !instruction && subWanted && state.trainer.streamFormat === 2 ? subWanted : null;
+    const fullPrompt = instruction
+      ? formatLessonPrompt(state.trainer.streamFormat, instruction)
+      : subApplied
+        ? `<sub> ${subApplied}\n<comment> ${promptText}`
+        : promptText;
+    const out = await state.trainer.generate(fullPrompt, {
       maxNew: +$("gen-tokens").value,
       temperature: +$("gen-temp").value,
       topK: +$("gen-k").value,
       topP: +($("gen-p")?.value || 0.95),
-      repetition: 1.15,
+      repetition: Number.isFinite(repRaw) && repRaw >= 1 ? repRaw : 1.15,
+      seed,
+      stopOnBoundary: $("gen-stop")?.value !== "continue",
     });
     state.lastGeneration = out.text;
     $("gen-out").innerHTML = "";
     const meta = document.createElement("div");
     meta.className = "prompt";
-    meta.textContent = `${fmtTps(out.tokensPerSec)} · ${out.ms.toFixed(0)} ms · ${out.newTokens} tokens · ${tf.getBackend()}`;
+    meta.textContent =
+      `${fmtTps(out.tokensPerSec)} · ${out.ms.toFixed(0)} ms · ${out.newTokens} tokens · ${tf.getBackend()}` +
+      (out.seed != null ? ` · seed ${out.seed} (reproducible)` : "") +
+      taskNote +
+      (subApplied ? ` · conditioned on r/${subApplied}` : !instruction && subWanted ? ` · ⚠ r/${subWanted} ignored — this brain predates structured stream format 2` : "") +
+      (out.contextTrimmed ? ` · ⚠ prompt was ${out.promptTokens} tokens — only the last ${state.trainer.cfg.blockSize} fit the context window` : "");
     $("pill-speed").textContent = `gen ${fmtTps(out.tokensPerSec)}`;
     const p = document.createElement("div");
     p.className = "prompt";
@@ -570,26 +1108,52 @@ $("btn-gen").addEventListener("click", async () => {
     $("gen-out").append(meta, p, t);
   } catch (e) {
     $("gen-out").textContent = e.message;
+    notifyError("Generation failed", e.message);
   } finally {
-    $("btn-gen").disabled = false;
+    state.generating = false;
+    renderModelPills();
   }
+});
+
+$("btn-gen-reset")?.addEventListener("click", () => {
+  $("gen-tokens").value = 80;
+  $("gen-temp").value = 0.9;
+  $("gen-k").value = 40;
+  $("gen-p").value = 0.95;
+  if ($("gen-rep")) $("gen-rep").value = 1.15;
+  if ($("gen-seed")) $("gen-seed").value = "";
+  if ($("gen-sub")) $("gen-sub").value = "";
+  if ($("gen-stop")) $("gen-stop").value = "stop";
+  if ($("gen-task")) $("gen-task").value = "continue";
+  if ($("gen-lang")) $("gen-lang").value = "Spanish";
+  document
+    .querySelectorAll(".chip[data-gen-preset]")
+    .forEach((x) => x.classList.toggle("on", x.dataset.genPreset === "balanced"));
+  notifyInfo("Voice settings reset to defaults");
 });
 
 $("btn-teach").addEventListener("click", async () => {
   const prompt = $("teach-prompt").value.trim();
   const response = $("teach-resp").value.trim();
-  if (!prompt || !response) return;
-  await state.store.addDoc({
-    title: prompt.slice(0, 80),
-    source: "taught",
-    kind: "lesson",
-    weight: +$("teach-weight").value || 8,
-    text: `### Prompt:\n${prompt}\n\n### Response:\n${response}\n`,
-  });
-  $("teach-prompt").value = "";
-  $("teach-resp").value = "";
-  refresh();
-  alert("Lesson stored on this device. Fire again so it takes.");
+  if (!prompt || !response) {
+    notifyWarn("Lesson incomplete", "Fill in both “When I say” and “You should say”.");
+    return;
+  }
+  try {
+    await state.store.addDoc({
+      title: prompt.slice(0, 80),
+      source: "taught",
+      kind: "lesson",
+      weight: +$("teach-weight").value || 8,
+      text: `### Prompt:\n${prompt}\n\n### Response:\n${response}\n`,
+    });
+    $("teach-prompt").value = "";
+    $("teach-resp").value = "";
+    await refresh();
+    notifySuccess("Lesson stored on this device", "Fire again so it takes — lessons only enter the weights during training.");
+  } catch (e) {
+    notifyError("Could not store the lesson", e.message);
+  }
 });
 
 $("btn-teach-from-gen").addEventListener("click", () => {
@@ -597,35 +1161,40 @@ $("btn-teach-from-gen").addEventListener("click", () => {
   $("teach-resp").value = state.lastGeneration;
 });
 
-function toast(msg) {
-  const el = $("toast");
-  if (!el) return;
-  el.hidden = false;
-  el.textContent = msg;
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => {
-    el.hidden = true;
-  }, 6000);
+// ---------- teachers UI ----------
+
+function teacherUsedText(tid) {
+  const s = state.desk.state[tid];
+  const left = state.desk.remaining(tid);
+  const until = s.resetAt ? new Date(s.resetAt).toLocaleString() : "—";
+  return s.exhausted
+    ? `empty · ${s.lastError || "no credits"} · resets ${until}`
+    : `${s.used || 0}/${s.max} used · ${left} left · reset ${until}`;
 }
 
-function renderTeachers() {
+/**
+ * Build teacher cards ONCE, then update them in place. Rebuilding the grid
+ * on every status tick (the old behavior) destroyed focus and wiped
+ * half-typed API keys whenever a teacher call completed.
+ */
+function buildTeacherCards() {
   const grid = $("teacher-grid");
-  if (!grid || !state.desk) return;
   grid.innerHTML = "";
-  const defWin = $("teach-window-default")?.value || "daily";
   for (const t of TEACHERS) {
     const s = state.desk.state[t.id];
     state.desk._rollWindow(t.id);
     const card = document.createElement("article");
     card.className = "teacher" + (s.exhausted ? " dead" : "");
+    card.dataset.teacher = t.id;
     const sw = document.createElement("label");
     sw.className = "switch";
     const title = document.createElement("h3");
     title.textContent = t.name;
     const tog = document.createElement("input");
     tog.type = "checkbox";
+    tog.dataset.role = "toggle";
     tog.checked = !!s.on && !s.exhausted;
-    tog.addEventListener("change", () => state.desk.setOn(t.id, tog.checked).then(renderTeachers));
+    tog.addEventListener("change", () => state.desk.setOn(t.id, tog.checked));
     sw.append(title, tog);
     const compute = document.createElement("div");
     compute.className = "compute";
@@ -636,13 +1205,14 @@ function renderTeachers() {
     const win = document.createElement("label");
     win.textContent = "Window";
     const sel = document.createElement("select");
+    sel.dataset.role = "window";
     for (const w of WINDOWS) {
       const o = document.createElement("option");
       o.value = w.id;
       o.textContent = w.label;
-      if (s.window === w.id) o.selected = true;
       sel.appendChild(o);
     }
+    sel.value = s.window;
     sel.addEventListener("change", async () => {
       s.window = sel.value;
       s.resetAt = 0;
@@ -651,12 +1221,14 @@ function renderTeachers() {
       renderTeachers();
     });
     win.appendChild(sel);
+    attachHelp(win, "teacher-window");
     const max = document.createElement("label");
     max.textContent = "Max calls / window";
     const maxIn = document.createElement("input");
     maxIn.type = "number";
     maxIn.min = "1";
     maxIn.max = "500";
+    maxIn.dataset.role = "max";
     maxIn.value = s.max;
     maxIn.addEventListener("change", async () => {
       s.max = Math.max(1, +maxIn.value || t.defaultMax);
@@ -664,6 +1236,7 @@ function renderTeachers() {
       renderTeachers();
     });
     max.appendChild(maxIn);
+    attachHelp(max, "teacher-max");
     card.append(sw, compute, hint, win, max);
     for (const field of t.needs) {
       const lab = document.createElement("label");
@@ -671,28 +1244,52 @@ function renderTeachers() {
       const inp = document.createElement("input");
       inp.type = field === "token" ? "password" : "text";
       inp.autocomplete = "off";
+      inp.dataset.role = field;
       inp.value = s[field] || "";
       inp.placeholder = field === "token" ? "paste free-tier key" : "Cloudflare account id";
       inp.addEventListener("change", async () => {
         s[field] = inp.value.trim();
         await state.desk.save();
+        notifyInfo(`${t.name} ${field === "accountId" ? "account ID" : "token"} saved on this device`);
       });
       lab.appendChild(inp);
       card.appendChild(lab);
     }
     const used = document.createElement("div");
     used.className = "used";
-    const left = state.desk.remaining(t.id);
-    const until = s.resetAt ? new Date(s.resetAt).toLocaleString() : "—";
-    used.textContent = s.exhausted
-      ? `empty · ${s.lastError || "no credits"} · resets ${until}`
-      : `${s.used || 0}/${s.max} used · ${left} left · reset ${until}`;
+    used.dataset.role = "used";
+    used.textContent = teacherUsedText(t.id);
     card.appendChild(used);
     grid.appendChild(card);
   }
-  if (defWin) {
-    /* default select only applies to new toggles via change handler on the default dropdown */
+}
+
+function updateTeacherCards() {
+  const grid = $("teacher-grid");
+  for (const t of TEACHERS) {
+    const card = grid.querySelector(`[data-teacher="${t.id}"]`);
+    if (!card) continue;
+    const s = state.desk.state[t.id];
+    state.desk._rollWindow(t.id);
+    card.classList.toggle("dead", !!s.exhausted);
+    const set = (role, fn) => {
+      const el = card.querySelector(`[data-role="${role}"]`);
+      if (el && document.activeElement !== el) fn(el);
+    };
+    set("toggle", (el) => (el.checked = !!s.on && !s.exhausted));
+    set("window", (el) => (el.value = s.window));
+    set("max", (el) => (el.value = s.max));
+    for (const field of t.needs) set(field, (el) => (el.value = s[field] || ""));
+    const used = card.querySelector('[data-role="used"]');
+    if (used) used.textContent = teacherUsedText(t.id);
   }
+}
+
+function renderTeachers() {
+  const grid = $("teacher-grid");
+  if (!grid || !state.desk) return;
+  if (!grid.children.length) buildTeacherCards();
+  else updateTeacherCards();
 }
 
 $("teach-window-default")?.addEventListener("change", async () => {
@@ -702,30 +1299,44 @@ $("teach-window-default")?.addEventListener("change", async () => {
   }
   await state.desk.save();
   renderTeachers();
+  notifyInfo("Default window applied to teachers that are off");
 });
 
 $("btn-notify-perm")?.addEventListener("click", async () => {
-  try {
-    const p = await Notification.requestPermission();
-    toast(p === "granted" ? "Notifications on" : "Notifications blocked");
-  } catch {
-    toast("Notifications not available in this browser");
+  const p = await requestNotifyPermission();
+  if (p === "granted") {
+    notifySuccess("Notifications on", "Teachers can now call out when they run empty, even in the background.");
+    osNotify("Ember", "Notifications are on.");
+  } else if (p === "denied") {
+    notifyWarn("Notifications blocked", "Allow them in the browser's site settings. In-app notifications (the bell, top right) still work.");
+  } else if (p === "unavailable") {
+    notifyWarn("OS notifications unavailable in this browser", "No Notification API here (common in app WebViews). In-app notifications (the bell, top right) still work.");
+  } else {
+    notifyInfo("Notification permission not granted", "In-app notifications (the bell, top right) still work.");
   }
 });
 
 $("btn-teach-run")?.addEventListener("click", async () => {
   if (!state.desk) return;
+  if (!state.desk.enabledIds().length) {
+    notifyWarn("No teachers are on", "Flip at least one teacher's switch below (and add its key if it needs one), then Auto-teach.");
+    return;
+  }
   $("btn-teach-run").disabled = true;
   $("btn-teach-stop").disabled = false;
+  notifyInfo("Auto-teach started", "Teachers write fuel; Ember still trains locally.");
   await state.desk.runLoop(() => $("seeds").value);
   $("btn-teach-run").disabled = false;
   $("btn-teach-stop").disabled = true;
-  refresh();
+  await refresh();
+  notifyInfo("Auto-teach stopped", "Local training still works — Fire when ready.");
 });
 
 $("btn-teach-stop")?.addEventListener("click", () => {
   if (state.desk) state.desk.stop = true;
 });
+
+// ---------- GitHub vault ----------
 
 function ghSettings() {
   return {
@@ -751,46 +1362,62 @@ async function loadGhSettings() {
 }
 
 async function pullGithubBrain() {
+  if (state.firing) throw new Error("Douse the fire before pulling a brain.");
   const { repo, path, token } = ghSettings();
   const [owner, name] = repo.split("/");
-  if (!owner || !name || !token) throw new Error("Set owner/repo, path, and token.");
+  if (!owner || !name || !token) throw new Error("Set owner/repo, path, and token first.");
   const localSha = (await state.store.getKv("github-sha")) || null;
   const head = await githubHead(owner, name, path, token);
   if (head.sha && head.sha === localSha && state.trainer.ready) {
-    toast("GitHub brain already up to date");
+    notifyInfo("GitHub brain already up to date");
     return;
   }
   const { sha, brain } = await githubPull(owner, name, path, token);
   if (!brain) throw new Error("No file at that path yet. Push first.");
+  const norm = validateBrain(brain); // fail fast before confirming
+  if (state.trainer.ready && state.trainer.step > 0) {
+    if (!confirm(`Pulled brain “${norm.name}” (step ${norm.step}) will replace the current brain (step ${state.trainer.step}). Continue?`)) return;
+  }
   await applyBrain(brain);
-  await state.store.setKv(`ckpt:${brain.name || "github"}`, brain);
+  await storeCkpt(norm.name || "github", brain);
   await state.store.setKv("github-sha", sha);
   await refresh();
-  toast("Pulled brain from GitHub");
+  notifySuccess("Pulled brain from GitHub", `“${norm.name}” at step ${norm.step}.`);
 }
 
 async function pushGithubBrain() {
-  const pack = await packBrain();
   const { repo, path, token } = ghSettings();
   const [owner, name] = repo.split("/");
-  if (!owner || !name || !token) throw new Error("Set owner/repo, path, and token.");
+  if (!owner || !name || !token) throw new Error("Set owner/repo, path, and token first.");
+  const pack = await packBrain(wantedBrainName(), { includeCorpus: $("export-corpus")?.checked ?? true });
+  validateBrain(JSON.parse(JSON.stringify(pack))); // never push an unrestorable file
   const head = await githubHead(owner, name, path, token);
   const sha = await githubPush(owner, name, path, token, pack, head.sha);
   await state.store.setKv("github-sha", sha);
-  toast("Pushed brain to GitHub");
+  notifySuccess("Pushed brain to GitHub", `${repo}/${path}`);
 }
 
 ["gh-repo", "gh-path", "gh-token", "gh-pull-start"].forEach((id) => {
   $(id)?.addEventListener("change", () => saveGhSettings().catch(() => {}));
 });
-$("btn-gh-pull")?.addEventListener("click", () => pullGithubBrain().catch((e) => alert(e.message)));
-$("btn-gh-push")?.addEventListener("click", () => pushGithubBrain().catch((e) => alert(e.message)));
+$("btn-gh-pull")?.addEventListener("click", () =>
+  pullGithubBrain().catch((e) => notifyError("GitHub pull failed", e.message))
+);
+$("btn-gh-push")?.addEventListener("click", () =>
+  pushGithubBrain().catch((e) => notifyError("GitHub push failed", e.message))
+);
+
+// ---------- install ----------
 
 function setupInstall() {
   const bar = $("install-bar");
   const btn = $("btn-install");
   const hide = $("btn-install-hide");
   if (!bar || !btn) return;
+  if (window.EmberAndroid) {
+    bar.hidden = true; // already running as the installed Android app
+    return;
+  }
   let deferred = null;
   window.addEventListener("beforeinstallprompt", (e) => {
     e.preventDefault();
@@ -805,8 +1432,9 @@ function setupInstall() {
       bar.hidden = true;
       return;
     }
-    alert(
-      "Chrome: menu ⋮ → Add to Home screen / Install app.\nSafari: Share → Add to Home Screen.\nAfter that, open the Ember icon — Termux does not need to be running."
+    notifyInfo(
+      "Install Ember",
+      "Chrome: menu ⋮ → Add to Home screen / Install app. Safari: Share → Add to Home Screen. After that, open the Ember icon — Termux does not need to be running."
     );
   });
   hide.addEventListener("click", () => {
@@ -819,51 +1447,90 @@ function setupInstall() {
   }
 }
 
+// ---------- boot ----------
+
 async function boot() {
+  initNotify();
+  initHelp();
   try {
     if (navigator.storage?.persist) await navigator.storage.persist();
   } catch {
     /* ignore */
   }
-  if ("serviceWorker" in navigator) {
+  // In the Android APK every file is already local (assets) and a service
+  // worker can only risk serving stale code — skip it there.
+  if (!window.EmberAndroid && "serviceWorker" in navigator) {
     navigator.serviceWorker.register("./sw.js").catch(() => {});
   }
   setupInstall();
-  state.store = await openStore();
+  try {
+    state.store = await openStore();
+  } catch (e) {
+    notifyError("Storage unavailable", "IndexedDB could not be opened (private browsing?). Corpus and checkpoints can't be saved. " + e.message);
+    throw e;
+  }
   state.desk = new TeacherDesk(state.store, {
     onLog: (line) => logEl($("teach-log"), line),
     onDoc: (doc) => state.store.addDoc(doc),
     onExhaust: ({ name, why }) => {
-      if ($("teach-notify")?.checked) toast(`${name}: ${why}`);
+      if ($("teach-notify")?.checked !== false) {
+        notifyWarn(`${name} is empty`, `${why} Local kiln keeps going.`);
+      }
       renderTeachers();
     },
     onStatus: () => renderTeachers(),
+    osNotifyEnabled: () => $("teach-notify")?.checked !== false,
   });
   await state.desk.load();
   renderTeachers();
-  let backend;
   try {
-    backend = await initBackend();
+    const backend = await initBackend();
     $("pill-device").textContent = `on-device · ${backend.backend}`;
+    state.trainer.backend = backend.backend;
   } catch (e) {
     $("pill-device").textContent = "tfjs missing";
+    notifyError("TensorFlow.js failed to load", "The model cannot run. Check your connection and reload. " + e.message);
     console.error(e);
   }
-  applyPreset(isPhone ? "phone" : "phone");
+  applyPreset("phone");
   if (isPhone) {
     $("t-batch").value = 2;
+    $("t-batch").max = 8; // matches the real phone cap instead of silently clamping
     $("budget").value = 12;
   }
   paramEstimate();
   await refresh();
+  // Surface the rolling autosave (written every 50 firing steps) so a
+  // reload doesn't strand the user at "vessel unformed" with no hint
+  // that a trained brain is waiting. Probe-only: we validate and tell,
+  // never auto-load — replacing the live model is the user's call.
+  try {
+    const auto = state.checkpoints.find((c) => c.name === "autosave");
+    const blob = auto ? await state.store.getKv("ckpt:autosave") : null;
+    if (blob) {
+      const norm = validateBrain(blob);
+      const when = auto.mtime ? new Date(auto.mtime).toLocaleString() : "earlier";
+      notifyInfo(
+        "Autosave found",
+        `Step ${norm.step} · ${norm.tokenizer?.type || "legacy"} tokenizer · saved ${when}. Load it from the Memory card (Vessel tab) to pick up where you left off.`
+      );
+    }
+  } catch (e) {
+    notifyWarn("Autosave is unreadable", `It was not loaded. ${e.message} Named checkpoints (if any) are unaffected.`);
+  }
   await loadGhSettings();
   if ($("gh-pull-start")?.checked) {
-    try {
-      await pullGithubBrain();
-    } catch (e) {
-      console.warn(e);
-    }
+    pullGithubBrain().catch((e) => notifyWarn("GitHub auto-pull failed", e.message));
   }
 }
 
-boot().catch((e) => console.warn(e));
+boot().catch((e) => {
+  console.error(e);
+  try {
+    notifyError("Ember failed to start", e.message || String(e));
+  } catch {
+    /* notify itself unavailable */
+  }
+  const pill = $("pill-fire");
+  if (pill) pill.textContent = "failed to start";
+});

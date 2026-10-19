@@ -1,2 +1,5 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
+# The shipped app is web/ (trains in the browser) and needs nothing else.
+# torch is ONLY needed if you run the parallel PyTorch implementation in
+# ember/ directly:  pip install "torch>=2.0"

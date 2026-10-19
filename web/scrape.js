@@ -6,6 +6,8 @@
  * No content filter, no NSFW skip, no topic blocklist. Public text only.
  */
 
+import { decodeEntities } from "./corpus.js";
+
 const STOP = new Set(`a an the of to in on for and or is are was were be been being
   this that those these it its as at by from with without into about over after
   before between than then so if but not no yes you we they he she i my your our
@@ -54,17 +56,15 @@ function keywords(text, n = 6) {
     .map(([w]) => w);
 }
 
-function stripHtml(s) {
-  return String(s || "")
+export function stripHtml(s) {
+  const noBlocks = String(s || "")
+    // script/style/noscript CONTENTS are not prose — drop them wholesale
+    // (previously only the tags went, leaving CSS/JS as "training text")
+    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+    .replace(/<\/(p|div|li|h[1-6]|tr|blockquote)>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ");
+  return decodeEntities(noBlocks)
     .replace(/\[deleted\]|\[removed\]/gi, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
@@ -182,14 +182,39 @@ async function arcticFindSubs(prefix) {
     .map((s) => String(s).replace(/^r\//, ""));
 }
 
-function redditDocsFromPosts(rows, source) {
+/**
+ * Structured metadata for one Reddit record. Missing fields stay null —
+ * never invented. IDs lose their t1_/t3_ fullname prefixes so a post's
+ * id matches its comments' link ids (both forms appear in the APIs).
+ */
+function redditMeta(p, { threadId = null, parentId = null } = {}) {
+  const bare = (v) => {
+    const s = typeof v === "string" ? v.replace(/^t[0-9]_/, "").trim() : "";
+    return s || null;
+  };
+  const subRaw = p.subreddit || p.subreddit_name_prefixed || null;
+  return {
+    subreddit: bare(subRaw)?.replace(/^r\//, "") || null,
+    threadId: bare(threadId),
+    parentId: bare(parentId),
+    createdUtc: Number.isFinite(p.created_utc) && p.created_utc > 0 ? Math.floor(p.created_utc) : null,
+  };
+}
+
+/**
+ * Build training-ready docs from Reddit-style post fields. The format-2
+ * stream conditions on meta.subreddit + title explicitly; text keeps
+ * the legacy title+"\n\n"+body join (the stream splits it back via
+ * doc.title), so dedup identity and existing corpora are unaffected.
+ */
+export function redditDocsFromPosts(rows, source) {
   const docs = [];
   for (const p of rows) {
     const title = p.title || "";
     const body = stripHtml(p.selftext || p.body || "");
     const text = [title, body].filter(Boolean).join("\n\n");
     if (text.length < 80) continue;
-    const sub = p.subreddit || p.subreddit_name_prefixed || "";
+    const sub = (p.subreddit || p.subreddit_name_prefixed || "").replace(/^r\//, "");
     const id = p.id || p.name || "";
     docs.push({
       title: title || `r/${sub} post`,
@@ -199,34 +224,34 @@ function redditDocsFromPosts(rows, source) {
         : `https://www.reddit.com/comments/${id}`,
       source,
       kind: "reddit",
+      meta: redditMeta(p, { threadId: p.id || p.name || null }),
     });
   }
   return docs;
 }
 
-function redditDocsFromComments(rows, source) {
+/**
+ * ONE DOCUMENT PER COMMENT (Phase C). The old code glued 8 unrelated
+ * comments into a single document, teaching random topic switching and
+ * discarding subreddit/thread structure. Short comments stay separate
+ * records; training efficiency is handled by boundary-masked packing,
+ * not by merging documents.
+ */
+export function redditDocsFromComments(rows, source) {
   const docs = [];
-  const chunks = [];
   for (const c of rows) {
     const body = stripHtml(c.body || "");
     if (body.length < 40) continue;
-    chunks.push(body);
-  }
-  // pack comments into denser training docs
-  for (let i = 0; i < chunks.length; i += 8) {
-    const slice = chunks.slice(i, i + 8);
-    const text = slice.join("\n\n");
-    if (text.length < 120) continue;
-    const first = rows[i] || {};
-    const sub = first.subreddit || "reddit";
+    const sub = (c.subreddit || "").replace(/^r\//, "") || "reddit";
     docs.push({
-      title: `r/${sub} comments`,
-      text,
-      url: first.permalink
-        ? `https://www.reddit.com${first.permalink}`
+      title: `r/${sub} comment`,
+      text: body,
+      url: c.permalink
+        ? `https://www.reddit.com${c.permalink}`
         : `https://www.reddit.com/r/${sub}`,
       source,
-      kind: "reddit",
+      kind: "reddit-comment",
+      meta: redditMeta(c, { threadId: c.link_id || null, parentId: c.parent_id || null }),
     });
   }
   return docs;
@@ -591,3 +616,190 @@ There was a table set out under a tree in front of the house, and the March Hare
 “Why is a raven like a writing-desk?” said the Hatter. “Come, we shall have some fun now!” thought Alice. “I’m glad they’ve begun asking riddles.” “Why is a raven like a writing-desk?” “Have you guessed the riddle yet?” the Hatter said. “No, I give it up,” Alice replied. “What’s the answer?” “I haven’t the slightest idea,” said the Hatter.
 `,
 };
+
+/**
+ * Topic-training pack (Phase C/E): short purpose-written documents that
+ * demonstrate the exact behaviors boundary-aware training is meant to
+ * teach — staying on one topic inside a document, ending cleanly,
+ * changing subject ONLY with an explicit conversational signal, and
+ * subreddit-style posts/comments as separate records. This is a tiny
+ * scaffold (a few thousand words), not a substitute for real corpus
+ * volume: it gives the model clean examples of the *shape* of topics
+ * and transitions, which scraped text alone rarely shows at phone scale.
+ */
+export const TOPIC_PACK = [
+  {
+    title: "Topic pack — the harbour at dawn",
+    kind: "page",
+    text: `The harbour wakes before the town does. The fishing boats knock softly against the piles, and the gulls argue over scraps near the fish market. Old Tom untangles his nets on the quay, in his fingers, while the tide creeps in over the mud. By the time the sun clears the breakwater, the first boats are already heading out past the lighthouse, their engines humming across the flat grey water. The harbour smells of salt, rope and diesel, and everyone who works there knows the weather by the colour of the sky over the point.`,
+  },
+  {
+    title: "Topic pack — fixing a bicycle chain",
+    kind: "page",
+    text: `A bicycle chain usually slips because it is worn, dry, or badly adjusted. First, shift onto the smallest cog and check whether the chain sags between the gears. If it does, loosen the rear wheel, pull it back a few millimetres, and tighten the nuts evenly on both sides. Next, clean the chain with a rag, add a drop of oil to each link, and wipe off the excess so it does not collect grit. Finally, pedal slowly by hand and watch the chain pass over every cog. A healthy chain runs quietly and changes gear without jumping.`,
+  },
+  {
+    title: "Topic pack — why bread rises",
+    kind: "page",
+    text: `Bread rises because yeast turns sugar into gas. The tiny bubbles of carbon dioxide collect inside the dough, and the stretchy gluten in the flour traps them like a net. Warmth speeds the yeast up, which is why dough left near a stove doubles faster than dough in a cold room. When the loaf goes into the oven, the heat makes the gas expand one last time before the crust sets. That is why a well-risen loaf feels light, sounds hollow when tapped, and slices without crumbling into dust.`,
+  },
+  {
+    title: "Topic pack — a conversation that changes subject openly",
+    kind: "page",
+    text: `Maria asked whether the library would be open on Sunday. "It closes at four on Sundays," said Priya. "But the reading room opens at nine, so we could finish the history essay before lunch." Maria nodded and wrote the times in her notebook. "By the way," she said, changing the subject, "did you ever call the bicycle shop about your brakes?" Priya laughed. "I did. They can fix them on Tuesday, so I am walking until then." The two questions had nothing to do with each other, and both of them knew it — that is what "by the way" is for.`,
+  },
+  {
+    title: "Topic pack — questions and follow-ups on one subject",
+    kind: "page",
+    text: `### Prompt:
+What do bees do in winter?
+
+### Response:
+Bees stay inside the hive and cluster together in a tight ball around the queen. They shiver their flight muscles to make warmth and slowly eat the honey they stored in summer. On mild days a few bees fly out briefly, but most of the colony waits quietly for spring flowers.`,
+  },
+  {
+    title: "Topic pack — a follow-up that stays on the bees",
+    kind: "page",
+    text: `### Prompt:
+Why do bees store honey?
+
+### Response:
+Honey is the colony's winter food store. Flowers give nectar only in the warm months, so the bees dry the nectar into honey and seal it in wax cells. When cold weather comes and no flowers are open, the bees open the cells and eat the honey for energy.`,
+  },
+  {
+    title: "Topic pack — an explicit change of subject",
+    kind: "page",
+    text: `### Prompt:
+Enough about bees. Let us talk about trains instead. Why do trains need signals?
+
+### Response:
+Signals keep trains a safe distance apart. A train is heavy and takes a long way to stop, so the driver cannot rely on eyesight alone. A red signal means the track ahead is occupied, amber means prepare to stop, and green means the line is clear.`,
+  },
+  {
+    title: "Bicycle chain keeps jumping off the big ring",
+    kind: "page",
+    meta: { subreddit: "bikewrench", threadId: "topicpack001", parentId: null, createdUtc: 1700000000 },
+    text: `Bicycle chain keeps jumping off the big ring
+
+Every time I shift up under load, the chain throws itself off the outside of the big ring and onto the crank arm. It only happens on climbs. The chain is maybe two seasons old. What should I check first?`,
+  },
+  {
+    title: "r/bikewrench comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "bikewrench", threadId: "topicpack001", parentId: "topicpack001", createdUtc: 1700003600 },
+    text: `That is the high limit screw on the front derailleur, nine times out of ten. Shift into the big ring and look at the gap between the chain and the outer cage plate — you want about a millimetre. Turn the H screw a quarter turn at a time until the shift is clean but the chain cannot overshoot.`,
+  },
+  {
+    title: "r/bikewrench comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "bikewrench", threadId: "topicpack001", parentId: "topicpack001", createdUtc: 1700007200 },
+    text: `Also measure the chain for wear before you chase adjustments. A stretched chain rides up on the teeth and will jump no matter how the limits are set. If a wear gauge drops in at 0.75, replace the chain first and then set the limits.`,
+  },
+  {
+    title: "The lighthouse keeper's last winter",
+    kind: "page",
+    meta: { subreddit: "shortstories", threadId: "topicpack002", parentId: null, createdUtc: 1700100000 },
+    text: `The lighthouse keeper's last winter
+
+For forty years Elias Vance had climbed the iron stairs at dusk, and for forty years the lamp had answered him with light. This winter the service was sending a machine to do his work, a box of wires that needed no tea, no sleep and no company. Elias Vance polished the lens anyway. He wrote the weather in the log book in his careful hand. On the last night he stood on the gallery while the beam swept over the dark sea, and he was not sad, exactly. The light would still be there. Only the climbing would end.`,
+  },
+  {
+    title: "r/shortstories comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "shortstories", threadId: "topicpack002", parentId: "topicpack002", createdUtc: 1700103600 },
+    text: `The detail about polishing the lens anyway is the whole story in one gesture. He is not keeping the light for the ships any more, he is keeping it because care is what his hands know. Quiet and sad and exactly long enough.`,
+  },
+  {
+    title: "How do I stop my tomatoes splitting?",
+    kind: "page",
+    meta: { subreddit: "gardening", threadId: "topicpack003", parentId: null, createdUtc: 1700200000 },
+    text: `How do I stop my tomatoes splitting?
+
+Half my tomatoes split open just as they ripen. The plants look healthy and I water them most evenings. Is it the variety, or am I doing something wrong?`,
+  },
+  {
+    title: "r/gardening comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "gardening", threadId: "topicpack003", parentId: "topicpack003", createdUtc: 1700203600 },
+    text: `Splitting is almost always uneven water. The fruit swells faster than the skin can stretch after a dry spell ends. Mulch heavily around the plants and water deeply on a regular schedule instead of little and often, and pick fruit at first blush during rainy weeks.`,
+  },
+  {
+    title: "Topic pack — the night train",
+    kind: "page",
+    text: `The night train leaves the city under a sky the colour of wet slate. Carriages sway through suburbs where kitchen windows glow amber, then the houses thin out and the fields take over. Passengers read, doze, and watch their own reflections ride beside them in the black glass. Somewhere past midnight the train slows for a junction, brakes sighing, and the guard walks the corridor checking tickets by torchlight. By dawn there will be sea air at the windows and gulls over a different harbour — but that is the morning's story, and this one belongs to the dark.`,
+  },
+  {
+    title: "Topic pack — how a library card works",
+    kind: "page",
+    text: `A library card is a small promise between a reader and a town. The card carries a number, and the number points to a record with your name on it. When you borrow a book, the librarian scans the card and the book together, and the system remembers that the book is with you until a certain date. Bring it back on time and the promise is kept; bring it back late and there may be a small fine. The same card works at every branch in the town, because all the branches share one catalogue and one list of readers.`,
+  },
+];
+
+/**
+ * Skill packs (all-purpose training): teach-by-hand LESSONS in one
+ * consistent template per task, so a tiny brain can learn the *shape*
+ * of translation, passage-grounded answering, summarizing and other
+ * small skills. Honest scope: these packs are scaffolds — a few dozen
+ * examples teach formats, not fluency. Real ability needs hundreds to
+ * thousands of examples per skill (see docs/capabilities.md). The same
+ * source sentences repeat across languages on purpose: the only thing
+ * that changes is the language named in the prompt, which is exactly
+ * the conditioning a small model can actually learn.
+ */
+function lesson(title, prompt, response) {
+  return { title, kind: "lesson", text: `### Prompt:\n${prompt}\n\n### Response:\n${response}\n` };
+}
+
+export const TRANSLATION_PACK = [
+  lesson("Translate EN→ES — harbour", "Translate from English to Spanish: The harbour is quiet in the morning.", "El puerto está tranquilo por la mañana."),
+  lesson("Translate EN→ES — cat", "Translate from English to Spanish: The cat sleeps under the table.", "El gato duerme debajo de la mesa."),
+  lesson("Translate EN→ES — bread", "Translate from English to Spanish: Bread needs flour, water and time.", "El pan necesita harina, agua y tiempo."),
+  lesson("Translate EN→ES — train", "Translate from English to Spanish: The train arrives at midnight.", "El tren llega a medianoche."),
+  lesson("Translate EN→ES — garden", "Translate from English to Spanish: She reads a book in the garden.", "Ella lee un libro en el jardín."),
+  lesson("Translate ES→EN — market", "Translate from Spanish to English: El mercado abre a las ocho.", "The market opens at eight."),
+  lesson("Translate ES→EN — beach", "Translate from Spanish to English: Los niños juegan en la playa.", "The children play on the beach."),
+  lesson("Translate ES→EN — rain", "Translate from Spanish to English: La lluvia cae sobre el tejado.", "The rain falls on the roof."),
+  lesson("Translate EN→FR — harbour", "Translate from English to French: The harbour is quiet in the morning.", "Le port est calme le matin."),
+  lesson("Translate EN→FR — cat", "Translate from English to French: The cat sleeps under the table.", "Le chat dort sous la table."),
+  lesson("Translate EN→FR — train", "Translate from English to French: The train arrives at midnight.", "Le train arrive à minuit."),
+  lesson("Translate EN→DE — harbour", "Translate from English to German: The harbour is quiet in the morning.", "Der Hafen ist morgens ruhig."),
+  lesson("Translate EN→DE — cat", "Translate from English to German: The cat sleeps under the table.", "Die Katze schläft unter dem Tisch."),
+  lesson("Translate EN→DE — bread", "Translate from English to German: Bread needs flour, water and time.", "Brot braucht Mehl, Wasser und Zeit."),
+  lesson("Translate EN→MS — harbour", "Translate from English to Malay: The harbour is quiet in the morning.", "Pelabuhan itu tenang pada waktu pagi."),
+  lesson("Translate EN→MS — cat", "Translate from English to Malay: The cat sleeps under the table.", "Kucing itu tidur di bawah meja."),
+  lesson("Translate EN→MS — train", "Translate from English to Malay: The train arrives at midnight.", "Kereta api itu tiba pada tengah malam."),
+  lesson("Translate EN→ZH — harbour", "Translate from English to Chinese: The harbour is quiet in the morning.", "早上港口很安静。"),
+  lesson("Translate EN→ZH — cat", "Translate from English to Chinese: The cat sleeps under the table.", "猫在桌子下面睡觉。"),
+  lesson("Translate EN→ZH — train", "Translate from English to Chinese: The train arrives at midnight.", "火车在午夜到达。"),
+];
+
+const BEES_PASSAGE = "In winter the bees stay inside the hive and cluster in a tight ball around the queen. They shiver their flight muscles to make warmth and slowly eat the honey they stored in summer. On mild days a few bees fly out briefly, but most of the colony waits for spring.";
+const TOMATO_PASSAGE = "Tomatoes split when watering is uneven: after a dry spell, a heavy watering makes the fruit swell faster than the skin can stretch. Mulch around the plants and water deeply on a regular schedule to prevent it.";
+const TRAIN_PASSAGE = "The night train leaves the city at ten and crosses the valley after midnight. Somewhere past the junction it slows, brakes sighing, while the guard walks the corridor checking tickets by torchlight. By dawn it reaches the coast.";
+const CARD_PASSAGE = "A library card carries a number that points to a record with your name. When you borrow a book, the system remembers that the book is with you until a certain date. Bring it back late and there may be a small fine. The same card works at every branch in the town.";
+
+export const RESEARCH_PACK = [
+  lesson("Research — answer from the passage (bees 1)", `Passage: ${BEES_PASSAGE}\nQuestion: Where do bees stay in winter?`, "Inside the hive, clustered in a tight ball around the queen."),
+  lesson("Research — answer from the passage (bees 2)", `Passage: ${BEES_PASSAGE}\nQuestion: What do bees eat in winter?`, "The honey they stored in summer."),
+  lesson("Research — not in the passage (bees)", `Passage: ${BEES_PASSAGE}\nQuestion: How many bees live in the hive?`, "The passage does not say."),
+  lesson("Research — answer from the passage (tomatoes)", `Passage: ${TOMATO_PASSAGE}\nQuestion: Why do tomatoes split?`, "Because uneven watering makes the fruit swell faster than the skin can stretch."),
+  lesson("Research — not in the passage (tomatoes)", `Passage: ${TOMATO_PASSAGE}\nQuestion: Which fertilizer brand works best?`, "The passage does not say."),
+  lesson("Research — answer from the passage (train)", `Passage: ${TRAIN_PASSAGE}\nQuestion: When does the night train reach the coast?`, "By dawn."),
+  lesson("Research — answer from the passage (library card)", `Passage: ${CARD_PASSAGE}\nQuestion: What happens if a book comes back late?`, "There may be a small fine."),
+  lesson("Research — answer from the passage (library card 2)", `Passage: ${CARD_PASSAGE}\nQuestion: Does the card work at other branches?`, "Yes, the same card works at every branch in the town."),
+];
+
+export const SKILLS_PACK = [
+  lesson("Skill — summarize (harbour)", "Summarize in one sentence: The harbour wakes before the town. Fishing boats knock against the piles, gulls argue near the fish market, and by sunrise the first boats are heading out past the lighthouse into flat grey water.", "At dawn the harbour comes alive as fishing boats set out past the lighthouse."),
+  lesson("Skill — summarize (bread)", "Summarize in one sentence: Bread rises because yeast turns sugar into gas, and the stretchy gluten in the flour traps the bubbles like a net. Warmth speeds the yeast up, and the oven's heat expands the gas one last time before the crust sets.", "Bread rises because yeast gas is trapped by stretchy gluten and expands with warmth."),
+  lesson("Skill — explain simply (photosynthesis)", "Explain simply: photosynthesis", "Photosynthesis is how plants make their food. Leaves take in sunlight, water and air, and turn them into sugar for energy and oxygen that floats away."),
+  lesson("Skill — explain simply (the tide)", "Explain simply: why does the sea have tides?", "The moon's gravity pulls on the sea, making the water bulge towards it. As the earth turns, shores move in and out of the bulge, so the water rises and falls twice a day."),
+  lesson("Skill — rewrite politely (report)", "Rewrite politely: Give me the report now.", "Could you please send me the report when you have a moment?"),
+  lesson("Skill — rewrite politely (noise)", "Rewrite politely: Stop making so much noise.", "Would you mind keeping it down a little, please?"),
+  lesson("Skill — keywords (harbour)", "List the keywords: The fishing boats leave the harbour before dawn and return with the evening tide.", "fishing boats, harbour, dawn, tide"),
+  lesson("Skill — keywords (garden)", "List the keywords: Tomatoes need steady water, rich soil and full sun to ripen without splitting.", "tomatoes, water, soil, sun, ripen"),
+  lesson("Skill — fix grammar (goes)", "Fix the grammar: she go to school every day", "She goes to school every day."),
+  lesson("Skill — fix grammar (were)", "Fix the grammar: the dogs was barking at the gate", "The dogs were barking at the gate."),
+  lesson("Skill — continue the story (lighthouse)", "Continue the story: The lighthouse keeper opened the door and", "found the storm already waiting on the steps, so he lit the lamp early and made tea for whoever the sea might send him."),
+  lesson("Skill — answer briefly (capital)", "Answer briefly: What is the capital of France?", "Paris."),
+];

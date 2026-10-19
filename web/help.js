@@ -1,0 +1,469 @@
+/**
+ * Contextual help: a small ⓘ button next to every important setting.
+ * Clicking opens one shared popover with a plain-language explanation
+ * written against THIS code (engine.js / scrape.js / teachers.js), so
+ * "what happens if I raise it" matches what the app actually does.
+ *
+ * Each entry may define:
+ *   title, what, why, up, down, start, ex, applies
+ * Missing fields are simply not rendered.
+ */
+
+const CAST = "Applies when you press Cast vessel. Recasting wipes the current brain — export it first.";
+const FIRE = "Read fresh each time you press Fire.";
+const NOW = "Applies to the next Generate immediately.";
+const FORAGE = "Read at the start of each forage pass.";
+
+export const HELP = {
+  // ---------- Fuel / forager ----------
+  seeds: {
+    title: "Seed topics",
+    what: "Comma-separated topics the forager searches for across every enabled source (Wikipedia family, Reddit, Stack Exchange, Gutenberg, HN, Open Library).",
+    why: "The model can only learn the style and facts in its fuel. Seeds decide what ends up in the corpus.",
+    ex: "For a cooking voice: “bread, fermentation, singapore hawker food”.",
+    applies: FORAGE,
+  },
+  subreddits: {
+    title: "Subreddits",
+    what: "Specific subreddits to pull posts from. Leave empty and Ember guesses one from each seed topic and searches for related ones.",
+    why: "Reddit text is conversational — good if you want a chatty voice, noisy if you don't.",
+    applies: FORAGE,
+  },
+  wiki: {
+    title: "Wikipedia source",
+    what: "“All Wikimedia sisters” rotates through Simple/EN Wikipedia, Wikiquote, Wikisource, Wikivoyage, Wikibooks, Wikinews and Wiktionary. Or pin one project.",
+    start: "Simple English Wikipedia is the best default fuel for a tiny model — short sentences, common words.",
+    applies: FORAGE,
+  },
+  budget: {
+    title: "Page budget / pass",
+    what: "The maximum number of NEW documents the forager gathers in one pass, counted across all sources together. Duplicates (same URL) don't count.",
+    up: "More fuel per pass, but each pass takes longer and uses more data/storage.",
+    down: "Shorter passes — handy on a phone to check the fuel looks right before gathering lots.",
+    start: "12–40 on a phone; raise it once you trust your seeds.",
+    applies: FORAGE,
+  },
+  "src-wander": {
+    title: "Follow wiki links & categories",
+    what: "After fetching a wiki page, Ember also queues a few pages it links to and members of matching categories (still within the page budget).",
+    why: "Widens coverage beyond exact search hits, at the cost of drifting off-topic faster.",
+    applies: FORAGE,
+  },
+  "src-autopilot": {
+    title: "Autopilot",
+    what: "When a pass ends, Ember takes keywords and subreddits discovered in the pages it just fetched and immediately starts another pass with them. It only stops when you press Stop.",
+    why: "Hands-off corpus building. Watch the Seeds box — autopilot rewrites it as it wanders, so topics drift over time.",
+    applies: FORAGE,
+  },
+  "src-autofire": {
+    title: "Auto-fire after each pass",
+    what: "After every forage pass, if a vessel is cast and not already firing, Ember trains 40 steps on the updated corpus.",
+    why: "Keeps the brain absorbing new fuel without you visiting the Fire tab. Uses your current Batch and Learning rate.",
+    applies: FORAGE,
+  },
+
+  // ---------- Teachers ----------
+  "teach-window-default": {
+    title: "Usage window default",
+    what: "The bookkeeping window applied to teachers that are currently OFF. Ember counts your calls per teacher inside this window and resets the counter when it ends. Daily resets at local midnight; 5h/12h are rolling from first use.",
+    why: "Free tiers have quotas. The window cap stops Ember burning a teacher's quota in one sitting; a real 401/429 from the provider also marks the teacher empty immediately.",
+    applies: "Saved immediately; each teacher card can override its own window.",
+  },
+  "teach-notify": {
+    title: "Notify when a teacher is empty",
+    what: "When a teacher hits its cap or the provider reports no credits/quota, it switches itself off and you get a notification (in-app always; an OS notification too if you allowed them).",
+    why: "So a dead teacher never fails silently while local training keeps going.",
+  },
+  "teacher-window": {
+    title: "Usage window (this teacher)",
+    what: "How long Ember counts this teacher's calls before resetting the counter. “This session” never resets until the app restarts.",
+    why: "Match it to the provider's free-tier reset (most are daily) so Ember stops asking before the provider starts erroring.",
+  },
+  "teacher-max": {
+    title: "Max calls / window",
+    what: "Local cap on calls to this teacher per window. Reaching it (or a quota error from the provider) flips the teacher off until the window resets.",
+    up: "More teacher-written fuel per window — if the provider's real quota allows it.",
+    down: "Safer for small free tiers; Ember stops sooner instead of erroring.",
+  },
+
+  // ---------- Vessel ----------
+  "v-layer": {
+    title: "Layers",
+    what: "How many transformer blocks are stacked. Each block lets tokens look at each other (attention) and then remix what they saw (MLP).",
+    up: "Can learn deeper patterns, but every layer adds parameters, slows each training step, and uses more memory.",
+    down: "Faster and lighter; shallower patterns. 2 is the phone default.",
+    start: "2 on a phone, 4 on desktop.",
+    applies: CAST,
+  },
+  "v-head": {
+    title: "Heads",
+    what: "Attention is split into this many parallel “heads”, each of size Embedding ÷ Heads. Heads MUST divide the embedding size or the vessel can't be cast.",
+    up: "More simultaneous points of view, but each head gets smaller (64 ÷ 8 = 8 numbers per head is very cramped).",
+    down: "Fewer, larger heads.",
+    start: "2 with Embedding 64; keep head size ≥ 32 (Heads ≤ Embedding ÷ 32).",
+    applies: CAST,
+  },
+  "v-embd": {
+    title: "Embedding size",
+    what: "The width of the vectors the model thinks in. This is the biggest size lever: parameters grow with Vocab × Embedding (the token table) plus 12 × Embedding² per layer.",
+    up: "More capacity to tell words and contexts apart; noticeably slower steps and bigger brain files.",
+    down: "Faster, smaller, blurrier. 64 keeps the phone vessel ≈0.2M parameters.",
+    start: "64 phone · 128–192 desktop.",
+    applies: CAST,
+  },
+  "v-ctx": {
+    title: "Context",
+    what: "How many tokens the model can see at once — the training window length AND the generation memory. When generating, only the last Context tokens are fed back in; anything older is forgotten.",
+    up: "Longer-range coherence, but attention cost grows with the SQUARE of context and each step trains on longer sequences.",
+    down: "Faster steps; the model forgets the start of long prompts.",
+    start: "64 phone · 128 desktop. Raise it if samples lose the thread mid-sentence.",
+    applies: CAST,
+  },
+  "v-vocab": {
+    title: "Vocab cap",
+    what: "Maximum tokenizer vocabulary. With byte-level BPE (default) Ember starts from the 256 possible bytes and repeatedly merges the most frequent adjacent pair in your corpus until the cap — common chunks like “ the” become single tokens, and any text at all can still be spelled from bytes. With the legacy tokenizer it's every distinct character plus the most frequent whole words up to the cap. If your corpus is small, the real vocab ends below the cap.",
+    up: "More merged chunks → fewer tokens per sentence → more text fits in Context. But the embedding table (Vocab × Embedding) and brain file grow.",
+    down: "More byte/character-by-character spelling; smaller, faster model.",
+    start: "1500 is a good phone size. Raise toward 3000+ for a large, varied corpus.",
+    applies: CAST,
+  },
+  "v-ffn": {
+    title: "FFN width",
+    what: "Each Transformer layer has a small two-step “thinking” network (the feed-forward block) that expands the embedding to a wider hidden size and back. Classic Transformers use 4× the embedding width; that hidden layer is about two-thirds of each block's weights. Slim (2×) roughly halves block size and speeds training; Wide (6×) adds capacity at real memory and speed cost. The parameter estimate under the card updates live, including the training-memory floor (weights + gradients + Adam state ≈ 16 bytes per parameter, before activations).",
+    why: "At phone scale the FFN is the main capacity/speed knob besides layer count. Whether 2× or 6× helps is an empirical question for YOUR corpus — run the same corpus at two widths and compare validation loss, not vibes. The benchmark (tests/bench.mjs sizes) does exactly this comparison.",
+    start: "Classic 4×. Try Slim 2× if training feels slow — on tiny corpora it often loses little. Non-default widths are recorded in the brain file; brains that use them need this (or a newer) Ember build to import.",
+    applies: CAST,
+  },
+  "v-tokenizer": {
+    title: "Tokenizer",
+    what: "How text is chopped into tokens before the model sees it — learned from YOUR corpus at cast time, either way. Byte-level BPE learns frequent multi-letter chunks (the method modern tokenizers use) and can represent any text, including languages and emoji it never saw. Legacy word pieces is Ember's original scheme: whole frequent words, everything else spelled character-by-character, unseen characters lost to <unk>.",
+    why: "A brain's weights are only meaningful with the exact tokenizer it trained with — token 412 has to mean the same thing forever. So the tokenizer is chosen at cast, recorded inside every brain file (v3 for BPE), and can never silently change for an existing brain.",
+    up: "BPE for new brains: fewer tokens per sentence, no lost characters.",
+    down: "Pick Legacy only to keep old behavior for comparison. Switching tokenizer on a trained brain means casting a fresh brain (weights can't move across) — Ember saves the old brain as a checkpoint first, and your corpus stays put.",
+    applies: CAST,
+  },
+  "v-drop": {
+    title: "Dropout",
+    what: "During training only, this fraction of activations is randomly zeroed (attention, residuals, embeddings). It is OFF when generating.",
+    why: "Fights memorizing a tiny corpus word-for-word instead of learning patterns.",
+    up: "Less verbatim copying, but learning slows and too much makes training mushy.",
+    start: "0 for short fires. Try 0.05–0.1 if you fire hundreds of steps on a small corpus and samples start quoting it exactly.",
+    applies: CAST,
+  },
+
+  // ---------- Memory / brain ----------
+  "ckpt-name": {
+    title: "Checkpoint name",
+    what: "Name for Save / Export. Saved checkpoints and exported .json brains contain the real learned weights + vocabulary, so this name is how you'll tell brains apart later.",
+    ex: "“alice-500” after 500 steps on the starter text.",
+  },
+  "export-corpus": {
+    title: "Include corpus in export",
+    what: "For EXPORTED brain files (and GitHub pushes): also embeds the full fuel corpus (every document) in the file, so importing on another device restores the texts too. On-device “Save here” checkpoints never embed the corpus — it already lives on this device, so a copy per checkpoint would just waste storage.",
+    why: "Off = much smaller export file (weights only). On = the other device can keep training on the same fuel immediately, and the file is a complete backup if this device is lost.",
+  },
+  "gh-repo": {
+    title: "GitHub repo",
+    what: "Repository as owner/name (for example kilkproduct/AI) used as an optional cloud vault for one brain file.",
+  },
+  "gh-path": {
+    title: "Path in repo",
+    what: "Where the brain JSON lives inside that repo, e.g. brains/ember.json. Push creates or updates exactly this file.",
+  },
+  "gh-token": {
+    title: "GitHub token",
+    what: "A fine-grained personal access token with Contents permission for that one repo. It is stored only in this device's IndexedDB and sent only to api.github.com.",
+    why: "Read access is enough to Pull; Push needs write. Use a repo-scoped token, never a broad one.",
+  },
+  "gh-pull-start": {
+    title: "Pull on start if SHA changed",
+    what: "On launch, Ember checks the brain file's Git blob SHA on GitHub and only downloads when it differs from the last one you pulled or pushed — no re-downloading the same brain.",
+  },
+
+  // ---------- Fire ----------
+  "t-steps": {
+    title: "Steps",
+    what: "How many optimizer updates this Fire runs. Each step: grab one random Batch of Context-long slices from the corpus token stream, compute the loss, nudge every weight once.",
+    why: "Learning accumulates across separate Fires (weights + optimizer persist until you recast). The learning-rate warmup + cosine decay stretches across exactly this run's steps.",
+    up: "More learning per Fire; on a small corpus too many steps = memorizing it verbatim.",
+    start: "150 for a first taste; several hundred to make lessons stick.",
+    applies: FIRE,
+  },
+  "t-batch": {
+    title: "Batch",
+    what: "Sequences per step, each Context tokens long, cut at random positions. Train tok/s in the header = Batch × Context ÷ seconds per step.",
+    up: "Smoother, less noisy weight updates; each step is slower and uses more memory. Capped at 8 on phones to protect the browser.",
+    down: "Faster, noisier steps — fine for tiny corpora.",
+    start: "2 on a phone.",
+    applies: FIRE,
+  },
+  "t-lr": {
+    title: "Learning rate",
+    what: "Adam's step size — how far weights move on each update. Each Fire warms up from ~0 to this value over the first ~8% of its steps, then cosine-decays to 15% of it by the end.",
+    up: "Learns faster per step; too high (≳0.01 for these tiny vessels) makes the loss explode to NaN — firing stops with an error instead of silently corrupting weights.",
+    down: "Gentler, may barely learn in a short run. If loss isn't dropping across 100+ steps, raise it a little.",
+    start: "0.0003 default. 0.001–0.003 makes hand-taught lessons take hold in short fires.",
+    applies: FIRE,
+  },
+  "t-every": {
+    title: "Sample every",
+    what: "During firing, generate a 40-token sample from the Sample prompt every N steps so you can watch the voice change. 0 turns sampling off. Sampling briefly pauses training.",
+    applies: FIRE,
+  },
+  "t-prompt": {
+    title: "Sample prompt",
+    what: "The starter text used for the during-firing samples above. Leave empty to sample from a beginning-of-document token.",
+    applies: FIRE,
+  },
+  "t-clip": {
+    title: "Grad clip",
+    what: "The largest gradient size (global norm over all weights) one batch may hand to the optimizer. Bigger gradients are scaled down to this size, keeping their direction. 0 turns clipping off. Every step's gradient is also checked: if the loss or any gradient is NaN, the update is refused BEFORE it touches the weights.",
+    why: "One freak batch (odd page, too-high LR) can otherwise poison the optimizer's memory for many steps. The chart's log line shows |grad| so you can see it working.",
+    up: "Looser leash — closer to raw Adam. Only raise it if you know the gradients are naturally large.",
+    down: "Tighter leash, calmer training; very small values (0.1) can slow learning down.",
+    start: "1.0 is the standard default. Leave it unless loss keeps exploding — then try 0.5 and lower the LR too.",
+    applies: FIRE,
+  },
+  "t-val": {
+    title: "Validate every",
+    what: "Every N steps, Ember scores itself on held-out documents it never trains on (about 10% of your corpus, chosen deterministically per document; lessons and weighted pages are never held out). The teal line on the heat chart is this validation loss; the log also shows perplexity — roughly how many tokens the model is torn between at each step. 0 turns it off.",
+    why: "Training loss can fall just because the model memorizes. Validation loss only falls when the model gets better at text it hasn't seen — that's the number that predicts generation quality. If training loss falls but validation rises, it's memorizing: more diverse fuel beats more steps.",
+    start: "50. Validation needs at least 5 ordinary documents in the corpus; with fewer, there's nothing to hold out and this does nothing.",
+    applies: FIRE,
+  },
+  "t-boundaries": {
+    title: "Doc boundaries",
+    what: "“Respect boundaries” (default): inside a training window, text may not attend across a document boundary (<doc>/<eos>), and the loss ignores each new document's first token plus any metadata header tokens — the next page's opening word is not something the previous page should have to predict. Documents still share windows for efficiency; they just can't see or grade each other. “Legacy packed stream” is the old behavior: the whole corpus is one continuous text.",
+    why: "Packed-without-masking teaches the model that random topic jumps naturally follow everything, and later text attends to an unrelated previous document. Boundary masking is what makes “stay on topic, restart cleanly at a new document” learnable at all.",
+    start: "Respect boundaries. Switch to Legacy only to reproduce an old brain's training regime for comparison. Validation uses the same setting, so its numbers are comparable within a run.",
+    applies: FIRE,
+  },
+  "t-sampler": {
+    title: "Sampler",
+    what: "How training windows are picked from the corpus. “Random windows” draws random positions with replacement — some passages are visited often, some never. “Shuffled pass” deals out non-overlapping windows in random order, each exactly once per pass, then reshuffles.",
+    why: "Shuffled pass guarantees full coverage (the log counts completed passes); random is what Ember always did. Neither is magic — on small corpora both behave similarly.",
+    start: "Random windows (default). Try shuffled pass and compare validation loss on the same corpus if you're curious.",
+    applies: FIRE,
+  },
+
+  // ---------- Voice ----------
+  "gen-tokens": {
+    title: "Tokens",
+    what: "Maximum NEW tokens to generate. Generation stops earlier if the model emits a document-boundary token it learned from the separators between corpus documents (but never before a few tokens, so you don't get empty replies).",
+    why: "Tokens aren't words — with a 1500 vocab, most words are 1 token, rare words spell out in pieces.",
+    applies: NOW,
+  },
+  "gen-temp": {
+    title: "Temperature",
+    what: "The model's scores for the next token are divided by this before sampling. Below 1 sharpens the favourite choices; above 1 flattens them so unlikely tokens get picked more.",
+    up: "Wilder, more surprising, more incoherent (fast on a tiny model).",
+    down: "Safer and more repetitive. Near 0.2 it almost always picks its top guess.",
+    start: "0.7–0.9 for readable tiny-model text.",
+    applies: NOW,
+  },
+  "gen-k": {
+    title: "Top-k",
+    what: "Only the k most likely next tokens are allowed to be sampled; everything else is discarded first. 0 disables top-k.",
+    up: "Lets rarer tokens through (more variety, more weirdness).",
+    down: "k=1 is fully greedy — always the single most likely token. Small k (5–20) keeps a shaky model on the rails.",
+    start: "40, or 10–20 if output is gibberish.",
+    applies: NOW,
+  },
+  "gen-p": {
+    title: "Top-p (nucleus)",
+    what: "After top-k, keep only the smallest set of tokens whose probabilities add up to p, then sample within that set. 1 disables it.",
+    why: "Adapts the candidate pool to the model's confidence: few options when it's sure, more when it isn't.",
+    start: "0.9–0.95.",
+    applies: NOW,
+  },
+  "gen-rep": {
+    title: "Repetition penalty",
+    what: "Tokens that already appeared in the recent text (last ~48 tokens, prompt included) get their scores divided by this number before sampling — positive scores shrink toward zero, negative scores get more negative. 1.0 disables it.",
+    why: "Tiny models love falling into loops (“the the the…”). A mild penalty breaks the loop without retraining. It is a band-aid, not learning: if text only reads well at 1.5+, the brain needs more/better firing, not more penalty.",
+    up: "Fewer repeats, but common words like “the” also get punished — text can turn stilted or weird.",
+    start: "1.15. Lower toward 1.05 for a well-trained brain; raise to ~1.3 if loops dominate.",
+    applies: NOW,
+  },
+  "t-balance": {
+    title: "Source balance",
+    what: "“Boost minority sources” repeats documents from small sources (per subreddit when known, otherwise per forage source) by a capped integer factor — median-based square-root upweighting, at most 4× — when the training stream is built at Fire time. Nothing is ever downweighted or removed. The fire log prints the resulting tokens per source and any boosts applied.",
+    why: "If 90% of your corpus is one subreddit, the brain mostly learns that one voice. Gentle upweighting gives small sources more gradient without the memorization risk of full inverse-frequency weighting (which would repeat a 1% source dozens of times). The 4× cap is the anti-memorization guard.",
+    start: "Off for a single-topic corpus. On when you deliberately mixed sources of very different sizes and want the small ones heard. Compare validation loss both ways before trusting it.",
+    applies: FIRE,
+  },
+  "t-lessonloss": {
+    title: "Lesson loss",
+    what: "Lessons are the Prompt/Response pairs from Teach and the skill packs. “Prompt + response” (default) trains the brain to predict both sides, like ordinary text. “Response only” masks the prompt out of the loss — the brain is still shown the question, but graded only on its answer. This is the standard instruction-tuning choice: with a tiny model's limited capacity, spending gradient on learning to *generate questions* is usually wasted when what you want is answers (translations, summaries, QA). Applies to stream-format-2 brains, where lessons are parsed; baked into the stream at Fire time.",
+    why: "If you are training skills (translation pairs, passage QA), response-only converges on the skill faster per step. If you want the brain to also imitate the style of your prompts (e.g. write its own questions), keep both.",
+    start: "Response only when firing mostly on lessons/skill packs. Prompt + response for general text corpora — it makes no difference to non-lesson documents.",
+    applies: FIRE,
+  },
+  "gen-task": {
+    title: "Task",
+    what: "Phrases your input in the exact lesson format the skill packs teach, so the brain is asked in a shape it trained on: Translate prefixes “Translate from English to <language>: …”; Summarize prefixes “Summarize in one sentence: …”; “Answer from my documents” searches your corpus for the most relevant passages (word-overlap retrieval, entirely on-device) and asks the question against those passages — the output meta line names the documents used. Continue is plain text continuation. These only work as well as the lessons you trained: load the matching packs on the Fuel tab and Fire. Nothing here calls an outside service or hard-codes answers.",
+    why: "A base language model has no built-in notion of “translate this” — it only continues patterns. Training lessons + identically-shaped prompts is how a locally-trained model learns task behavior at all.",
+    start: "Continue for stories/completion. For skills: load the pack, fire a few hundred steps, then pick the matching task here.",
+    applies: NOW,
+  },
+  "gen-lang": {
+    title: "Translate to",
+    what: "The target language name used by the Translate task, written into the prompt exactly as the translation lessons phrase it (“Translate from English to Spanish: …”). The starter pack covers Spanish (both directions), French, German, Malay and Chinese. For other languages, teach your own pairs with the same sentence shape via Teach-by-hand — the byte-BPE tokenizer can represent any script.",
+    why: "The language name is the only signal telling the brain which language to answer in, so it must match the wording used in training lessons.",
+    start: "Spanish (the deepest starter coverage).",
+    applies: NOW,
+  },
+  "gen-sub": {
+    title: "Write as r/… (subreddit conditioning)",
+    what: "For brains cast with structured stream format 2, typing a subreddit name here prefixes your prompt with the same “<sub> name” header the brain saw in training, biasing it toward that community's vocabulary and habits. Older brains ignore it (the output meta line says so). Nothing is hard-coded — if the brain never trained on that subreddit, the name means little to it.",
+    why: "A subreddit name is a hint the model learned from examples, not a switch that downloads a community. Conditioning works only as well as the training data behind the name.",
+    start: "Leave blank normally. Try it after training on mixed subreddits: same prompt, two different sub names, compare.",
+    applies: NOW,
+  },
+  "gen-stop": {
+    title: "Ending",
+    what: "“Stop at document end” lets generation halt when the brain predicts a document-end token (<eos>/<doc>) — natural one-document answers. “Keep going” makes those tokens unsampleable, so text runs to the token limit; useful for long single-topic continuations, worse for short answers.",
+    why: "Format-2 brains are trained to emit <eos> when a document is finished, which is what makes clean endings possible at all. Overriding it trades natural stops for length.",
+    start: "Stop at document end.",
+    applies: NOW,
+  },
+  "gen-seed": {
+    title: "Seed",
+    what: "Fixes the random number generator used for sampling. Same brain + same prompt + same settings + same seed = exactly the same generated text, every time. Blank = fresh randomness each Generate.",
+    why: "Comparing two brains (or before/after a fire) honestly means holding everything else constant — otherwise you're comparing luck. The during-firing samples already use a fixed seed (1234) for this reason.",
+    ex: "Set seed 42, generate, fire 200 more steps, generate again — any difference is the training, not the dice.",
+    applies: NOW,
+  },
+  "teach-weight": {
+    title: "Lesson weight",
+    what: "The lesson text is repeated this many times inside the training token stream, so random batches land on it far more often than on ordinary pages.",
+    up: "The lesson takes hold in fewer steps — but too high and the model starts answering everything with the lesson.",
+    start: "8. If a lesson isn't showing up after a fire, raise it or fire more steps; if it's all the model says, lower it.",
+    applies: "Stored with the lesson; takes effect on the next Fire.",
+  },
+};
+
+let pop = null;
+let openFor = null;
+
+function popover() {
+  if (pop) return pop;
+  pop = document.createElement("div");
+  pop.className = "help-pop";
+  pop.setAttribute("role", "dialog");
+  pop.hidden = true;
+  document.body.appendChild(pop);
+  document.addEventListener("click", (e) => {
+    if (!pop.hidden && !pop.contains(e.target) && e.target !== openFor && !openFor?.contains(e.target)) {
+      closePop();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !pop.hidden) {
+      closePop();
+      openFor?.focus?.();
+    }
+  });
+  window.addEventListener("resize", () => {
+    if (!pop.hidden && openFor) place(openFor);
+  });
+  return pop;
+}
+
+function closePop() {
+  if (!pop) return;
+  pop.hidden = true;
+  if (openFor) openFor.setAttribute("aria-expanded", "false");
+  openFor = null;
+}
+
+function place(btn) {
+  const r = btn.getBoundingClientRect();
+  const pw = Math.min(340, window.innerWidth * 0.92);
+  pop.style.width = `${pw}px`;
+  let left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), window.innerWidth - pw - 8);
+  pop.style.left = `${left}px`;
+  pop.style.top = "0px"; // measure after content
+  const ph = pop.offsetHeight;
+  const below = r.bottom + 8;
+  const above = r.top - ph - 8;
+  pop.style.top = `${below + ph <= window.innerHeight - 8 || above < 8 ? below : above}px`;
+}
+
+function openPop(btn, key) {
+  const h = HELP[key];
+  if (!h) return;
+  const el = popover();
+  if (openFor === btn && !el.hidden) {
+    closePop();
+    return;
+  }
+  el.innerHTML = "";
+  const title = document.createElement("h4");
+  title.textContent = h.title || key;
+  el.appendChild(title);
+  const rows = [
+    ["", h.what],
+    ["Why it matters", h.why],
+    ["Raise it", h.up],
+    ["Lower it", h.down],
+    ["Suggested start", h.start],
+    ["Example", h.ex],
+    ["When it applies", h.applies],
+  ];
+  for (const [label, text] of rows) {
+    if (!text) continue;
+    const p = document.createElement("p");
+    if (label) {
+      const b = document.createElement("b");
+      b.textContent = `${label}: `;
+      p.appendChild(b);
+    }
+    p.appendChild(document.createTextNode(text));
+    el.appendChild(p);
+  }
+  el.hidden = false;
+  openFor = btn;
+  btn.setAttribute("aria-expanded", "true");
+  place(btn);
+}
+
+/** Create an ⓘ button for a help key (not yet attached). */
+export function makeInfoButton(key) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "info-btn";
+  btn.textContent = "ⓘ";
+  btn.title = `About: ${HELP[key]?.title || key}`;
+  btn.setAttribute("aria-label", `Explain ${HELP[key]?.title || key}`);
+  btn.setAttribute("aria-expanded", "false");
+  btn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openPop(btn, key);
+  });
+  return btn;
+}
+
+/** Attach an ⓘ button inside a container element (for dynamic cards). */
+export function attachHelp(container, key) {
+  if (!container || !HELP[key]) return;
+  if (container.querySelector(".info-btn")) return;
+  container.appendChild(makeInfoButton(key));
+}
+
+/** Inject ⓘ buttons next to every registered input id. Call once at boot. */
+export function initHelp() {
+  for (const key of Object.keys(HELP)) {
+    const input = document.getElementById(key);
+    if (!input) continue;
+    const label = input.closest("label") || document.querySelector(`label[for="${key}"]`);
+    if (!label || label.querySelector(".info-btn")) continue;
+    const btn = makeInfoButton(key);
+    // Checkbox labels put the input first; everything else reads
+    // "Text ⓘ [input]". Insert accordingly.
+    const firstControl = label.querySelector("input, select, textarea");
+    const inputIsFirst = firstControl === input && label.firstElementChild === input;
+    if (inputIsFirst || label.classList.contains("chk")) label.appendChild(btn);
+    else label.insertBefore(btn, input);
+  }
+}

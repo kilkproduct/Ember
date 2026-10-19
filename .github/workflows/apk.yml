@@ -3,7 +3,7 @@ name: Build APK
 on:
   workflow_dispatch:
   push:
-    branches: [main, arena/d6275a66-ai]
+    branches: [main, "arena/**"]
     paths:
       - "web/**"
       - "android/**"
@@ -14,6 +14,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Reuse one debug signing key across runs. Without this, every CI
+      # build gets a fresh key and Android refuses to install the new APK
+      # over the old one — forcing an uninstall that wipes the on-device
+      # corpus/brains. A stable key makes updates keep app data.
+      - name: Restore stable debug keystore
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: android-debug-keystore
       - uses: actions/setup-java@v4
         with:
           distribution: temurin

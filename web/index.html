@@ -18,7 +18,17 @@
 </head>
 <body>
   <div class="grain" aria-hidden="true"></div>
-  <div id="toast" class="toast" hidden></div>
+  <div id="notify-stack" class="notify-stack" aria-live="polite"></div>
+  <section id="notify-panel" class="notify-panel" hidden aria-label="Notification history">
+    <header>
+      <h3>Notifications</h3>
+      <span class="notify-panel-actions">
+        <button id="notify-clear" class="btn ghost" type="button">Clear</button>
+        <button id="notify-close" class="btn ghost" type="button">Close</button>
+      </span>
+    </header>
+    <ul id="notify-list" class="notify-list"></ul>
+  </section>
   <div id="install-bar" class="install-bar" hidden>
     <span>Install Ember as an app so you can train without Termux next time.</span>
     <button id="btn-install" class="btn ember" type="button">Install</button>
@@ -42,6 +52,9 @@
       <span class="pill" id="pill-corpus">0 pages · 0 chars</span>
       <span class="pill" id="pill-model">vessel unformed</span>
       <span class="pill" id="pill-fire">idle</span>
+      <button id="btn-bell" class="pill bell" type="button" aria-label="Notifications" aria-expanded="false" title="Notifications — training, exports, errors">
+        🔔<span id="bell-count" class="bell-count" hidden>0</span>
+      </button>
     </div>
   </header>
 
@@ -123,6 +136,10 @@
               <input id="file-input" type="file" accept=".txt,.md,.json" hidden />
             </label>
             <button id="btn-alice" class="btn ghost">Load public-domain starter</button>
+            <button id="btn-topic-pack" class="btn ghost">Load topic-training pack</button>
+            <button id="btn-translation-pack" class="btn ghost">Load translation lessons</button>
+            <button id="btn-research-pack" class="btn ghost">Load research/QA lessons</button>
+            <button id="btn-skills-pack" class="btn ghost">Load general-skills lessons</button>
           </div>
         </article>
       </div>
@@ -135,6 +152,10 @@
           </div>
           <button id="btn-clear" class="btn ghost danger">Clear all</button>
         </header>
+        <p id="corpus-health" class="hint"></p>
+        <div class="actions" id="dedup-row" hidden>
+          <button id="btn-dedup" class="btn ghost" type="button">Remove exact duplicates</button>
+        </div>
         <div id="corpus-list" class="corpus"></div>
       </article>
     </section>
@@ -203,8 +224,23 @@
             <label>Dropout <b id="v-drop-n">0.00</b>
               <input id="v-drop" type="range" min="0" max="0.4" step="0.05" value="0" />
             </label>
+            <label>FFN width
+              <select id="v-ffn">
+                <option value="2">Slim (2× embed)</option>
+                <option value="3">3× embed</option>
+                <option value="4" selected>Classic (4× embed)</option>
+                <option value="6">Wide (6× embed)</option>
+              </select>
+            </label>
           </div>
+          <label>Tokenizer
+            <select id="v-tokenizer">
+              <option value="byte-bpe" selected>Byte-level BPE — new brains (recommended)</option>
+              <option value="legacy">Legacy word pieces — original</option>
+            </select>
+          </label>
           <p class="est" id="param-est">≈ 0.2M parameters</p>
+          <p id="vessel-dirty" class="dirty-note" hidden>● Shape changed — Cast to apply. Recasting wipes the current brain, so export it first if you want to keep it.</p>
           <div class="actions">
             <button id="btn-init" class="btn ember">Cast vessel from corpus</button>
           </div>
@@ -213,7 +249,7 @@
         <article class="card">
           <header class="card-h">
             <h2>Memory</h2>
-            <p>Save on this phone, or <b>export</b> a file to Drive / iCloud / Files and <b>import</b> it on another device so you don’t retrain.</p>
+            <p>Save on this phone, or <b>export the brain</b> as a <code>.json</code> file (real weights + vocabulary, format in <code>docs/brain-format.md</code>) to Drive / iCloud / Files and <b>import</b> it on another device so you don’t retrain.</p>
           </header>
           <div class="row">
             <label>Name
@@ -221,10 +257,11 @@
             </label>
             <button id="btn-save" class="btn">Save here</button>
           </div>
+          <label class="chk"><input id="export-corpus" type="checkbox" checked /> Include corpus in export</label>
           <div class="actions">
-            <button id="btn-export" class="btn ember">Export to file / cloud</button>
+            <button id="btn-export" class="btn ember">Export brain (.json)</button>
             <label class="btn ghost file">
-              Import file
+              Import brain
               <input id="ckpt-import" type="file" accept="application/json,.json" hidden />
             </label>
           </div>
@@ -278,9 +315,42 @@
               <input id="t-prompt" type="text" placeholder="Once upon a time" />
             </label>
           </div>
+          <div class="row">
+            <label>Grad clip
+              <input id="t-clip" type="number" step="0.1" min="0" value="1" />
+            </label>
+            <label>Validate every
+              <input id="t-val" type="number" min="0" max="1000" value="50" />
+            </label>
+            <label>Sampler
+              <select id="t-sampler">
+                <option value="random" selected>Random windows</option>
+                <option value="epoch">Shuffled pass (each once)</option>
+              </select>
+            </label>
+            <label>Doc boundaries
+              <select id="t-boundaries">
+                <option value="respect" selected>Respect boundaries</option>
+                <option value="legacy">Legacy packed stream</option>
+              </select>
+            </label>
+            <label>Source balance
+              <select id="t-balance">
+                <option value="off" selected>Off (as collected)</option>
+                <option value="sqrt">Boost minority sources</option>
+              </select>
+            </label>
+            <label>Lesson loss
+              <select id="t-lessonloss">
+                <option value="both" selected>Prompt + response</option>
+                <option value="response">Response only (skill focus)</option>
+              </select>
+            </label>
+          </div>
           <div class="actions">
             <button id="btn-fire" class="btn ember">Fire</button>
             <button id="btn-douse" class="btn ghost" disabled>Douse</button>
+            <button id="btn-fire-reset" class="btn ghost" type="button">Reset defaults</button>
           </div>
         </article>
         <article class="card chart-card">
@@ -314,6 +384,11 @@
           <label>Prompt
             <textarea id="gen-prompt" rows="4" placeholder="In Singapore, the best way to…"></textarea>
           </label>
+          <div class="presets">
+            <button class="chip" data-gen-preset="precise" type="button">Precise</button>
+            <button class="chip on" data-gen-preset="balanced" type="button">Balanced</button>
+            <button class="chip" data-gen-preset="creative" type="button">Creative</button>
+          </div>
           <div class="row">
             <label>Tokens
               <input id="gen-tokens" type="number" min="8" max="300" value="80" />
@@ -328,8 +403,37 @@
               <input id="gen-p" type="number" step="0.05" min="0" max="1" value="0.95" />
             </label>
           </div>
+          <div class="row">
+            <label>Repetition penalty
+              <input id="gen-rep" type="number" step="0.05" min="1" max="2" value="1.15" />
+            </label>
+            <label>Seed <span class="opt">(blank = random)</span>
+              <input id="gen-seed" type="number" step="1" placeholder="random" />
+            </label>
+            <label>Write as r/ <span class="opt">(optional)</span>
+              <input id="gen-sub" type="text" placeholder="e.g. bikewrench" maxlength="60" />
+            </label>
+            <label>Task
+              <select id="gen-task">
+                <option value="continue" selected>Continue the text</option>
+                <option value="translate">Translate (from English)</option>
+                <option value="summarize">Summarize in one sentence</option>
+                <option value="documents">Answer from my documents</option>
+              </select>
+            </label>
+            <label>Translate to
+              <input id="gen-lang" type="text" value="Spanish" maxlength="40" />
+            </label>
+            <label>Ending
+              <select id="gen-stop">
+                <option value="stop" selected>Stop at document end</option>
+                <option value="continue">Keep going to max tokens</option>
+              </select>
+            </label>
+          </div>
           <div class="actions">
             <button id="btn-gen" class="btn ember">Generate</button>
+            <button id="btn-gen-reset" class="btn ghost" type="button">Reset defaults</button>
           </div>
           <div id="gen-out" class="output"></div>
         </article>
