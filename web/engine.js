@@ -1,5 +1,6 @@
 import { Tokenizer } from "./tokenizer.js";
 import { BpeTokenizer } from "./bpe.js";
+import { sanitizeMeta } from "./corpus.js";
 
 let maskTensor = null;
 let maskSize = 0;
@@ -325,6 +326,24 @@ export function createTokenizer(type = "legacy") {
   throw new Error(`Unknown tokenizer type "${type}".`);
 }
 
+/**
+ * Marker vocabulary for stream format 2, repeated so tokenizer training
+ * (legacy frequency table and BPE merges alike) learns the markers as
+ * stable pieces instead of <unk>s. Added to tokenizer training text for
+ * format-2 casts only — never retrains an existing brain's tokenizer.
+ */
+export const STREAM_MARKER_PRIMER =
+  "<sub> <title> <body> <comment> <user> <assistant> r/example <doc>\n".repeat(24);
+
+/** Parse a teach-by-hand lesson into {prompt, response} or null. */
+export function parseLesson(text) {
+  const m = /^### Prompt:\s*\n([\s\S]*?)\n### Response:\s*\n([\s\S]*?)\s*$/.exec(text || "");
+  if (!m) return null;
+  const prompt = m[1].replace(/\s+$/, "");
+  const response = m[2];
+  return prompt && response ? { prompt, response } : null;
+}
+
 /** FNV-1a 32-bit — stable across devices/runs, used for the data split. */
 export function fnv1a(text) {
   let h = 0x811c9dc5;
@@ -336,11 +355,14 @@ export function fnv1a(text) {
 }
 
 /**
- * Normalize caller-supplied documents to [{text, weight, kind, hash}].
- * Accepts plain strings or store-shaped docs. Identical texts collapse
- * into one document whose weight counts the copies — this preserves the
- * old "repeat weighted docs in the stream" semantics for legacy callers
+ * Normalize caller-supplied documents to
+ * [{text, title, source, weight, kind, meta, hash}]. Accepts plain
+ * strings or store-shaped docs. Identical texts collapse into one
+ * document whose weight counts the copies — this preserves the old
+ * "repeat weighted docs in the stream" semantics for legacy callers
  * while giving the train/validation split unique documents to split.
+ * `meta` carries sanitized structured fields (subreddit/thread/parent/
+ * time) or null; it is preserved, never invented.
  */
 export function normalizeDocs(docs) {
   const byText = new Map();
@@ -353,8 +375,17 @@ export function normalizeDocs(docs) {
     if (prev) {
       prev.weight = Math.min(50, prev.weight + w);
       if (kind === "lesson") prev.kind = "lesson";
+      if (!prev.meta) prev.meta = sanitizeMeta(raw?.meta);
     } else {
-      byText.set(text, { text, weight: w, kind, hash: fnv1a(text) });
+      byText.set(text, {
+        text,
+        title: typeof raw === "object" && raw?.title ? String(raw.title) : "",
+        source: typeof raw === "object" && raw?.source ? String(raw.source) : "manual",
+        weight: w,
+        kind,
+        meta: typeof raw === "object" ? sanitizeMeta(raw?.meta) : null,
+        hash: fnv1a(text),
+      });
     }
   }
   return [...byText.values()];
@@ -362,22 +393,54 @@ export function normalizeDocs(docs) {
 
 /**
  * Deterministic document-level train/validation split. Documents are
- * ordered by their content hash and a prefix becomes validation, so the
- * split is a pure function of the current document set (reproducible;
- * adding documents may move a boundary document — compare validation
- * numbers within one corpus state). Lessons and weighted documents always
- * train: the user explicitly asked the model to learn those. Fewer than 5
+ * grouped into THREAD UNITS (same meta.threadId) so one Reddit thread
+ * can never straddle the split — comments from a validation thread
+ * would otherwise leak into training. Units are ordered by their
+ * smallest content hash and a prefix (by document count) becomes
+ * validation: a pure function of the current document set (reproducible;
+ * adding documents may move a boundary unit — compare validation numbers
+ * within one corpus state). Lessons and weighted documents always train:
+ * the user explicitly asked the model to learn those. Fewer than 5
  * eligible documents → no split (too little data to spare).
  */
 export function splitDocs(docs, valFraction = 0.1) {
-  const eligible = docs.filter((d) => d.weight <= 1 && d.kind !== "lesson");
-  const forced = docs.filter((d) => d.weight > 1 || d.kind === "lesson");
-  if (!valFraction || eligible.length < 5) return { train: docs, val: [] };
-  const nVal = Math.max(1, Math.round(eligible.length * valFraction));
-  if (eligible.length - nVal < 1) return { train: docs, val: [] };
-  const valSet = new Set([...eligible].sort((a, b) => a.hash - b.hash).slice(0, nVal));
+  const eligibleDoc = (d) => d.weight <= 1 && d.kind !== "lesson";
+  // group into thread units (singletons when no threadId)
+  const units = [];
+  const byThread = new Map();
+  for (const d of docs) {
+    const tid = d.meta?.threadId;
+    if (tid) {
+      if (!byThread.has(tid)) {
+        const unit = [];
+        byThread.set(tid, unit);
+        units.push(unit);
+      }
+      byThread.get(tid).push(d);
+    } else {
+      units.push([d]);
+    }
+  }
+  const eligibleUnits = units.filter((u) => u.every(eligibleDoc));
+  const forcedUnits = units.filter((u) => !u.every(eligibleDoc));
+  const eligibleCount = eligibleUnits.reduce((s, u) => s + u.length, 0);
+  if (!valFraction || eligibleCount < 5 || eligibleUnits.length < 2) {
+    return { train: docs, val: [] };
+  }
+  const wantValDocs = Math.max(1, Math.round(eligibleCount * valFraction));
+  const unitHash = (u) => Math.min(...u.map((d) => d.hash));
+  const sorted = [...eligibleUnits].sort((a, b) => unitHash(a) - unitHash(b));
+  const valUnits = [];
+  let valDocs = 0;
+  for (const u of sorted) {
+    if (valDocs >= wantValDocs) break;
+    if (valUnits.length >= sorted.length - 1) break; // keep ≥1 train unit
+    valUnits.push(u);
+    valDocs += u.length;
+  }
+  const valSet = new Set(valUnits.flat());
   return {
-    train: [...forced, ...eligible.filter((d) => !valSet.has(d))],
+    train: [...forcedUnits.flat(), ...eligibleUnits.flat().filter((d) => !valSet.has(d))],
     val: [...valSet],
   };
 }
@@ -422,6 +485,8 @@ export class DeviceTrainer {
     this.maskBoundaryLoss = true; // no loss on boundary/metadata targets
     this.targetOk = null; // per-token 0/1: may this token be a target?
     this.valTargetOk = null;
+    this.sourceTokens = {}; // per-source token counts in the train stream
+    this.valSourceTokens = {};
   }
 
   _disposeCurrent() {
@@ -474,7 +539,10 @@ export class DeviceTrainer {
     const clean = normalizeDocs(docs);
     if (!clean.length) throw new Error("No documents to cast from. Add fuel first.");
     const tokenizer = createTokenizer(tokenizerType);
-    tokenizer.train(clean.map((d) => d.text), cfg.vocabSize);
+    const trainTexts = clean.map((d) => d.text);
+    // new format-2 brains learn the structural markers as stable pieces
+    if (streamFormat === 2) trainTexts.push(STREAM_MARKER_PRIMER);
+    tokenizer.train(trainTexts, cfg.vocabSize);
     const fullCfg = { ...cfg, vocabSize: tokenizer.vocabSize };
     const model = new EmberNet(fullCfg); // build first; swap only on success
     this._disposeCurrent();
@@ -552,9 +620,12 @@ export class DeviceTrainer {
     }
     const ids = [];
     const targetOk = [];
+    const sourceTokens = {};
     for (const d of order) {
       const enc = this.tokenizer.encode(d.text);
       const reps = expandWeights ? d.weight : 1;
+      const key = d.meta?.subreddit ? `r/${d.meta.subreddit}` : d.source || "manual";
+      sourceTokens[key] = (sourceTokens[key] || 0) + (enc.length + 1) * reps;
       for (let r = 0; r < reps; r++) {
         ids.push(this.tokenizer.docId);
         targetOk.push(1);
@@ -568,7 +639,117 @@ export class DeviceTrainer {
       ids.push(this.tokenizer.bosId);
       targetOk.push(1);
     }
-    return { ids, targetOk };
+    return { ids, targetOk, sourceTokens };
+  }
+
+  /** Compose ONE stream-format-2 record for a document (no repetition). */
+  _record2(doc) {
+    const enc = (s) => this.tokenizer.encode(s);
+    const ids = [];
+    const ok = [];
+    const push = (toks, trainable) => {
+      for (const t of toks) {
+        ids.push(t);
+        ok.push(trainable ? 1 : 0);
+      }
+    };
+    // <doc> opens the record; it is given context, never a target in
+    // format 2 (endings are learned via <eos> instead).
+    push([this.tokenizer.docId], false);
+    const sub = doc.meta?.subreddit || null;
+    if (doc.kind === "lesson") {
+      const parsed = parseLesson(doc.text);
+      if (parsed) {
+        push(enc("<user> "), false);
+        push(enc(parsed.prompt + "\n"), true); // prompt text stays trainable (base-LM choice)
+        push(enc("<assistant> "), false);
+        push(enc(parsed.response), true);
+      } else {
+        push(enc(doc.text), true);
+      }
+    } else if (doc.kind === "reddit-comment" || sub) {
+      if (sub) push(enc(`<sub> ${sub}\n`), false);
+      if (doc.kind === "reddit-comment") {
+        push(enc("<comment> "), false);
+        push(enc(doc.text), true);
+      } else {
+        // post: the title conditions the body (masked as a target);
+        // stored text often starts with the title (legacy join) — split it back out
+        let body = doc.text;
+        const title = doc.title || "";
+        if (title && body.startsWith(title)) body = body.slice(title.length).replace(/^\s+/, "");
+        if (title) push(enc(`<title> ${title}\n`), false);
+        push(enc("<body> "), false);
+        push(enc(body), true);
+      }
+    } else {
+      push(enc(doc.text), true);
+    }
+    push([this.tokenizer.eosId], true); // endings ARE predicted → generation can stop
+    return { ids, targetOk: ok };
+  }
+
+  /**
+   * Stream format 2: structured records (<doc> header content <eos>),
+   * thread units kept consecutive (post first, comments by time) but
+   * never merged — every record keeps its own boundary. Header/marker
+   * tokens are masked out of the loss; they are conditioning the model
+   * is given, not text it must predict.
+   */
+  _stream2(docs, { expandWeights, shuffle }) {
+    const units = [];
+    const byThread = new Map();
+    for (const d of docs) {
+      const tid = d.meta?.threadId;
+      if (tid) {
+        if (!byThread.has(tid)) {
+          const u = [];
+          byThread.set(tid, u);
+          units.push(u);
+        }
+        byThread.get(tid).push(d);
+      } else {
+        units.push([d]);
+      }
+    }
+    for (const u of units) {
+      u.sort((a, b) => {
+        const pa = a.kind === "reddit-comment" ? 1 : 0;
+        const pb = b.kind === "reddit-comment" ? 1 : 0;
+        if (pa !== pb) return pa - pb;
+        return (a.meta?.createdUtc ?? Infinity) - (b.meta?.createdUtc ?? Infinity);
+      });
+    }
+    if (shuffle) {
+      for (let i = units.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [units[i], units[j]] = [units[j], units[i]];
+      }
+    }
+    const ids = [];
+    const targetOk = [];
+    const sourceTokens = {};
+    for (const unit of units) {
+      for (const d of unit) {
+        const rec = this._record2(d);
+        const reps = expandWeights ? d.weight : 1;
+        const key = d.meta?.subreddit ? `r/${d.meta.subreddit}` : d.source || "manual";
+        sourceTokens[key] = (sourceTokens[key] || 0) + rec.ids.length * reps;
+        for (let r = 0; r < reps; r++) {
+          ids.push(...rec.ids);
+          targetOk.push(...rec.targetOk);
+        }
+      }
+    }
+    if (!ids.length) {
+      ids.push(this.tokenizer.bosId);
+      targetOk.push(1);
+    }
+    return { ids, targetOk, sourceTokens };
+  }
+
+  _buildStream(docs, opts) {
+    return this.streamFormat === 2 ? this._stream2(docs, opts) : this._stream(docs, opts);
   }
 
   /**
@@ -579,20 +760,24 @@ export class DeviceTrainer {
   setDocs(docs) {
     const clean = normalizeDocs(docs);
     const { train, val } = splitDocs(clean, this.valFraction);
-    const trainStream = this._stream(train, { expandWeights: true, shuffle: true });
+    const trainStream = this._buildStream(train, { expandWeights: true, shuffle: true });
     this.tokens = trainStream.ids;
     this.targetOk = trainStream.targetOk;
+    this.sourceTokens = trainStream.sourceTokens || {};
     if (val.length) {
-      const valStream = this._stream(val, { expandWeights: false, shuffle: false });
+      const valStream = this._buildStream(val, { expandWeights: false, shuffle: false });
       this.valTokens = valStream.ids;
       this.valTargetOk = valStream.targetOk;
+      this.valSourceTokens = valStream.sourceTokens || {};
     } else {
       this.valTokens = null;
       this.valTargetOk = null;
+      this.valSourceTokens = {};
     }
     if (this.valTokens && this.valTokens.length < (this.cfg?.blockSize || 64) + 1) {
       this.valTokens = null; // too small for even one validation window
       this.valTargetOk = null;
+      this.valSourceTokens = {};
     }
     this._epochQueue = [];
     this.lastValLoss = null;
@@ -987,6 +1172,7 @@ export class DeviceTrainer {
       stream_format: this.streamFormat,
       doc_boundary_mask: this.docBoundaryMask,
       mask_boundary_loss: this.maskBoundaryLoss,
+      source_tokens: { ...this.sourceTokens },
       backend: this.backend,
       train_tps: this.lastTrainTps,
       gen_tps: this.lastGenTps,

@@ -1,4 +1,4 @@
-import { cleanText, textHash } from "./corpus.js";
+import { cleanText, textHash, sanitizeMeta } from "./corpus.js";
 
 const DB_NAME = "ember-foundry";
 const VERSION = 1;
@@ -80,6 +80,10 @@ export class Store {
       chars: capped.length,
       added_at: Date.now(),
     };
+    // Structured metadata (subreddit/thread/parent/time) — sanitized to
+    // the explicit shape, missing values stay null, never invented.
+    const meta = sanitizeMeta(doc.meta);
+    if (meta) row.meta = meta;
     const index = await this._ensureHashIndex();
     let urlMatched = false;
     if (row.url) {
@@ -145,6 +149,7 @@ export class Store {
       chars: d.chars,
       weight: d.weight,
       kind: d.kind,
+      meta: d.meta || null,
       excerpt: (d.text || "").slice(0, 220),
     }));
     return { documents: docs.length, characters, by_source, documents_preview: preview, docs };

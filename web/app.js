@@ -1,4 +1,4 @@
-import { createForager, STARTER } from "./scrape.js";
+import { createForager, STARTER, TOPIC_PACK } from "./scrape.js";
 import { openStore } from "./store.js";
 import { corpusHealth } from "./corpus.js";
 import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
@@ -113,7 +113,7 @@ function renderCorpus(stats) {
     h.textContent = d.title;
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = `${d.source} · ${fmtChars(d.chars)} · ×${d.weight}`;
+    meta.textContent = `${d.source}${d.meta?.subreddit ? ` · r/${d.meta.subreddit}` : ""} · ${fmtChars(d.chars)} · ×${d.weight}`;
     const p = document.createElement("p");
     p.textContent = d.excerpt;
     const rm = document.createElement("button");
@@ -399,6 +399,22 @@ $("btn-alice").addEventListener("click", async () => {
   }
 });
 
+$("btn-topic-pack")?.addEventListener("click", async () => {
+  try {
+    let added = 0;
+    for (const doc of TOPIC_PACK) {
+      await state.store.addDoc({ ...doc, source: "topic-pack" });
+      added++;
+    }
+    await refresh();
+    notifySuccess(
+      `Topic-training pack added (${added} short documents) — examples of staying on topic, ending cleanly, and changing subject only on cue. Cast or Fire to train on them.`
+    );
+  } catch (e) {
+    notifyError("Could not add the topic pack", e.message);
+  }
+});
+
 $("btn-clear").addEventListener("click", async () => {
   if (!confirm("Empty the entire corpus on this device? (Weights already trained are kept.)")) return;
   await state.store.clear();
@@ -453,6 +469,7 @@ const forager = createForager({
       source: doc.source,
       url: doc.url || "",
       kind: doc.kind || "page",
+      meta: doc.meta || null, // subreddit/thread structure, when the source has it
     });
   },
 });
@@ -575,7 +592,7 @@ $("btn-init").addEventListener("click", async () => {
       blockSize: +$("v-ctx").value,
       vocabSize: +$("v-vocab").value,
       dropout: +$("v-drop").value,
-    }, lr, { tokenizerType });
+    }, lr, { tokenizerType, streamFormat: 2 }); // new vessels train on structured records
     state.losses = [];
     state.vals = [];
     drawChart();
@@ -660,6 +677,7 @@ async function applyBrain(raw) {
       step: norm.step,
       bestLoss: norm.bestLoss ?? Infinity,
       baseLr: norm.baseLr,
+      streamFormat: norm.streamFormat || 1, // the brain's learned layout, never guessed
     });
   } catch (e) {
     model.dispose();

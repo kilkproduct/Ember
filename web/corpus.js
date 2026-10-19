@@ -65,6 +65,27 @@ export function cleanText(s) {
   return out.join("\n").replace(/\n{4,}/g, "\n\n\n").trim();
 }
 
+/**
+ * Sanitize structured document metadata (Reddit records etc.) to the
+ * small explicit shape Ember stores. Missing values stay null — never
+ * invented. Returns null when nothing meaningful is present.
+ */
+export function sanitizeMeta(meta) {
+  if (!meta || typeof meta !== "object") return null;
+  const str = (v, cap) => {
+    const s = typeof v === "string" ? v.replace(/^t[0-9]_/, "").trim() : "";
+    return s ? s.slice(0, cap) : null;
+  };
+  const sub = str(meta.subreddit, 60)?.replace(/^r\//, "") || null;
+  const out = {
+    subreddit: sub,
+    threadId: str(meta.threadId, 40),
+    parentId: str(meta.parentId, 40),
+    createdUtc: Number.isFinite(meta.createdUtc) && meta.createdUtc > 0 ? Math.floor(meta.createdUtc) : null,
+  };
+  return Object.values(out).some((v) => v != null) ? out : null;
+}
+
 /** FNV-1a 32-bit over whitespace-normalized text (exact-dup identity). */
 export function textHash(s) {
   const norm = String(s || "").normalize("NFC").replace(/\s+/g, " ").trim();

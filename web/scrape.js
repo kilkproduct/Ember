@@ -182,14 +182,39 @@ async function arcticFindSubs(prefix) {
     .map((s) => String(s).replace(/^r\//, ""));
 }
 
-function redditDocsFromPosts(rows, source) {
+/**
+ * Structured metadata for one Reddit record. Missing fields stay null —
+ * never invented. IDs lose their t1_/t3_ fullname prefixes so a post's
+ * id matches its comments' link ids (both forms appear in the APIs).
+ */
+function redditMeta(p, { threadId = null, parentId = null } = {}) {
+  const bare = (v) => {
+    const s = typeof v === "string" ? v.replace(/^t[0-9]_/, "").trim() : "";
+    return s || null;
+  };
+  const subRaw = p.subreddit || p.subreddit_name_prefixed || null;
+  return {
+    subreddit: bare(subRaw)?.replace(/^r\//, "") || null,
+    threadId: bare(threadId),
+    parentId: bare(parentId),
+    createdUtc: Number.isFinite(p.created_utc) && p.created_utc > 0 ? Math.floor(p.created_utc) : null,
+  };
+}
+
+/**
+ * Build training-ready docs from Reddit-style post fields. The format-2
+ * stream conditions on meta.subreddit + title explicitly; text keeps
+ * the legacy title+"\n\n"+body join (the stream splits it back via
+ * doc.title), so dedup identity and existing corpora are unaffected.
+ */
+export function redditDocsFromPosts(rows, source) {
   const docs = [];
   for (const p of rows) {
     const title = p.title || "";
     const body = stripHtml(p.selftext || p.body || "");
     const text = [title, body].filter(Boolean).join("\n\n");
     if (text.length < 80) continue;
-    const sub = p.subreddit || p.subreddit_name_prefixed || "";
+    const sub = (p.subreddit || p.subreddit_name_prefixed || "").replace(/^r\//, "");
     const id = p.id || p.name || "";
     docs.push({
       title: title || `r/${sub} post`,
@@ -199,34 +224,34 @@ function redditDocsFromPosts(rows, source) {
         : `https://www.reddit.com/comments/${id}`,
       source,
       kind: "reddit",
+      meta: redditMeta(p, { threadId: p.id || p.name || null }),
     });
   }
   return docs;
 }
 
-function redditDocsFromComments(rows, source) {
+/**
+ * ONE DOCUMENT PER COMMENT (Phase C). The old code glued 8 unrelated
+ * comments into a single document, teaching random topic switching and
+ * discarding subreddit/thread structure. Short comments stay separate
+ * records; training efficiency is handled by boundary-masked packing,
+ * not by merging documents.
+ */
+export function redditDocsFromComments(rows, source) {
   const docs = [];
-  const chunks = [];
   for (const c of rows) {
     const body = stripHtml(c.body || "");
     if (body.length < 40) continue;
-    chunks.push(body);
-  }
-  // pack comments into denser training docs
-  for (let i = 0; i < chunks.length; i += 8) {
-    const slice = chunks.slice(i, i + 8);
-    const text = slice.join("\n\n");
-    if (text.length < 120) continue;
-    const first = rows[i] || {};
-    const sub = first.subreddit || "reddit";
+    const sub = (c.subreddit || "").replace(/^r\//, "") || "reddit";
     docs.push({
-      title: `r/${sub} comments`,
-      text,
-      url: first.permalink
-        ? `https://www.reddit.com${first.permalink}`
+      title: `r/${sub} comment`,
+      text: body,
+      url: c.permalink
+        ? `https://www.reddit.com${c.permalink}`
         : `https://www.reddit.com/r/${sub}`,
       source,
-      kind: "reddit",
+      kind: "reddit-comment",
+      meta: redditMeta(c, { threadId: c.link_id || null, parentId: c.parent_id || null }),
     });
   }
   return docs;
@@ -591,3 +616,121 @@ There was a table set out under a tree in front of the house, and the March Hare
 “Why is a raven like a writing-desk?” said the Hatter. “Come, we shall have some fun now!” thought Alice. “I’m glad they’ve begun asking riddles.” “Why is a raven like a writing-desk?” “Have you guessed the riddle yet?” the Hatter said. “No, I give it up,” Alice replied. “What’s the answer?” “I haven’t the slightest idea,” said the Hatter.
 `,
 };
+
+/**
+ * Topic-training pack (Phase C/E): short purpose-written documents that
+ * demonstrate the exact behaviors boundary-aware training is meant to
+ * teach — staying on one topic inside a document, ending cleanly,
+ * changing subject ONLY with an explicit conversational signal, and
+ * subreddit-style posts/comments as separate records. This is a tiny
+ * scaffold (a few thousand words), not a substitute for real corpus
+ * volume: it gives the model clean examples of the *shape* of topics
+ * and transitions, which scraped text alone rarely shows at phone scale.
+ */
+export const TOPIC_PACK = [
+  {
+    title: "Topic pack — the harbour at dawn",
+    kind: "page",
+    text: `The harbour wakes before the town does. The fishing boats knock softly against the piles, and the gulls argue over scraps near the fish market. Old Tom untangles his nets on the quay, in his fingers, while the tide creeps in over the mud. By the time the sun clears the breakwater, the first boats are already heading out past the lighthouse, their engines humming across the flat grey water. The harbour smells of salt, rope and diesel, and everyone who works there knows the weather by the colour of the sky over the point.`,
+  },
+  {
+    title: "Topic pack — fixing a bicycle chain",
+    kind: "page",
+    text: `A bicycle chain usually slips because it is worn, dry, or badly adjusted. First, shift onto the smallest cog and check whether the chain sags between the gears. If it does, loosen the rear wheel, pull it back a few millimetres, and tighten the nuts evenly on both sides. Next, clean the chain with a rag, add a drop of oil to each link, and wipe off the excess so it does not collect grit. Finally, pedal slowly by hand and watch the chain pass over every cog. A healthy chain runs quietly and changes gear without jumping.`,
+  },
+  {
+    title: "Topic pack — why bread rises",
+    kind: "page",
+    text: `Bread rises because yeast turns sugar into gas. The tiny bubbles of carbon dioxide collect inside the dough, and the stretchy gluten in the flour traps them like a net. Warmth speeds the yeast up, which is why dough left near a stove doubles faster than dough in a cold room. When the loaf goes into the oven, the heat makes the gas expand one last time before the crust sets. That is why a well-risen loaf feels light, sounds hollow when tapped, and slices without crumbling into dust.`,
+  },
+  {
+    title: "Topic pack — a conversation that changes subject openly",
+    kind: "page",
+    text: `Maria asked whether the library would be open on Sunday. "It closes at four on Sundays," said Priya. "But the reading room opens at nine, so we could finish the history essay before lunch." Maria nodded and wrote the times in her notebook. "By the way," she said, changing the subject, "did you ever call the bicycle shop about your brakes?" Priya laughed. "I did. They can fix them on Tuesday, so I am walking until then." The two questions had nothing to do with each other, and both of them knew it — that is what "by the way" is for.`,
+  },
+  {
+    title: "Topic pack — questions and follow-ups on one subject",
+    kind: "page",
+    text: `### Prompt:
+What do bees do in winter?
+
+### Response:
+Bees stay inside the hive and cluster together in a tight ball around the queen. They shiver their flight muscles to make warmth and slowly eat the honey they stored in summer. On mild days a few bees fly out briefly, but most of the colony waits quietly for spring flowers.`,
+  },
+  {
+    title: "Topic pack — a follow-up that stays on the bees",
+    kind: "page",
+    text: `### Prompt:
+Why do bees store honey?
+
+### Response:
+Honey is the colony's winter food store. Flowers give nectar only in the warm months, so the bees dry the nectar into honey and seal it in wax cells. When cold weather comes and no flowers are open, the bees open the cells and eat the honey for energy.`,
+  },
+  {
+    title: "Topic pack — an explicit change of subject",
+    kind: "page",
+    text: `### Prompt:
+Enough about bees. Let us talk about trains instead. Why do trains need signals?
+
+### Response:
+Signals keep trains a safe distance apart. A train is heavy and takes a long way to stop, so the driver cannot rely on eyesight alone. A red signal means the track ahead is occupied, amber means prepare to stop, and green means the line is clear.`,
+  },
+  {
+    title: "Bicycle chain keeps jumping off the big ring",
+    kind: "page",
+    meta: { subreddit: "bikewrench", threadId: "topicpack001", parentId: null, createdUtc: 1700000000 },
+    text: `Bicycle chain keeps jumping off the big ring
+
+Every time I shift up under load, the chain throws itself off the outside of the big ring and onto the crank arm. It only happens on climbs. The chain is maybe two seasons old. What should I check first?`,
+  },
+  {
+    title: "r/bikewrench comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "bikewrench", threadId: "topicpack001", parentId: "topicpack001", createdUtc: 1700003600 },
+    text: `That is the high limit screw on the front derailleur, nine times out of ten. Shift into the big ring and look at the gap between the chain and the outer cage plate — you want about a millimetre. Turn the H screw a quarter turn at a time until the shift is clean but the chain cannot overshoot.`,
+  },
+  {
+    title: "r/bikewrench comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "bikewrench", threadId: "topicpack001", parentId: "topicpack001", createdUtc: 1700007200 },
+    text: `Also measure the chain for wear before you chase adjustments. A stretched chain rides up on the teeth and will jump no matter how the limits are set. If a wear gauge drops in at 0.75, replace the chain first and then set the limits.`,
+  },
+  {
+    title: "The lighthouse keeper's last winter",
+    kind: "page",
+    meta: { subreddit: "shortstories", threadId: "topicpack002", parentId: null, createdUtc: 1700100000 },
+    text: `The lighthouse keeper's last winter
+
+For forty years Elias Vance had climbed the iron stairs at dusk, and for forty years the lamp had answered him with light. This winter the service was sending a machine to do his work, a box of wires that needed no tea, no sleep and no company. Elias Vance polished the lens anyway. He wrote the weather in the log book in his careful hand. On the last night he stood on the gallery while the beam swept over the dark sea, and he was not sad, exactly. The light would still be there. Only the climbing would end.`,
+  },
+  {
+    title: "r/shortstories comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "shortstories", threadId: "topicpack002", parentId: "topicpack002", createdUtc: 1700103600 },
+    text: `The detail about polishing the lens anyway is the whole story in one gesture. He is not keeping the light for the ships any more, he is keeping it because care is what his hands know. Quiet and sad and exactly long enough.`,
+  },
+  {
+    title: "How do I stop my tomatoes splitting?",
+    kind: "page",
+    meta: { subreddit: "gardening", threadId: "topicpack003", parentId: null, createdUtc: 1700200000 },
+    text: `How do I stop my tomatoes splitting?
+
+Half my tomatoes split open just as they ripen. The plants look healthy and I water them most evenings. Is it the variety, or am I doing something wrong?`,
+  },
+  {
+    title: "r/gardening comment",
+    kind: "reddit-comment",
+    meta: { subreddit: "gardening", threadId: "topicpack003", parentId: "topicpack003", createdUtc: 1700203600 },
+    text: `Splitting is almost always uneven water. The fruit swells faster than the skin can stretch after a dry spell ends. Mulch heavily around the plants and water deeply on a regular schedule instead of little and often, and pick fruit at first blush during rainy weeks.`,
+  },
+  {
+    title: "Topic pack — the night train",
+    kind: "page",
+    text: `The night train leaves the city under a sky the colour of wet slate. Carriages sway through suburbs where kitchen windows glow amber, then the houses thin out and the fields take over. Passengers read, doze, and watch their own reflections ride beside them in the black glass. Somewhere past midnight the train slows for a junction, brakes sighing, and the guard walks the corridor checking tickets by torchlight. By dawn there will be sea air at the windows and gulls over a different harbour — but that is the morning's story, and this one belongs to the dark.`,
+  },
+  {
+    title: "Topic pack — how a library card works",
+    kind: "page",
+    text: `A library card is a small promise between a reader and a town. The card carries a number, and the number points to a record with your name on it. When you borrow a book, the librarian scans the card and the book together, and the system remembers that the book is with you until a certain date. Bring it back on time and the promise is kept; bring it back late and there may be a small fine. The same card works at every branch in the town, because all the branches share one catalogue and one list of readers.`,
+  },
+];

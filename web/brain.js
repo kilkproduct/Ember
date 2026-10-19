@@ -19,6 +19,7 @@
 
 import { Tokenizer } from "./tokenizer.js";
 import { BpeTokenizer, BPE_TYPE, BPE_VERSION } from "./bpe.js";
+import { sanitizeMeta } from "./corpus.js";
 
 export const BRAIN_FORMAT = "ember-brain";
 export const BRAIN_VERSION = 2; // legacy-tokenizer brains
@@ -119,14 +120,17 @@ function checkCorpus(corpus) {
   const out = [];
   for (const d of corpus) {
     if (!d || typeof d.text !== "string" || !d.text.trim()) continue;
-    out.push({
+    const row = {
       title: String(d.title || "untitled").slice(0, 240),
       text: d.text,
       source: String(d.source || "imported").slice(0, 80),
       url: String(d.url || ""),
       weight: Math.min(50, Math.max(1, Number(d.weight) || 1)),
       kind: String(d.kind || "page").slice(0, 40),
-    });
+    };
+    const meta = sanitizeMeta(d.meta);
+    if (meta) row.meta = meta;
+    out.push(row);
   }
   return out;
 }
@@ -178,8 +182,24 @@ export function buildTokenizer(norm) {
 }
 
 /**
+ * stream_format is additive metadata: absent on old brains (=1). A value
+ * this build doesn't understand is rejected loudly rather than guessed —
+ * training a brain with the wrong stream layout silently corrupts what
+ * it learned.
+ */
+function checkStreamFormat(raw) {
+  const v = raw?.training_state?.stream_format;
+  if (v == null) return 1;
+  if (v === 1 || v === 2) return v;
+  throw new Error(
+    `brain file uses training stream format ${v}, which this Ember build does not understand (supported: 1, 2)`
+  );
+}
+
+/**
  * Validate a parsed brain file (v1, v2 or v3) and normalize it to:
- * { version, name, cfg, vocab, weights, step, bestLoss, baseLr, corpus }
+ * { version, name, cfg, vocab, weights, step, bestLoss, baseLr,
+ *   streamFormat, corpus }
  * where `weights` is acceptable to EmberNet.setWeights(). Throws an Error
  * with a user-readable message on any problem. Never mutates anything.
  */
@@ -249,6 +269,7 @@ export function validateBrain(raw) {
         raw.training_state.base_lr <= 0.1
           ? raw.training_state.base_lr
           : null,
+      streamFormat: checkStreamFormat(raw),
       corpus: checkCorpus(raw.corpus),
     };
   }
@@ -286,6 +307,7 @@ export function validateBrain(raw) {
       step: Number(raw.step) || 0,
       bestLoss: Number.isFinite(raw.bestLoss) ? raw.bestLoss : null,
       baseLr: null,
+      streamFormat: 1, // v1 brains predate stream formats
       corpus: checkCorpus(raw.corpus),
     };
   }
@@ -326,6 +348,8 @@ export async function serializeBrain(trainer, { name = "brain", corpusDocs = nul
       step: trainer.step,
       best_loss: Number.isFinite(trainer.bestLoss) ? trainer.bestLoss : null,
       base_lr: trainer.baseLr,
+      // additive: old readers ignore it; absent on old brains = format 1
+      stream_format: trainer.streamFormat || 1,
     },
     vocabulary: { id_to_token: [...trainer.tokenizer.idToToken] },
     // Explicit tokenizer identity. v2 readers ignore unknown fields, so
@@ -337,14 +361,19 @@ export async function serializeBrain(trainer, { name = "brain", corpusDocs = nul
     weights,
   };
   if (corpusDocs?.length) {
-    brain.corpus = corpusDocs.map((d) => ({
-      title: d.title,
-      text: d.text,
-      source: d.source,
-      url: d.url,
-      weight: d.weight,
-      kind: d.kind,
-    }));
+    brain.corpus = corpusDocs.map((d) => {
+      const row = {
+        title: d.title,
+        text: d.text,
+        source: d.source,
+        url: d.url,
+        weight: d.weight,
+        kind: d.kind,
+      };
+      const meta = sanitizeMeta(d.meta);
+      if (meta) row.meta = meta; // structured fields travel with the brain
+      return row;
+    });
   }
   return brain;
 }
