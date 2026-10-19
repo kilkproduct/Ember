@@ -221,6 +221,12 @@
               <input id="v-drop" type="range" min="0" max="0.4" step="0.05" value="0" />
             </label>
           </div>
+          <label>Tokenizer
+            <select id="v-tokenizer">
+              <option value="byte-bpe" selected>Byte-level BPE — new brains (recommended)</option>
+              <option value="legacy">Legacy word pieces — original</option>
+            </select>
+          </label>
           <p class="est" id="param-est">≈ 0.2M parameters</p>
           <p id="vessel-dirty" class="dirty-note" hidden>● Shape changed — Cast to apply. Recasting wipes the current brain, so export it first if you want to keep it.</p>
           <div class="actions">

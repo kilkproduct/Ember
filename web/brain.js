@@ -3,8 +3,13 @@
  * learned state (every weight tensor + the tokenizer vocabulary), not just
  * conversation history. See docs/brain-format.md for the schema.
  *
- * - v2 (current): { format: "ember-brain", format_version: 2, weights:
+ * - v3: like v2 plus a `tokenizer` block. Used when (and only when) the
+ *   brain's tokenizer is byte-level BPE — its merges fully determine the
+ *   vocabulary and are cross-checked against it on import.
+ * - v2: { format: "ember-brain", format_version: 2, weights:
  *   { "<tensor name>": { shape: [...], data: [flat float32 numbers] } } }
+ *   Always the legacy greedy tokenizer. A v2 file carries no BPE data;
+ *   absence of tokenizer metadata MEANS legacy, forever.
  * - v1 (legacy, import-only): { kind: "ember-brain-v1", cfg, weights:
  *   { wte, wpe, lnFg, lnFb, blocks: [...] } } with nested arrays.
  *
@@ -12,8 +17,12 @@
  * tested in Node and run BEFORE anything touches the live model.
  */
 
+import { Tokenizer } from "./tokenizer.js";
+import { BpeTokenizer, BPE_TYPE, BPE_VERSION } from "./bpe.js";
+
 export const BRAIN_FORMAT = "ember-brain";
-export const BRAIN_VERSION = 2;
+export const BRAIN_VERSION = 2; // legacy-tokenizer brains
+export const BRAIN_VERSION_BPE = 3; // byte-BPE brains (tokenizer block)
 
 const BLOCK_KEYS = [
   "ln1g", "ln1b", "attnW", "attnB", "projW", "projB",
@@ -123,7 +132,53 @@ function checkCorpus(corpus) {
 }
 
 /**
- * Validate a parsed brain file (v1 or v2) and normalize it to:
+ * Validate a v3 tokenizer block against the file's vocabulary. The BPE
+ * vocabulary is DERIVED from the merges and must equal
+ * vocabulary.id_to_token exactly — any mismatch means the file is
+ * inconsistent or tampered, and no tokenizer is produced.
+ */
+function checkBpeTokenizer(block, vocab) {
+  if (!block || typeof block !== "object") {
+    throw new Error("v3 brain file is missing its tokenizer block");
+  }
+  if (block.type !== BPE_TYPE) {
+    throw new Error(`v3 brain file has unknown tokenizer type ${JSON.stringify(block.type)}`);
+  }
+  if (block.version !== BPE_VERSION) {
+    throw new Error(`v3 brain file has unsupported tokenizer version ${JSON.stringify(block.version)}`);
+  }
+  let tok;
+  try {
+    tok = BpeTokenizer.fromJSON({
+      type: BPE_TYPE,
+      version: BPE_VERSION,
+      merges: block.merges,
+      idToToken: vocab,
+    });
+  } catch (e) {
+    throw new Error(`v3 brain file tokenizer is invalid: ${e.message}`);
+  }
+  return { type: BPE_TYPE, version: BPE_VERSION, merges: tok.merges };
+}
+
+/**
+ * Rebuild the exact tokenizer a validated brain was trained with.
+ * Legacy for v1/v2 (metadata absent = legacy), byte-BPE for v3.
+ */
+export function buildTokenizer(norm) {
+  if (norm?.tokenizer?.type === BPE_TYPE) {
+    return BpeTokenizer.fromJSON({
+      type: BPE_TYPE,
+      version: norm.tokenizer.version ?? BPE_VERSION,
+      merges: norm.tokenizer.merges,
+      idToToken: norm.vocab,
+    });
+  }
+  return Tokenizer.fromJSON({ idToToken: norm.vocab });
+}
+
+/**
+ * Validate a parsed brain file (v1, v2 or v3) and normalize it to:
  * { version, name, cfg, vocab, weights, step, bestLoss, baseLr, corpus }
  * where `weights` is acceptable to EmberNet.setWeights(). Throws an Error
  * with a user-readable message on any problem. Never mutates anything.
@@ -131,13 +186,25 @@ function checkCorpus(corpus) {
 export function validateBrain(raw) {
   if (!raw || typeof raw !== "object") throw new Error("That file is not a JSON brain object.");
 
-  // --- v2 ---
+  // --- v2 (legacy tokenizer) / v3 (byte-BPE) ---
   if (raw.format === BRAIN_FORMAT) {
-    if (raw.format_version !== 2) {
-      throw new Error(`Unsupported brain format_version ${JSON.stringify(raw.format_version)} — this Ember understands version 2.`);
+    if (raw.format_version !== 2 && raw.format_version !== BRAIN_VERSION_BPE) {
+      throw new Error(`Unsupported brain format_version ${JSON.stringify(raw.format_version)} — this Ember understands versions 2 and 3.`);
     }
     const vocab = raw.vocabulary?.id_to_token;
     if (!Array.isArray(vocab) || vocab.length < 5) throw new Error("brain file is missing its vocabulary");
+    // Tokenizer identity comes from explicit metadata, never from
+    // guesswork (and never from vocabulary size). v2 predates the field
+    // and always means legacy; a v2 file claiming BPE or a v3 file
+    // without valid merges is rejected here, before any weights move.
+    let tokenizer = { type: "legacy" };
+    if (raw.format_version === BRAIN_VERSION_BPE) {
+      tokenizer = checkBpeTokenizer(raw.tokenizer, vocab);
+    } else if (raw.tokenizer?.type && raw.tokenizer.type !== "legacy") {
+      throw new Error(
+        `brain file is v2 but claims tokenizer type ${JSON.stringify(raw.tokenizer.type)} — v2 brains always use the legacy tokenizer; this file is inconsistent.`
+      );
+    }
     const cfg = checkArch(raw.architecture || {}, vocab.length);
     const weights = raw.weights;
     if (!weights || typeof weights !== "object") throw new Error("brain file has no weights");
@@ -162,7 +229,8 @@ export function validateBrain(raw) {
       }
     }
     return {
-      version: 2,
+      version: raw.format_version,
+      tokenizer,
       name: String(raw.metadata?.name || "brain").slice(0, 80),
       cfg,
       vocab,
@@ -205,6 +273,7 @@ export function validateBrain(raw) {
     }
     return {
       version: 1,
+      tokenizer: { type: "legacy" },
       name: String(raw.name || "brain").slice(0, 80),
       cfg,
       vocab,
@@ -219,14 +288,20 @@ export function validateBrain(raw) {
   throw new Error("Not an Ember brain file (no recognizable format, architecture, or weights).");
 }
 
-/** Serialize the trainer's live model to a v2 brain object. */
+/**
+ * Serialize the trainer's live model to a brain object. The format
+ * version follows the TOKENIZER, not the app version: legacy-tokenizer
+ * brains stay v2 (readable by older Embers), byte-BPE brains become v3
+ * (older Embers reject them cleanly instead of mis-tokenizing them).
+ */
 export async function serializeBrain(trainer, { name = "brain", corpusDocs = null } = {}) {
   if (!trainer?.model || !trainer?.cfg) throw new Error("Nothing to export. Cast and fire a vessel first.");
   const weights = await trainer.model.getNamedWeights();
+  const isBpe = trainer.tokenizer?.type === BPE_TYPE;
   const brain = {
     format: BRAIN_FORMAT,
-    format_version: BRAIN_VERSION,
-    kind: "ember-brain-v2",
+    format_version: isBpe ? BRAIN_VERSION_BPE : BRAIN_VERSION,
+    kind: isBpe ? "ember-brain-v3" : "ember-brain-v2",
     metadata: {
       name: String(name).slice(0, 80),
       exported_at: new Date().toISOString(),
@@ -248,6 +323,12 @@ export async function serializeBrain(trainer, { name = "brain", corpusDocs = nul
       base_lr: trainer.baseLr,
     },
     vocabulary: { id_to_token: [...trainer.tokenizer.idToToken] },
+    // Explicit tokenizer identity. v2 readers ignore unknown fields, so
+    // stamping legacy brains is safe; v3 carries the BPE merges, from
+    // which the vocabulary above is fully re-derived on import.
+    tokenizer: isBpe
+      ? { type: BPE_TYPE, version: BPE_VERSION, merges: trainer.tokenizer.toJSON().merges }
+      : { type: "legacy" },
     weights,
   };
   if (corpusDocs?.length) {

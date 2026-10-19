@@ -2,12 +2,12 @@ import { createForager, STARTER } from "./scrape.js";
 import { openStore } from "./store.js";
 import { corpusHealth } from "./corpus.js";
 import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
-import { Tokenizer } from "./tokenizer.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
 import { githubPull, githubPush, githubHead } from "./github.js";
 import {
   serializeBrain,
   validateBrain,
+  buildTokenizer,
   brainFileName,
   downloadBrain,
 } from "./brain.js";
@@ -155,7 +155,7 @@ function renderModelPills() {
   const st = state.trainer.status();
   if (st.ready) {
     const m = (st.n_params / 1e6).toFixed(2);
-    $("pill-model").textContent = `${m}M · ${st.backend} · step ${st.step}`;
+    $("pill-model").textContent = `${m}M · ${st.backend} · step ${st.step} · ${st.tokenizer_type === "byte-bpe" ? "BPE tok" : "legacy tok"}`;
   } else {
     $("pill-model").textContent = "vessel unformed";
   }
@@ -192,6 +192,7 @@ function vesselSliderValues() {
     ctx: +$("v-ctx").value,
     vocab: +$("v-vocab").value,
     drop: +$("v-drop").value,
+    tokenizer: $("v-tokenizer")?.value || "byte-bpe",
   };
 }
 
@@ -234,7 +235,7 @@ function paramEstimate() {
   updateVesselDirty();
 }
 
-function syncVesselSliders(cfg) {
+function syncVesselSliders(cfg, tokenizerType) {
   // Range inputs snap to their step grid; read values back afterwards.
   $("v-layer").value = cfg.nLayer;
   $("v-head").value = cfg.nHead;
@@ -242,6 +243,7 @@ function syncVesselSliders(cfg) {
   $("v-ctx").value = cfg.blockSize;
   $("v-vocab").value = cfg.vocabSize;
   $("v-drop").value = cfg.dropout || 0;
+  if (tokenizerType && $("v-tokenizer")) $("v-tokenizer").value = tokenizerType;
   document.querySelectorAll(".chip").forEach((c) => c.classList.remove("on"));
   paramEstimate();
 }
@@ -326,6 +328,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
 ["v-layer", "v-head", "v-embd", "v-ctx", "v-vocab", "v-drop"].forEach((id) => {
   $(id).addEventListener("input", paramEstimate);
 });
+$("v-tokenizer")?.addEventListener("change", updateVesselDirty);
 document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
 
 // ---------- fuel ----------
@@ -527,12 +530,23 @@ $("btn-init").addEventListener("click", async () => {
     notifyError("Bad learning rate", e.message);
     return;
   }
+  const tokenizerType = $("v-tokenizer")?.value === "legacy" ? "legacy" : "byte-bpe";
+  const switchingTok = state.trainer.ready && state.trainer.tokenizer.type !== tokenizerType;
   if (state.trainer.ready && state.trainer.step > 0) {
-    if (!confirm("Casting again wipes the current brain (step " + state.trainer.step + "). Export it first if you want to keep it. Continue?")) return;
+    const msg = switchingTok
+      ? `Switching tokenizer (${state.trainer.tokenizer.type} → ${tokenizerType}) starts a FRESH brain — learned weights can't move across tokenizers. The current brain (step ${state.trainer.step}) will first be saved on this device as a checkpoint, and your corpus is kept. Continue?`
+      : "Casting again wipes the current brain (step " + state.trainer.step + "). Export it first if you want to keep it. Continue?";
+    if (!confirm(msg)) return;
   }
   $("btn-init").disabled = true;
   $("btn-init").textContent = "Casting…";
   try {
+    if (switchingTok && state.trainer.step > 0) {
+      // Rollback point: the old brain stays loadable after the switch.
+      const rollback = `pre-tokenizer-switch-step-${state.trainer.step}`;
+      await saveCkpt(rollback, { quiet: true });
+      notifyInfo("Old brain saved", `Checkpoint “${rollback}” is on this device — Load it any time to go back.`);
+    }
     await state.trainer.initDocs(stats.docs, {
       nLayer: +$("v-layer").value,
       nHead,
@@ -540,7 +554,7 @@ $("btn-init").addEventListener("click", async () => {
       blockSize: +$("v-ctx").value,
       vocabSize: +$("v-vocab").value,
       dropout: +$("v-drop").value,
-    }, lr);
+    }, lr, { tokenizerType });
     state.losses = [];
     state.vals = [];
     drawChart();
@@ -548,8 +562,8 @@ $("btn-init").addEventListener("click", async () => {
     markVesselApplied();
     renderModelPills();
     const st = state.trainer.status();
-    logEl($("train-log"), `cast ${st.n_params} params on ${tf.getBackend()} · vocab ${st.vocab_size} · corpus ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out for validation` : ""}`);
-    notifySuccess("Vessel cast", `${(st.n_params / 1e6).toFixed(2)}M params · vocab ${st.vocab_size} · ${st.corpus_tokens} corpus tokens ready. Press Fire to train.`);
+    logEl($("train-log"), `cast ${st.n_params} params on ${tf.getBackend()} · ${st.tokenizer_type} tokenizer · vocab ${st.vocab_size} · corpus ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out for validation` : ""}`);
+    notifySuccess("Vessel cast", `${(st.n_params / 1e6).toFixed(2)}M params · vocab ${st.vocab_size} (${st.tokenizer_type}) · ${st.corpus_tokens} corpus tokens ready. Press Fire to train.`);
     document.querySelector('[data-tab="fire"]').click();
   } catch (e) {
     notifyError("Casting failed", e.message);
@@ -598,7 +612,7 @@ async function saveCkpt(name, { quiet = false } = {}) {
  */
 async function applyBrain(raw) {
   const norm = validateBrain(raw); // throws friendly errors; touches nothing
-  const tok = Tokenizer.fromJSON({ idToToken: norm.vocab });
+  const tok = buildTokenizer(norm); // legacy for v1/v2, byte-BPE for v3
   const cfg = { ...norm.cfg, vocabSize: tok.vocabSize };
   const model = new EmberNet(cfg);
   try {
@@ -637,7 +651,7 @@ async function applyBrain(raw) {
   }
   const stats = await state.store.stats();
   state.trainer.refreshDocs(stats.docs || []);
-  syncVesselSliders(cfg);
+  syncVesselSliders(cfg, norm.tokenizer?.type || "legacy");
   markVesselApplied();
   state.losses = [];
   state.vals = [];

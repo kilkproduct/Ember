@@ -121,10 +121,18 @@ export const HELP = {
   },
   "v-vocab": {
     title: "Vocab cap",
-    what: "Maximum tokenizer vocabulary: every distinct character in the corpus, plus the most frequent whole words/pieces up to this cap. If your corpus has fewer pieces, the real vocab is smaller than the cap.",
-    up: "More whole-word tokens → fewer tokens per sentence → more text fits in Context. But the embedding table (Vocab × Embedding) and brain file grow.",
-    down: "More character-by-character spelling; smaller, faster model.",
+    what: "Maximum tokenizer vocabulary. With byte-level BPE (default) Ember starts from the 256 possible bytes and repeatedly merges the most frequent adjacent pair in your corpus until the cap — common chunks like “ the” become single tokens, and any text at all can still be spelled from bytes. With the legacy tokenizer it's every distinct character plus the most frequent whole words up to the cap. If your corpus is small, the real vocab ends below the cap.",
+    up: "More merged chunks → fewer tokens per sentence → more text fits in Context. But the embedding table (Vocab × Embedding) and brain file grow.",
+    down: "More byte/character-by-character spelling; smaller, faster model.",
     start: "1500 is a good phone size. Raise toward 3000+ for a large, varied corpus.",
+    applies: CAST,
+  },
+  "v-tokenizer": {
+    title: "Tokenizer",
+    what: "How text is chopped into tokens before the model sees it — learned from YOUR corpus at cast time, either way. Byte-level BPE learns frequent multi-letter chunks (the method modern tokenizers use) and can represent any text, including languages and emoji it never saw. Legacy word pieces is Ember's original scheme: whole frequent words, everything else spelled character-by-character, unseen characters lost to <unk>.",
+    why: "A brain's weights are only meaningful with the exact tokenizer it trained with — token 412 has to mean the same thing forever. So the tokenizer is chosen at cast, recorded inside every brain file (v3 for BPE), and can never silently change for an existing brain.",
+    up: "BPE for new brains: fewer tokens per sentence, no lost characters.",
+    down: "Pick Legacy only to keep old behavior for comparison. Switching tokenizer on a trained brain means casting a fresh brain (weights can't move across) — Ember saves the old brain as a checkpoint first, and your corpus stays put.",
     applies: CAST,
   },
   "v-drop": {

@@ -1,4 +1,5 @@
 import { Tokenizer } from "./tokenizer.js";
+import { BpeTokenizer } from "./bpe.js";
 
 const MASKS = new Map();
 
@@ -304,6 +305,7 @@ export class EmberNet {
  */
 export function createTokenizer(type = "legacy") {
   if (type === "legacy") return new Tokenizer();
+  if (type === "byte-bpe") return new BpeTokenizer();
   throw new Error(`Unknown tokenizer type "${type}".`);
 }
 
@@ -804,7 +806,14 @@ export class DeviceTrainer {
       logits.dispose();
       // Never emit <pad>; don't allow a stop token to end generation before
       // a few real tokens exist (otherwise Voice often returns "(silence)").
-      const banned = emitted < 3 ? [this.tokenizer.padId, ...stopIds] : [this.tokenizer.padId];
+      // Byte-BPE brains also ban <unk>: byte tokens cover all text, so id 1
+      // has no meaning there (legacy brains may legitimately emit it, and
+      // decode shows it as � rather than hiding it).
+      const alwaysBan =
+        this.tokenizer.type === "byte-bpe"
+          ? [this.tokenizer.padId, this.tokenizer.unkId]
+          : [this.tokenizer.padId];
+      const banned = emitted < 3 ? [...alwaysBan, ...stopIds] : alwaysBan;
       const next = sample(arr, { topK, topP, repetition, recent: ids.slice(-48), banned });
       if (stopIds.has(next)) {
         stoppedOn = next;

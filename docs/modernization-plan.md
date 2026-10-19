@@ -169,3 +169,30 @@ _Filled in as stages land (real numbers from test/bench runs, not estimates)._
 - UI: corpus health line (est. tokens, median doc size, issue warnings)
   and an explicit, confirmed "remove exact duplicates" action that
   keeps one copy per text. Nothing is auto-deleted. Tests: 47/47.
+
+### Stage D — done
+
+- `web/bpe.js`: byte-level BPE (specials 0–4 as legacy, bytes 5–260,
+  merges from 261), deterministic training (count, then smallest pair),
+  chunk-frequency statistics with incremental pair counts, 48-byte
+  token cap, 8-byte whitespace-run cap, 2M-char training budget.
+  `ember/tokenizer.py` mirrors it; a golden test proves JS and Python
+  learn byte-identical merges. Legacy `<unk>` now decodes as `�`
+  (visible, no silent erasure); BPE encode never produces `<unk>`.
+- Brain **v3** for BPE brains only (merges derive the vocabulary;
+  importer cross-checks and rejects tampered/forged metadata; v2-with-
+  BPE-claims rejected). v1/v2 brains always rebuild the legacy
+  tokenizer — compatibility proven by tests, including a v2 file with
+  the tokenizer block deleted. Vessel UI gains a Tokenizer select
+  (new brains default to BPE); switching on a trained brain requires
+  confirmation and auto-saves a `pre-tokenizer-switch-*` rollback
+  checkpoint. No cross-tokenizer weight migration is attempted.
+- Bench (same synthetic 40-doc corpus, phone config, CPU): BPE uses
+  **0.183 vs 0.347 tokens/char** (~47% fewer tokens — the same context
+  window holds ~1.9× more text). Per-step cost rose (866 vs 434 ms)
+  because this toy corpus gives the legacy tokenizer a 105-token vocab
+  vs BPE's 501 (the tied head scales with vocab; on real corpora both
+  sit near the cap). In text throughput the two are even: ~809 vs
+  ~850 chars/s. Loss values are not comparable across tokenizers;
+  per-character, BPE reached 0.78 vs legacy 1.01 nats/char after 30
+  steps (indicative only). Tests: 58/58 JS + Python OK (11 new).

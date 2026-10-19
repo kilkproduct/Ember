@@ -3,6 +3,7 @@ const SPECIAL = ["<pad>", "<unk>", "<bos>", "<eos>", "<doc>"];
 
 export class Tokenizer {
   constructor() {
+    this.type = "legacy"; // brain files record this; see web/bpe.js
     this.idToToken = [...SPECIAL];
     this.tokenToId = Object.fromEntries(SPECIAL.map((t, i) => [t, i]));
     this._maxTokLen = 1;
@@ -112,13 +113,16 @@ export class Tokenizer {
     for (const i of ids) {
       if (skip.has(i)) continue;
       const tok = this.idToToken[i];
-      if (tok && tok !== "<unk>") out += tok;
+      // <unk> renders as � instead of vanishing: silently dropping it
+      // hid exactly the evidence that the model/tokenizer has a gap.
+      if (tok === "<unk>") out += "�";
+      else if (tok) out += tok;
     }
     return out;
   }
 
   toJSON() {
-    return { idToToken: this.idToToken };
+    return { type: "legacy", idToToken: this.idToToken };
   }
 
   static fromJSON(data) {

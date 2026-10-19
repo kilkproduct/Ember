@@ -5,8 +5,42 @@ learned state — every weight tensor plus the tokenizer vocabulary — so the
 exact same brain can be restored on another device and keep generating or
 training. It is *not* a conversation export.
 
-Current version: **2**. The importer also accepts legacy **v1** files
+Current versions: **2** (legacy tokenizer) and **3** (byte-level BPE
+tokenizer — see below). The importer also accepts legacy **v1** files
 (`ember-brain-v1`, nested weight arrays) produced by older builds.
+
+## Which tokenizer does a brain use?
+
+A brain's weights are only meaningful with the exact tokenizer it was
+trained with, so the format version encodes it unambiguously:
+
+- **v1 and v2** — the original greedy word-piece tokenizer
+  (`web/tokenizer.js`). These files predate tokenizer metadata; absence
+  of a `tokenizer` block *means* legacy, forever. Current exports also
+  stamp `"tokenizer": { "type": "legacy" }` (ignored by old importers).
+- **v3** — byte-level BPE (`web/bpe.js`). Identical to v2 except
+  `format_version: 3`, `kind: "ember-brain-v3"`, and a required block:
+
+```jsonc
+  "tokenizer": {
+    "type": "byte-bpe",
+    "version": 1,
+    "merges": [[102, 121], [109, 106], /* … */]   // merge i creates token 261+i
+  },
+```
+
+  The vocabulary is *derived* from the merges: ids 0–4 are the specials,
+  5–260 are the 256 raw bytes, and each merge concatenates two earlier
+  tokens. `vocabulary.id_to_token` (byte↔unicode alphabet strings) must
+  equal the derived list exactly, and `architecture.vocabSize` must
+  equal `261 + merges.length` — the importer verifies all of this and
+  rejects inconsistent files. Older app versions reject v3 cleanly
+  ("unsupported format_version") rather than mis-tokenizing it.
+
+There is deliberately **no weight migration across tokenizers**: token
+embeddings would be meaningless under a different vocabulary. Switching
+tokenizer means casting a fresh brain on the same corpus; the app saves
+the old brain as a `pre-tokenizer-switch-*` checkpoint first.
 
 ## v2 schema
 
@@ -93,7 +127,11 @@ Notes:
 
 1. Recognized format and supported `format_version`.
 2. Architecture ranges; `nEmbd % nHead == 0`; `vocabSize` equals the number
-   of vocabulary tokens.
+   of vocabulary tokens. For v3: the tokenizer block exists, its merges
+   are structurally valid (integer pairs, no forward references, no
+   merges of special tokens), and the vocabulary derived from them
+   equals `vocabulary.id_to_token`. A v2 file claiming a non-legacy
+   tokenizer is rejected as inconsistent.
 3. Every required tensor exists with exactly the shape the architecture
    dictates and the right number of finite numeric values; no unknown
    tensors.
@@ -122,4 +160,6 @@ replaced — a bad file can never destroy a working brain.
 }
 ```
 
-v1 is **import-only**; new exports and saves are always written as v2.
+v1 is **import-only**; new exports and saves are written as v2 (legacy
+tokenizer brains) or v3 (byte-BPE brains), following the brain's own
+tokenizer — never the app version.
