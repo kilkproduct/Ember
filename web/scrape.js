@@ -734,3 +734,72 @@ Half my tomatoes split open just as they ripen. The plants look healthy and I wa
     text: `A library card is a small promise between a reader and a town. The card carries a number, and the number points to a record with your name on it. When you borrow a book, the librarian scans the card and the book together, and the system remembers that the book is with you until a certain date. Bring it back on time and the promise is kept; bring it back late and there may be a small fine. The same card works at every branch in the town, because all the branches share one catalogue and one list of readers.`,
   },
 ];
+
+/**
+ * Skill packs (all-purpose training): teach-by-hand LESSONS in one
+ * consistent template per task, so a tiny brain can learn the *shape*
+ * of translation, passage-grounded answering, summarizing and other
+ * small skills. Honest scope: these packs are scaffolds — a few dozen
+ * examples teach formats, not fluency. Real ability needs hundreds to
+ * thousands of examples per skill (see docs/capabilities.md). The same
+ * source sentences repeat across languages on purpose: the only thing
+ * that changes is the language named in the prompt, which is exactly
+ * the conditioning a small model can actually learn.
+ */
+function lesson(title, prompt, response) {
+  return { title, kind: "lesson", text: `### Prompt:\n${prompt}\n\n### Response:\n${response}\n` };
+}
+
+export const TRANSLATION_PACK = [
+  lesson("Translate EN→ES — harbour", "Translate from English to Spanish: The harbour is quiet in the morning.", "El puerto está tranquilo por la mañana."),
+  lesson("Translate EN→ES — cat", "Translate from English to Spanish: The cat sleeps under the table.", "El gato duerme debajo de la mesa."),
+  lesson("Translate EN→ES — bread", "Translate from English to Spanish: Bread needs flour, water and time.", "El pan necesita harina, agua y tiempo."),
+  lesson("Translate EN→ES — train", "Translate from English to Spanish: The train arrives at midnight.", "El tren llega a medianoche."),
+  lesson("Translate EN→ES — garden", "Translate from English to Spanish: She reads a book in the garden.", "Ella lee un libro en el jardín."),
+  lesson("Translate ES→EN — market", "Translate from Spanish to English: El mercado abre a las ocho.", "The market opens at eight."),
+  lesson("Translate ES→EN — beach", "Translate from Spanish to English: Los niños juegan en la playa.", "The children play on the beach."),
+  lesson("Translate ES→EN — rain", "Translate from Spanish to English: La lluvia cae sobre el tejado.", "The rain falls on the roof."),
+  lesson("Translate EN→FR — harbour", "Translate from English to French: The harbour is quiet in the morning.", "Le port est calme le matin."),
+  lesson("Translate EN→FR — cat", "Translate from English to French: The cat sleeps under the table.", "Le chat dort sous la table."),
+  lesson("Translate EN→FR — train", "Translate from English to French: The train arrives at midnight.", "Le train arrive à minuit."),
+  lesson("Translate EN→DE — harbour", "Translate from English to German: The harbour is quiet in the morning.", "Der Hafen ist morgens ruhig."),
+  lesson("Translate EN→DE — cat", "Translate from English to German: The cat sleeps under the table.", "Die Katze schläft unter dem Tisch."),
+  lesson("Translate EN→DE — bread", "Translate from English to German: Bread needs flour, water and time.", "Brot braucht Mehl, Wasser und Zeit."),
+  lesson("Translate EN→MS — harbour", "Translate from English to Malay: The harbour is quiet in the morning.", "Pelabuhan itu tenang pada waktu pagi."),
+  lesson("Translate EN→MS — cat", "Translate from English to Malay: The cat sleeps under the table.", "Kucing itu tidur di bawah meja."),
+  lesson("Translate EN→MS — train", "Translate from English to Malay: The train arrives at midnight.", "Kereta api itu tiba pada tengah malam."),
+  lesson("Translate EN→ZH — harbour", "Translate from English to Chinese: The harbour is quiet in the morning.", "早上港口很安静。"),
+  lesson("Translate EN→ZH — cat", "Translate from English to Chinese: The cat sleeps under the table.", "猫在桌子下面睡觉。"),
+  lesson("Translate EN→ZH — train", "Translate from English to Chinese: The train arrives at midnight.", "火车在午夜到达。"),
+];
+
+const BEES_PASSAGE = "In winter the bees stay inside the hive and cluster in a tight ball around the queen. They shiver their flight muscles to make warmth and slowly eat the honey they stored in summer. On mild days a few bees fly out briefly, but most of the colony waits for spring.";
+const TOMATO_PASSAGE = "Tomatoes split when watering is uneven: after a dry spell, a heavy watering makes the fruit swell faster than the skin can stretch. Mulch around the plants and water deeply on a regular schedule to prevent it.";
+const TRAIN_PASSAGE = "The night train leaves the city at ten and crosses the valley after midnight. Somewhere past the junction it slows, brakes sighing, while the guard walks the corridor checking tickets by torchlight. By dawn it reaches the coast.";
+const CARD_PASSAGE = "A library card carries a number that points to a record with your name. When you borrow a book, the system remembers that the book is with you until a certain date. Bring it back late and there may be a small fine. The same card works at every branch in the town.";
+
+export const RESEARCH_PACK = [
+  lesson("Research — answer from the passage (bees 1)", `Passage: ${BEES_PASSAGE}\nQuestion: Where do bees stay in winter?`, "Inside the hive, clustered in a tight ball around the queen."),
+  lesson("Research — answer from the passage (bees 2)", `Passage: ${BEES_PASSAGE}\nQuestion: What do bees eat in winter?`, "The honey they stored in summer."),
+  lesson("Research — not in the passage (bees)", `Passage: ${BEES_PASSAGE}\nQuestion: How many bees live in the hive?`, "The passage does not say."),
+  lesson("Research — answer from the passage (tomatoes)", `Passage: ${TOMATO_PASSAGE}\nQuestion: Why do tomatoes split?`, "Because uneven watering makes the fruit swell faster than the skin can stretch."),
+  lesson("Research — not in the passage (tomatoes)", `Passage: ${TOMATO_PASSAGE}\nQuestion: Which fertilizer brand works best?`, "The passage does not say."),
+  lesson("Research — answer from the passage (train)", `Passage: ${TRAIN_PASSAGE}\nQuestion: When does the night train reach the coast?`, "By dawn."),
+  lesson("Research — answer from the passage (library card)", `Passage: ${CARD_PASSAGE}\nQuestion: What happens if a book comes back late?`, "There may be a small fine."),
+  lesson("Research — answer from the passage (library card 2)", `Passage: ${CARD_PASSAGE}\nQuestion: Does the card work at other branches?`, "Yes, the same card works at every branch in the town."),
+];
+
+export const SKILLS_PACK = [
+  lesson("Skill — summarize (harbour)", "Summarize in one sentence: The harbour wakes before the town. Fishing boats knock against the piles, gulls argue near the fish market, and by sunrise the first boats are heading out past the lighthouse into flat grey water.", "At dawn the harbour comes alive as fishing boats set out past the lighthouse."),
+  lesson("Skill — summarize (bread)", "Summarize in one sentence: Bread rises because yeast turns sugar into gas, and the stretchy gluten in the flour traps the bubbles like a net. Warmth speeds the yeast up, and the oven's heat expands the gas one last time before the crust sets.", "Bread rises because yeast gas is trapped by stretchy gluten and expands with warmth."),
+  lesson("Skill — explain simply (photosynthesis)", "Explain simply: photosynthesis", "Photosynthesis is how plants make their food. Leaves take in sunlight, water and air, and turn them into sugar for energy and oxygen that floats away."),
+  lesson("Skill — explain simply (the tide)", "Explain simply: why does the sea have tides?", "The moon's gravity pulls on the sea, making the water bulge towards it. As the earth turns, shores move in and out of the bulge, so the water rises and falls twice a day."),
+  lesson("Skill — rewrite politely (report)", "Rewrite politely: Give me the report now.", "Could you please send me the report when you have a moment?"),
+  lesson("Skill — rewrite politely (noise)", "Rewrite politely: Stop making so much noise.", "Would you mind keeping it down a little, please?"),
+  lesson("Skill — keywords (harbour)", "List the keywords: The fishing boats leave the harbour before dawn and return with the evening tide.", "fishing boats, harbour, dawn, tide"),
+  lesson("Skill — keywords (garden)", "List the keywords: Tomatoes need steady water, rich soil and full sun to ripen without splitting.", "tomatoes, water, soil, sun, ripen"),
+  lesson("Skill — fix grammar (goes)", "Fix the grammar: she go to school every day", "She goes to school every day."),
+  lesson("Skill — fix grammar (were)", "Fix the grammar: the dogs was barking at the gate", "The dogs were barking at the gate."),
+  lesson("Skill — continue the story (lighthouse)", "Continue the story: The lighthouse keeper opened the door and", "found the storm already waiting on the steps, so he lit the lamp early and made tea for whoever the sea might send him."),
+  lesson("Skill — answer briefly (capital)", "Answer briefly: What is the capital of France?", "Paris."),
+];

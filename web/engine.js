@@ -350,6 +350,20 @@ export function createTokenizer(type = "legacy") {
 export const STREAM_MARKER_PRIMER =
   "<sub> <title> <body> <comment> <user> <assistant> r/example <doc>\n".repeat(24);
 
+/**
+ * Build the generation prefix for a lesson-style task so Voice prompts
+ * match EXACTLY what the brain was trained on: format-2 brains learned
+ * "<user> … <assistant> …", format-1 brains learned the raw
+ * "### Prompt:/### Response:" text. Using the wrong shape asks the
+ * model a question in a format it never saw.
+ */
+export function formatLessonPrompt(streamFormat, promptText) {
+  const p = String(promptText || "");
+  return streamFormat === 2
+    ? `<user> ${p}\n<assistant> `
+    : `### Prompt:\n${p}\n\n### Response:\n`;
+}
+
 /** Parse a teach-by-hand lesson into {prompt, response} or null. */
 export function parseLesson(text) {
   const m = /^### Prompt:\s*\n([\s\S]*?)\n### Response:\s*\n([\s\S]*?)\s*$/.exec(text || "");
@@ -508,6 +522,11 @@ export class DeviceTrainer {
     // at 4x to limit memorization of tiny sources.
     this.balanceMode = "off";
     this.sourceBoosts = {}; // {sourceKey: factor} actually applied
+    // lesson loss (skill training): false = prompt tokens are targets
+    // too (base-LM behavior, original default); true = loss only on
+    // the response, the standard instruction-tuning choice — focuses
+    // a tiny model's capacity on producing answers, not questions.
+    this.maskLessonPrompts = false;
   }
 
   _disposeCurrent() {
@@ -682,7 +701,9 @@ export class DeviceTrainer {
       const parsed = parseLesson(doc.text);
       if (parsed) {
         push(enc("<user> "), false);
-        push(enc(parsed.prompt + "\n"), true); // prompt text stays trainable (base-LM choice)
+        // prompt trainable by default (base-LM choice); masked when
+        // maskLessonPrompts is on (response-only instruction tuning)
+        push(enc(parsed.prompt + "\n"), !this.maskLessonPrompts);
         push(enc("<assistant> "), false);
         push(enc(parsed.response), true);
       } else {
@@ -1224,6 +1245,7 @@ export class DeviceTrainer {
       source_tokens: { ...this.sourceTokens },
       balance_mode: this.balanceMode,
       source_boosts: { ...this.sourceBoosts },
+      mask_lesson_prompts: this.maskLessonPrompts,
       backend: this.backend,
       train_tps: this.lastTrainTps,
       gen_tps: this.lastGenTps,

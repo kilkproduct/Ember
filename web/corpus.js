@@ -219,3 +219,56 @@ export function corpusHealth(docs, { tokensPerChar = 0.3 } = {}) {
     issues,
   };
 }
+
+/**
+ * Tiny local retrieval for "ask my documents" (research mode): IDF-
+ * weighted word overlap between the query and each stored document.
+ * No embeddings, no network — deterministic and testable. Returns up
+ * to k {doc, score} hits with score > 0, best first. CJK runs (no
+ * spaces) are additionally indexed as character bigrams so Chinese /
+ * Japanese / Korean documents are findable at all.
+ */
+const SEARCH_STOP = new Set(
+  "the a an and or of to in is are was were be been it its this that with for on at by from as into about what when where who why how do does did can could should would i you he she we they my your his her our their me him us them".split(" ")
+);
+
+export function searchWords(text) {
+  const words = [];
+  for (const raw of String(text || "").toLowerCase().split(/[^\p{L}\p{N}]+/u)) {
+    if (!raw) continue;
+    if (/^[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]+$/u.test(raw) && raw.length > 1) {
+      for (let i = 0; i + 1 < raw.length; i++) words.push(raw.slice(i, i + 2));
+      words.push(raw);
+    } else if (raw.length >= 2) {
+      words.push(raw);
+    }
+  }
+  return words;
+}
+
+export function searchDocs(docs, query, { k = 3 } = {}) {
+  const q = [...new Set(searchWords(query).filter((w) => !SEARCH_STOP.has(w)))];
+  if (!q.length || !Array.isArray(docs) || !docs.length) return [];
+  const N = docs.length;
+  const docWords = docs.map((d) => {
+    const counts = new Map();
+    for (const w of searchWords(d.text)) counts.set(w, (counts.get(w) || 0) + 1);
+    return counts;
+  });
+  const titleWords = docs.map((d) => new Set(searchWords(d.title)));
+  const df = new Map();
+  for (const counts of docWords) for (const w of q) if (counts.has(w)) df.set(w, (df.get(w) || 0) + 1);
+  const idf = (w) => Math.log(1 + N / (1 + (df.get(w) || 0)));
+  const scored = [];
+  docs.forEach((doc, i) => {
+    let score = 0;
+    for (const w of q) {
+      const tf = docWords[i].get(w) || 0;
+      if (tf > 0) score += idf(w) * (1 + Math.log(tf));
+      if (titleWords[i].has(w)) score += 2 * idf(w);
+    }
+    if (score > 0) scored.push({ doc, score });
+  });
+  scored.sort((a, b) => b.score - a.score);
+  return scored.slice(0, Math.max(1, k));
+}
