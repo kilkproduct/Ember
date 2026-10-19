@@ -127,6 +127,13 @@ export const HELP = {
     start: "1500 is a good phone size. Raise toward 3000+ for a large, varied corpus.",
     applies: CAST,
   },
+  "v-ffn": {
+    title: "FFN width",
+    what: "Each Transformer layer has a small two-step “thinking” network (the feed-forward block) that expands the embedding to a wider hidden size and back. Classic Transformers use 4× the embedding width; that hidden layer is about two-thirds of each block's weights. Slim (2×) roughly halves block size and speeds training; Wide (6×) adds capacity at real memory and speed cost. The parameter estimate under the card updates live, including the training-memory floor (weights + gradients + Adam state ≈ 16 bytes per parameter, before activations).",
+    why: "At phone scale the FFN is the main capacity/speed knob besides layer count. Whether 2× or 6× helps is an empirical question for YOUR corpus — run the same corpus at two widths and compare validation loss, not vibes. The benchmark (tests/bench.mjs sizes) does exactly this comparison.",
+    start: "Classic 4×. Try Slim 2× if training feels slow — on tiny corpora it often loses little. Non-default widths are recorded in the brain file; brains that use them need this (or a newer) Ember build to import.",
+    applies: CAST,
+  },
   "v-tokenizer": {
     title: "Tokenizer",
     what: "How text is chopped into tokens before the model sees it — learned from YOUR corpus at cast time, either way. Byte-level BPE learns frequent multi-letter chunks (the method modern tokenizers use) and can represent any text, including languages and emoji it never saw. Legacy word pieces is Ember's original scheme: whole frequent words, everything else spelled character-by-character, unseen characters lost to <unk>.",

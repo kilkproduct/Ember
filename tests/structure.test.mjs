@@ -15,7 +15,8 @@ const { DeviceTrainer, normalizeDocs, splitDocs } = await import("../web/engine.
 const { sanitizeMeta } = await import("../web/corpus.js");
 const { redditDocsFromPosts, redditDocsFromComments, TOPIC_PACK } = await import("../web/scrape.js");
 const { openStore } = await import("../web/store.js");
-const { serializeBrain, validateBrain } = await import("../web/brain.js");
+const { serializeBrain, validateBrain, expectedShapes } = await import("../web/brain.js");
+const { estimateParams, estimateTrainBytes } = await import("../web/engine.js");
 
 const CFG = { nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 32, vocabSize: 1200, dropout: 0 };
 
@@ -175,4 +176,34 @@ test("store persists meta; brain round-trips stream_format + corpus meta", async
   const future = JSON.parse(JSON.stringify(brain));
   future.training_state.stream_format = 99;
   assert.throws(() => validateBrain(future), /stream format 99/);
+});
+
+test("ffnMult: slim/wide blocks have exact shapes, train, and round-trip through brains", async () => {
+  const doc = { text: "the harbour light turns over the water and the boats come home through the dark channel slowly" };
+  const trainer = new DeviceTrainer();
+  await trainer.initDocs([doc], { ...CFG, ffnMult: 2 }, 3e-3, { valFraction: 0 });
+  assert.deepEqual(trainer.model.blocks[0].fcW.shape, [32, 64]);
+  assert.deepEqual(trainer.model.blocks[0].outW.shape, [64, 32]);
+  const m = await trainer.trainStep(2);
+  assert.ok(Number.isFinite(m.loss));
+
+  const brain = await serializeBrain(trainer, { name: "slim" });
+  assert.equal(brain.architecture.ffnMult, 2);
+  const norm = validateBrain(JSON.parse(JSON.stringify(brain)));
+  assert.equal(norm.cfg.ffnMult, 2);
+  assert.deepEqual(expectedShapes(norm.cfg)["blocks.0.fcW"], [32, 64]);
+
+  // default-width brains are unchanged: no ffnMult field, 4x shapes
+  const t2 = new DeviceTrainer();
+  await t2.initDocs([doc], CFG, 3e-3, { valFraction: 0 });
+  const b2 = await serializeBrain(t2, { name: "classic" });
+  assert.equal("ffnMult" in b2.architecture, false);
+  assert.equal(validateBrain(b2).cfg.ffnMult, 4);
+  assert.deepEqual(t2.model.blocks[0].fcW.shape, [32, 128]);
+
+  // parameter estimate matches the real model, and memory scales with width
+  const real = trainer.model.nParams();
+  const est = estimateParams({ nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 32, vocabSize: trainer.tokenizer.vocabSize, ffnMult: 2 });
+  assert.equal(est, real);
+  assert.equal(estimateTrainBytes({ nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 32, vocabSize: 1200, ffnMult: 2 }), estimateParams({ nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 32, vocabSize: 1200, ffnMult: 2 }) * 16);
 });

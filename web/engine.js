@@ -69,12 +69,23 @@ const BLOCK_KEYS = [
   "ln2g", "ln2b", "fcW", "fcB", "outW", "outB",
 ];
 
-export function estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize }) {
+export function estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult = 4 }) {
   const d = nEmbd;
+  const ffn = Math.max(1, Math.round(d * (ffnMult || 4)));
   const embed = vocabSize * d + blockSize * d;
-  // per block: 12d^2 weights + (3d+d+4d+d) biases + 4d LayerNorm
-  const per = 12 * d * d + 13 * d;
+  // per block: attention 4d^2 + FFN 2*d*ffn weights, biases/LayerNorm linear terms
+  const per = 4 * d * d + 2 * d * ffn + 9 * d + ffn;
   return embed + nLayer * per + 2 * d; // + final LayerNorm (head is tied to wte)
+}
+
+/**
+ * Rough training-memory footprint in bytes: float32 weights + gradients
+ * + Adam first/second moments = 16 bytes per parameter. Activations
+ * (batch × context × width × layers) come on top and scale with batch
+ * size and context; this is the fixed floor every brain pays.
+ */
+export function estimateTrainBytes(cfg) {
+  return estimateParams(cfg) * 16;
 }
 
 export async function initBackend() {
@@ -112,6 +123,10 @@ export class EmberNet {
     this.wpe = vrand([blockSize, nEmbd]);
     this.blocks = [];
     const d = nEmbd;
+    // FFN width multiplier (Phase D): hidden dim = round(ffnMult * d).
+    // Default 4 = every brain ever cast by earlier versions; old cfg
+    // objects without the field produce identical shapes.
+    const ffn = Math.max(1, Math.round(d * (this.cfg.ffnMult || 4)));
     for (let i = 0; i < nLayer; i++) {
       this.blocks.push({
         ln1g: tf.variable(tf.ones([d])),
@@ -122,9 +137,9 @@ export class EmberNet {
         projB: tf.variable(tf.zeros([d])),
         ln2g: tf.variable(tf.ones([d])),
         ln2b: tf.variable(tf.zeros([d])),
-        fcW: vrand([d, 4 * d]),
-        fcB: tf.variable(tf.zeros([4 * d])),
-        outW: vrand([4 * d, d], 0.02 / Math.sqrt(2 * nLayer)),
+        fcW: vrand([d, ffn]),
+        fcB: tf.variable(tf.zeros([ffn])),
+        outW: vrand([ffn, d], 0.02 / Math.sqrt(2 * nLayer)),
         outB: tf.variable(tf.zeros([d])),
       });
     }

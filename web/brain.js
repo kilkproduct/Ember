@@ -33,6 +33,7 @@ const BLOCK_KEYS = [
 /** Expected shape of every tensor for a given architecture. */
 export function expectedShapes(cfg) {
   const d = cfg.nEmbd;
+  const ffn = Math.max(1, Math.round(d * (cfg.ffnMult || 4)));
   const out = {
     wte: [cfg.vocabSize, d],
     wpe: [cfg.blockSize, d],
@@ -48,9 +49,9 @@ export function expectedShapes(cfg) {
     out[`blocks.${i}.projB`] = [d];
     out[`blocks.${i}.ln2g`] = [d];
     out[`blocks.${i}.ln2b`] = [d];
-    out[`blocks.${i}.fcW`] = [d, 4 * d];
-    out[`blocks.${i}.fcB`] = [4 * d];
-    out[`blocks.${i}.outW`] = [4 * d, d];
+    out[`blocks.${i}.fcW`] = [d, ffn];
+    out[`blocks.${i}.fcB`] = [ffn];
+    out[`blocks.${i}.outW`] = [ffn, d];
     out[`blocks.${i}.outB`] = [d];
   }
   return out;
@@ -91,6 +92,9 @@ function checkArch(raw, vocabLen) {
     blockSize: raw.blockSize,
     vocabSize: raw.vocabSize ?? vocabLen,
     dropout: raw.dropout ?? 0,
+    // additive (Phase D): absent on every brain cast before this field
+    // existed — those are all 4× by construction
+    ffnMult: raw.ffnMult ?? 4,
   };
   const range = (name, v, lo, hi) => {
     if (!Number.isInteger(v) || v < lo || v > hi) {
@@ -104,6 +108,9 @@ function checkArch(raw, vocabLen) {
   range("vocabSize", cfg.vocabSize, 5, 200000);
   if (typeof cfg.dropout !== "number" || !(cfg.dropout >= 0 && cfg.dropout <= 0.9)) {
     throw new Error(`architecture.dropout must be between 0 and 0.9, got ${JSON.stringify(cfg.dropout)}`);
+  }
+  if (typeof cfg.ffnMult !== "number" || !Number.isFinite(cfg.ffnMult) || cfg.ffnMult < 0.5 || cfg.ffnMult > 8) {
+    throw new Error(`architecture.ffnMult must be a number between 0.5 and 8, got ${JSON.stringify(cfg.ffnMult)}`);
   }
   if (cfg.nEmbd % cfg.nHead !== 0) {
     throw new Error(`architecture nEmbd (${cfg.nEmbd}) must be divisible by nHead (${cfg.nHead})`);
@@ -360,6 +367,9 @@ export async function serializeBrain(trainer, { name = "brain", corpusDocs = nul
       : { type: "legacy" },
     weights,
   };
+  // Non-default FFN width is recorded explicitly; default-4 brains stay
+  // byte-compatible with older Ember builds (which assume 4×).
+  if ((trainer.cfg.ffnMult || 4) !== 4) brain.architecture.ffnMult = trainer.cfg.ffnMult;
   if (corpusDocs?.length) {
     brain.corpus = corpusDocs.map((d) => {
       const row = {

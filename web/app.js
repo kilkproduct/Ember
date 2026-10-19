@@ -1,7 +1,7 @@
 import { createForager, STARTER, TOPIC_PACK } from "./scrape.js";
 import { openStore } from "./store.js";
 import { corpusHealth } from "./corpus.js";
-import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
+import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, fmtTps } from "./engine.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
 import { githubPull, githubPush, githubHead } from "./github.js";
 import {
@@ -192,6 +192,7 @@ function vesselSliderValues() {
     ctx: +$("v-ctx").value,
     vocab: +$("v-vocab").value,
     drop: +$("v-drop").value,
+    ffn: Number($("v-ffn")?.value || 4),
     tokenizer: $("v-tokenizer")?.value || "byte-bpe",
   };
 }
@@ -230,8 +231,10 @@ function paramEstimate() {
     updateVesselDirty();
     return;
   }
-  const n = estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize });
-  $("param-est").textContent = `≈ ${(n / 1e6).toFixed(2)}M parameters · trains on this ${isPhone ? "phone" : "device"}`;
+  const ffnMult = Number($("v-ffn")?.value || 4);
+  const n = estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult });
+  const trainMB = (estimateTrainBytes({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult }) / 1048576).toFixed(1);
+  $("param-est").textContent = `≈ ${(n / 1e6).toFixed(2)}M parameters · ~${trainMB} MB training memory (weights + optimizer, before activations) · trains on this ${isPhone ? "phone" : "device"}`;
   updateVesselDirty();
 }
 
@@ -243,6 +246,7 @@ function syncVesselSliders(cfg, tokenizerType) {
   $("v-ctx").value = cfg.blockSize;
   $("v-vocab").value = cfg.vocabSize;
   $("v-drop").value = cfg.dropout || 0;
+  if ($("v-ffn")) $("v-ffn").value = String(cfg.ffnMult || 4);
   if (tokenizerType && $("v-tokenizer")) $("v-tokenizer").value = tokenizerType;
   document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.remove("on"));
   paramEstimate();
@@ -329,6 +333,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
   $(id).addEventListener("input", paramEstimate);
 });
 $("v-tokenizer")?.addEventListener("change", updateVesselDirty);
+$("v-ffn")?.addEventListener("change", paramEstimate);
 document.querySelectorAll(".chip[data-preset]").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
 
 // Voice sampling presets: just fill the numeric inputs (nothing hidden),
@@ -592,6 +597,7 @@ $("btn-init").addEventListener("click", async () => {
       blockSize: +$("v-ctx").value,
       vocabSize: +$("v-vocab").value,
       dropout: +$("v-drop").value,
+      ffnMult: Number($("v-ffn")?.value || 4),
     }, lr, { tokenizerType, streamFormat: 2 }); // new vessels train on structured records
     state.losses = [];
     state.vals = [];

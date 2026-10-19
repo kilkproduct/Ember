@@ -221,6 +221,14 @@
             <label>Dropout <b id="v-drop-n">0.00</b>
               <input id="v-drop" type="range" min="0" max="0.4" step="0.05" value="0" />
             </label>
+            <label>FFN width
+              <select id="v-ffn">
+                <option value="2">Slim (2× embed)</option>
+                <option value="3">3× embed</option>
+                <option value="4" selected>Classic (4× embed)</option>
+                <option value="6">Wide (6× embed)</option>
+              </select>
+            </label>
           </div>
           <label>Tokenizer
             <select id="v-tokenizer">

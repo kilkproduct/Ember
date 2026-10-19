@@ -130,6 +130,128 @@ if (process.argv[2] === "quality") {
   process.exit(0);
 }
 
+// ---- Turn 7 experiments: topic-structured eval corpus -----------------
+// Six topics, each with its own word bank and sentence templates, so
+// "staying on topic" is measurable as the fraction of generated words
+// that belong to the prompt's topic bank (a crude proxy, labeled as
+// such — it measures vocabulary drift, not understanding).
+const TOPIC_BANKS = {
+  harbour: "harbour boats gulls tide nets salt ropes anchor quay lighthouse waves fish market sail storm pier",
+  coding: "python code loops functions variables syntax error debug compiler program script data test bug",
+  baking: "bread oven flour yeast dough crust bake butter sugar recipe warm loaf kitchen honey",
+  railway: "train valley midnight wagons steam rails station platform ticket guard carriage tunnel signal",
+  garden: "garden seeds rain soil sprout leaves summer grow tomatoes weeds flowers bees hedge",
+  market: "market melons cloth spice coins shout square morning sellers baskets prices crowd stalls",
+};
+function topicCorpus() {
+  const r = mulberry32(777);
+  const out = [];
+  const tails = ["in the morning", "before the rain", "every single day", "without any fuss", "as always", "near the old wall"];
+  for (const [topic, bankStr] of Object.entries(TOPIC_BANKS)) {
+    const bank = bankStr.split(" ");
+    for (let d = 0; d < 8; d++) {
+      const sents = [];
+      for (let s = 0; s < 7; s++) {
+        const a = bank[Math.floor(r() * bank.length)];
+        const b = bank[Math.floor(r() * bank.length)];
+        const c = bank[Math.floor(r() * bank.length)];
+        sents.push(`the ${a} and the ${b} belong with the ${c} ${tails[Math.floor(r() * tails.length)]}`);
+      }
+      out.push({ text: sents.join(". ") + ".", title: `${topic} notes ${d}` });
+    }
+  }
+  return out;
+}
+function onTopicRate(text, topic) {
+  const bank = new Set(TOPIC_BANKS[topic].split(" "));
+  const words = text.toLowerCase().replace(/[^a-z ]/g, " ").split(/\s+/).filter(Boolean);
+  if (!words.length) return 0;
+  return words.filter((w) => bank.has(w)).length / words.length;
+}
+const TOPIC_PROMPTS = [
+  ["harbour", "the harbour"],
+  ["coding", "the python code"],
+  ["baking", "the bread"],
+  ["railway", "the train"],
+  ["garden", "the garden"],
+  ["market", "the market"],
+];
+async function topicSamples(trainer) {
+  const rows = [];
+  for (const [topic, prompt] of TOPIC_PROMPTS) {
+    const g = await trainer.generate(prompt, { maxNew: 36, temperature: 0.8, topK: 40, topP: 0.95, seed: 7 });
+    rows.push({ topic, prompt, text: g.text, stoppedOn: g.stoppedOn, rate: onTopicRate(prompt + " " + g.text, topic) });
+  }
+  return rows;
+}
+
+if (process.argv[2] === "sizes") {
+  // Controlled size comparison: same topic corpus + split + tokenizer
+  // + step budget for every config. Larger is NOT assumed better.
+  const { estimateTrainBytes } = await import("../web/engine.js");
+  const tdocs = topicCorpus();
+  // scaled so the whole comparison finishes in minutes on CPU; ratios
+  // (params, ms/step, val deltas) are the signal, not absolutes
+  const CONFIGS = [
+    ["classic 3L/96 ctx96", { nLayer: 3, nHead: 4, nEmbd: 96, blockSize: 96, vocabSize: 1500, dropout: 0, ffnMult: 4 }],
+    ["slim-ffn 3L/96 ctx96", { nLayer: 3, nHead: 4, nEmbd: 96, blockSize: 96, vocabSize: 1500, dropout: 0, ffnMult: 2 }],
+    ["wider 4L/144 ctx96", { nLayer: 4, nHead: 4, nEmbd: 144, blockSize: 96, vocabSize: 1500, dropout: 0, ffnMult: 4 }],
+    ["longer 3L/96 ctx192", { nLayer: 3, nHead: 4, nEmbd: 96, blockSize: 192, vocabSize: 1500, dropout: 0, ffnMult: 4 }],
+  ];
+  console.log(`sizes: ${tdocs.length} topic docs, 30 steps, batch 2, lr 3e-3, byte-bpe, format 2, CPU`);
+  for (const [label, cfg] of CONFIGS) {
+    const trainer = new DeviceTrainer();
+    await trainer.initDocs(tdocs, cfg, 3e-3, { valFraction: 0.2, tokenizerType: "byte-bpe", streamFormat: 2 });
+    const params = trainer.model.nParams();
+    const v0 = await trainer.validate();
+    trainer.setSchedule(trainer.step + 30);
+    const t0 = performance.now();
+    for (let i = 0; i < 30; i++) await trainer.trainStep(2);
+    const msStep = (performance.now() - t0) / 30;
+    const v1 = await trainer.validate();
+    const t1 = performance.now();
+    const g = await trainer.generate("the harbour", { maxNew: 40, temperature: 0.9, topK: 40, topP: 0.95, seed: 3 });
+    const genTps = g.newTokens / ((performance.now() - t1) / 1000);
+    console.log(
+      `${label}: params ${(params / 1e6).toFixed(3)}M · train floor ${(estimateTrainBytes(cfg) / 1048576).toFixed(1)}MB · ` +
+        `val ${v0.loss.toFixed(3)} -> ${v1.loss.toFixed(3)} · ${msStep.toFixed(0)}ms/step · gen ${genTps.toFixed(1)} tok/s`
+    );
+    trainer.model.dispose();
+  }
+  process.exit(0);
+}
+
+if (process.argv[2] === "boundary") {
+  // Boundary A/B/C on the topic corpus: legacy packed vs boundary-masked
+  // vs structured format 2. Each validation is measured under its own
+  // regime's masking (not cross-comparable to the nats), so the shared
+  // evidence is the fixed-prompt on-topic rate and stop behavior.
+  const tdocs = topicCorpus();
+  const cfg = { nLayer: 2, nHead: 2, nEmbd: 64, blockSize: 64, vocabSize: 1500, dropout: 0 };
+  const REGIMES = [
+    ["legacy packed (pre-Phase B)", { streamFormat: 1, mask: false }],
+    ["format 1 + boundary masking", { streamFormat: 1, mask: true }],
+    ["format 2 structured + masking", { streamFormat: 2, mask: true }],
+  ];
+  console.log(`boundary: ${tdocs.length} topic docs, 90 steps, batch 4, lr 3e-3, byte-bpe, CPU`);
+  for (const [label, r] of REGIMES) {
+    const trainer = new DeviceTrainer();
+    await trainer.initDocs(tdocs, cfg, 3e-3, { valFraction: 0.2, tokenizerType: "byte-bpe", streamFormat: r.streamFormat });
+    trainer.docBoundaryMask = r.mask;
+    trainer.maskBoundaryLoss = r.mask;
+    trainer.setSchedule(trainer.step + 90);
+    for (let i = 0; i < 90; i++) await trainer.trainStep(4);
+    const v = await trainer.validate();
+    const rows = await topicSamples(trainer);
+    const rate = rows.reduce((a, x) => a + x.rate, 0) / rows.length;
+    const stops = rows.filter((x) => x.stoppedOn === "boundary").length;
+    console.log(`${label}: train ema ${trainer.emaLoss.toFixed(3)} · val(own regime) ${v.loss.toFixed(3)} · on-topic words ${(rate * 100).toFixed(0)}% · natural stops ${stops}/${rows.length}`);
+    for (const x of rows.slice(0, 3)) console.log(`   [${x.topic}] "${x.prompt}${x.text.slice(0, 110)}" (stoppedOn=${x.stoppedOn})`);
+    trainer.model.dispose();
+  }
+  process.exit(0);
+}
+
 console.log(`corpus: ${docs.length} docs, ${corpusChars} chars; config ${JSON.stringify(CFG)} (batch 2, CPU)`);
 await bench("legacy tokenizer", "legacy");
 try {
