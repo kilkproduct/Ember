@@ -331,6 +331,12 @@
                 <option value="legacy">Legacy packed stream</option>
               </select>
             </label>
+            <label>Source balance
+              <select id="t-balance">
+                <option value="off" selected>Off (as collected)</option>
+                <option value="sqrt">Boost minority sources</option>
+              </select>
+            </label>
           </div>
           <div class="actions">
             <button id="btn-fire" class="btn ember">Fire</button>
@@ -394,6 +400,15 @@
             </label>
             <label>Seed <span class="opt">(blank = random)</span>
               <input id="gen-seed" type="number" step="1" placeholder="random" />
+            </label>
+            <label>Write as r/ <span class="opt">(optional)</span>
+              <input id="gen-sub" type="text" placeholder="e.g. bikewrench" maxlength="60" />
+            </label>
+            <label>Ending
+              <select id="gen-stop">
+                <option value="stop" selected>Stop at document end</option>
+                <option value="continue">Keep going to max tokens</option>
+              </select>
             </label>
           </div>
           <div class="actions">

@@ -207,3 +207,39 @@ test("ffnMult: slim/wide blocks have exact shapes, train, and round-trip through
   assert.equal(est, real);
   assert.equal(estimateTrainBytes({ nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 32, vocabSize: 1200, ffnMult: 2 }), estimateParams({ nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 32, vocabSize: 1200, ffnMult: 2 }) * 16);
 });
+
+test("source balancing boosts minority sources with a capped factor, off by default", async () => {
+  const docs = [];
+  // majority source: 18 docs; minority subreddit: 2 docs of similar size
+  for (let i = 0; i < 18; i++) docs.push({ text: `majority words about harbours and boats number ${i} with gulls`, source: "wiki", kind: "page" });
+  for (let i = 0; i < 2; i++) docs.push({ text: `minority comment about chain wear and limit screws part ${i}`, source: "arctic-c", kind: "reddit-comment", meta: { subreddit: "bikewrench", threadId: `tb${i}`, parentId: null, createdUtc: 1 } });
+  const mk = async (balance) => {
+    const t = new DeviceTrainer();
+    t.balanceMode = balance;
+    await t.initDocs(docs, CFG, 3e-3, { valFraction: 0, streamFormat: 2 });
+    return t;
+  };
+  const off = await mk("off");
+  const on = await mk("sqrt");
+  assert.deepEqual(off.sourceBoosts, {});
+  assert.ok(on.sourceBoosts["r/bikewrench"] >= 2 && on.sourceBoosts["r/bikewrench"] <= 4,
+    `minority boost ${on.sourceBoosts["r/bikewrench"]} must be in (1,4]`);
+  assert.equal(on.sourceBoosts["wiki"], 1, "majority is never down/over-weighted");
+  assert.ok(on.sourceTokens["r/bikewrench"] > off.sourceTokens["r/bikewrench"] * 1.5,
+    "minority stream share must grow materially");
+  assert.equal(on.sourceTokens["wiki"], off.sourceTokens["wiki"]);
+});
+
+test("generate: stopOnBoundary=false runs to maxNew; default stops at trained <eos>", async () => {
+  // tiny format-2 brain overfit on very short docs -> learns to end fast
+  const docs = Array.from({ length: 8 }, (_, i) => ({
+    text: `short note ${i} about cats sleeping warm`, kind: "page",
+  }));
+  const trainer = new DeviceTrainer();
+  await trainer.initDocs(docs, CFG, 5e-3, { valFraction: 0, streamFormat: 2 });
+  trainer.setSchedule(trainer.step + 40);
+  for (let i = 0; i < 40; i++) await trainer.trainStep(2);
+  const full = await trainer.generate("short note", { maxNew: 24, temperature: 0.7, seed: 5, stopOnBoundary: false });
+  assert.equal(full.newTokens, 24, "with boundary stops disabled, generation fills maxNew");
+  assert.equal(full.stoppedOn, null);
+});

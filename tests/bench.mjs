@@ -244,7 +244,7 @@ if (process.argv[2] === "boundary") {
     const v = await trainer.validate();
     const rows = await topicSamples(trainer);
     const rate = rows.reduce((a, x) => a + x.rate, 0) / rows.length;
-    const stops = rows.filter((x) => x.stoppedOn === "boundary").length;
+    const stops = rows.filter((x) => x.stoppedOn != null).length;
     console.log(`${label}: train ema ${trainer.emaLoss.toFixed(3)} · val(own regime) ${v.loss.toFixed(3)} · on-topic words ${(rate * 100).toFixed(0)}% · natural stops ${stops}/${rows.length}`);
     for (const x of rows.slice(0, 3)) console.log(`   [${x.topic}] "${x.prompt}${x.text.slice(0, 110)}" (stoppedOn=${x.stoppedOn})`);
     trainer.model.dispose();

@@ -502,6 +502,12 @@ export class DeviceTrainer {
     this.valTargetOk = null;
     this.sourceTokens = {}; // per-source token counts in the train stream
     this.valSourceTokens = {};
+    // source balancing (Phase E): "off" trains the corpus as-is;
+    // "sqrt" upweights minority sources by a capped integer factor so
+    // one dominant source can't drown the rest. Upweight-only, capped
+    // at 4x to limit memorization of tiny sources.
+    this.balanceMode = "off";
+    this.sourceBoosts = {}; // {sourceKey: factor} actually applied
   }
 
   _disposeCurrent() {
@@ -775,7 +781,32 @@ export class DeviceTrainer {
   setDocs(docs) {
     const clean = normalizeDocs(docs);
     const { train, val } = splitDocs(clean, this.valFraction);
-    const trainStream = this._buildStream(train, { expandWeights: true, shuffle: true });
+    // Phase E balancing: boost minority sources by integer weight copies
+    // (the stream builders already honor weight). Factor per source =
+    // clamp(round(sqrt(medianChars / sourceChars)), 1, 4) — gentler than
+    // inverse-frequency (which would multiply a 1% source ~10-30x and
+    // memorize it), and never downweights anything.
+    this.sourceBoosts = {};
+    let trainDocs = train;
+    if (this.balanceMode === "sqrt" && train.length) {
+      const chars = {};
+      const keyOf = (d) => (d.meta?.subreddit ? `r/${d.meta.subreddit}` : d.source || "manual");
+      for (const d of train) chars[keyOf(d)] = (chars[keyOf(d)] || 0) + d.text.length;
+      const totals = Object.values(chars).sort((a, b) => a - b);
+      const median = totals[Math.floor(totals.length / 2)] || 0;
+      if (median > 0 && totals.length > 1) {
+        const boosts = {};
+        for (const [k, c] of Object.entries(chars)) {
+          boosts[k] = Math.max(1, Math.min(4, Math.round(Math.sqrt(median / Math.max(c, 1)))));
+        }
+        this.sourceBoosts = boosts;
+        trainDocs = train.map((d) => ({
+          ...d,
+          weight: Math.min(50, d.weight * (boosts[keyOf(d)] || 1)),
+        }));
+      }
+    }
+    const trainStream = this._buildStream(trainDocs, { expandWeights: true, shuffle: true });
     this.tokens = trainStream.ids;
     this.targetOk = trainStream.targetOk;
     this.sourceTokens = trainStream.sourceTokens || {};
@@ -1095,7 +1126,7 @@ export class DeviceTrainer {
 
   async generate(
     prompt,
-    { maxNew = 80, temperature = 0.9, topK = 40, topP = 0.95, repetition = 1.15, seed = null } = {}
+    { maxNew = 80, temperature = 0.9, topK = 40, topP = 0.95, repetition = 1.15, seed = null, stopOnBoundary = true } = {}
   ) {
     if (!this.model) throw new Error("Cast and fire the model first.");
     const temp = Number.isFinite(temperature) && temperature > 0 ? temperature : 0.9;
@@ -1133,7 +1164,10 @@ export class DeviceTrainer {
         this.tokenizer.type === "byte-bpe"
           ? [this.tokenizer.padId, this.tokenizer.unkId]
           : [this.tokenizer.padId];
-      const banned = emitted < 3 ? [...alwaysBan, ...stopIds] : alwaysBan;
+      // stopOnBoundary=false: boundary tokens are unsampleable, so the
+      // continuation runs to maxNew instead of ending at the first
+      // document end (useful for long single-topic continuations).
+      const banned = emitted < 3 || !stopOnBoundary ? [...alwaysBan, ...stopIds] : alwaysBan;
       const next = sample(arr, { topK, topP, repetition, recent: ids.slice(-48), banned, rng });
       if (stopIds.has(next)) {
         stoppedOn = next;
@@ -1188,6 +1222,8 @@ export class DeviceTrainer {
       doc_boundary_mask: this.docBoundaryMask,
       mask_boundary_loss: this.maskBoundaryLoss,
       source_tokens: { ...this.sourceTokens },
+      balance_mode: this.balanceMode,
+      source_boosts: { ...this.sourceBoosts },
       backend: this.backend,
       train_tps: this.lastTrainTps,
       gen_tps: this.lastGenTps,

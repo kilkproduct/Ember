@@ -284,6 +284,27 @@ export const HELP = {
     start: "1.15. Lower toward 1.05 for a well-trained brain; raise to ~1.3 if loops dominate.",
     applies: NOW,
   },
+  "t-balance": {
+    title: "Source balance",
+    what: "“Boost minority sources” repeats documents from small sources (per subreddit when known, otherwise per forage source) by a capped integer factor — median-based square-root upweighting, at most 4× — when the training stream is built at Fire time. Nothing is ever downweighted or removed. The fire log prints the resulting tokens per source and any boosts applied.",
+    why: "If 90% of your corpus is one subreddit, the brain mostly learns that one voice. Gentle upweighting gives small sources more gradient without the memorization risk of full inverse-frequency weighting (which would repeat a 1% source dozens of times). The 4× cap is the anti-memorization guard.",
+    start: "Off for a single-topic corpus. On when you deliberately mixed sources of very different sizes and want the small ones heard. Compare validation loss both ways before trusting it.",
+    applies: FIRE,
+  },
+  "gen-sub": {
+    title: "Write as r/… (subreddit conditioning)",
+    what: "For brains cast with structured stream format 2, typing a subreddit name here prefixes your prompt with the same “<sub> name” header the brain saw in training, biasing it toward that community's vocabulary and habits. Older brains ignore it (the output meta line says so). Nothing is hard-coded — if the brain never trained on that subreddit, the name means little to it.",
+    why: "A subreddit name is a hint the model learned from examples, not a switch that downloads a community. Conditioning works only as well as the training data behind the name.",
+    start: "Leave blank normally. Try it after training on mixed subreddits: same prompt, two different sub names, compare.",
+    applies: NOW,
+  },
+  "gen-stop": {
+    title: "Ending",
+    what: "“Stop at document end” lets generation halt when the brain predicts a document-end token (<eos>/<doc>) — natural one-document answers. “Keep going” makes those tokens unsampleable, so text runs to the token limit; useful for long single-topic continuations, worse for short answers.",
+    why: "Format-2 brains are trained to emit <eos> when a document is finished, which is what makes clean endings possible at all. Overriding it trades natural stops for length.",
+    start: "Stop at document end.",
+    applies: NOW,
+  },
   "gen-seed": {
     title: "Seed",
     what: "Fixes the random number generator used for sampling. Same brain + same prompt + same settings + same seed = exactly the same generated text, every time. Blank = fresh randomness each Generate.",

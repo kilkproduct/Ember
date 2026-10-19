@@ -847,6 +847,9 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
     notifyError("Bad learning rate", e.message);
     return;
   }
+  // balancing changes stream composition, so it must be set BEFORE the
+  // corpus refresh below (boundary/clip flags apply per-batch instead)
+  state.trainer.balanceMode = $("t-balance")?.value === "sqrt" ? "sqrt" : "off";
   const stats = await state.store.stats();
   state.trainer.refreshDocs(stats.docs || []);
   const clipRaw = Number($("t-clip")?.value);
@@ -866,6 +869,9 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
   logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
   const st0 = state.trainer.status();
   logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} tokens trained so far`);
+  const srcParts = Object.entries(st0.source_tokens || {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([k, v]) => `${k} ${v}${st0.source_boosts?.[k] > 1 ? ` (×${st0.source_boosts[k]} boost)` : ""}`);
+  if (srcParts.length) logEl($("train-log"), `stream by source: ${srcParts.join(" · ")}${st0.balance_mode === "sqrt" ? " · balancing on" : ""}`);
   renderModelPills();
   let outcome = "completed";
   try {
@@ -975,6 +981,7 @@ $("btn-fire-reset")?.addEventListener("click", () => {
   if ($("t-val")) $("t-val").value = 50;
   if ($("t-sampler")) $("t-sampler").value = "random";
   if ($("t-boundaries")) $("t-boundaries").value = "respect";
+  if ($("t-balance")) $("t-balance").value = "off";
   notifyInfo("Firing schedule reset to defaults");
 });
 
@@ -999,13 +1006,21 @@ $("btn-gen").addEventListener("click", async () => {
     const seedRaw = $("gen-seed")?.value.trim();
     const seed = seedRaw !== "" && Number.isFinite(+seedRaw) ? Math.floor(+seedRaw) : null;
     const repRaw = Number($("gen-rep")?.value);
-    const out = await state.trainer.generate($("gen-prompt").value, {
+    // optional subreddit conditioning: only format-2 brains were trained
+    // with <sub> headers, so only they get the prefix (shown honestly in
+    // the meta line below; never silently injected for old brains)
+    const subWanted = ($("gen-sub")?.value || "").trim().replace(/^r\//, "");
+    const subApplied = subWanted && state.trainer.streamFormat === 2 ? subWanted : null;
+    const promptText = $("gen-prompt").value;
+    const fullPrompt = subApplied ? `<sub> ${subApplied}\n<comment> ${promptText}` : promptText;
+    const out = await state.trainer.generate(fullPrompt, {
       maxNew: +$("gen-tokens").value,
       temperature: +$("gen-temp").value,
       topK: +$("gen-k").value,
       topP: +($("gen-p")?.value || 0.95),
       repetition: Number.isFinite(repRaw) && repRaw >= 1 ? repRaw : 1.15,
       seed,
+      stopOnBoundary: $("gen-stop")?.value !== "continue",
     });
     state.lastGeneration = out.text;
     $("gen-out").innerHTML = "";
@@ -1014,6 +1029,7 @@ $("btn-gen").addEventListener("click", async () => {
     meta.textContent =
       `${fmtTps(out.tokensPerSec)} · ${out.ms.toFixed(0)} ms · ${out.newTokens} tokens · ${tf.getBackend()}` +
       (out.seed != null ? ` · seed ${out.seed} (reproducible)` : "") +
+      (subApplied ? ` · conditioned on r/${subApplied}` : subWanted ? ` · ⚠ r/${subWanted} ignored — this brain predates structured stream format 2` : "") +
       (out.contextTrimmed ? ` · ⚠ prompt was ${out.promptTokens} tokens — only the last ${state.trainer.cfg.blockSize} fit the context window` : "");
     $("pill-speed").textContent = `gen ${fmtTps(out.tokensPerSec)}`;
     const p = document.createElement("div");
@@ -1038,6 +1054,8 @@ $("btn-gen-reset")?.addEventListener("click", () => {
   $("gen-p").value = 0.95;
   if ($("gen-rep")) $("gen-rep").value = 1.15;
   if ($("gen-seed")) $("gen-seed").value = "";
+  if ($("gen-sub")) $("gen-sub").value = "";
+  if ($("gen-stop")) $("gen-stop").value = "stop";
   document
     .querySelectorAll(".chip[data-gen-preset]")
     .forEach((x) => x.classList.toggle("on", x.dataset.genPreset === "balanced"));
