@@ -1,7 +1,8 @@
 import { Tokenizer } from "./tokenizer.js";
 import { BpeTokenizer } from "./bpe.js";
 
-const MASKS = new Map();
+let maskTensor = null;
+let maskSize = 0;
 
 function gelu(x) {
   const c = Math.sqrt(2 / Math.PI);
@@ -15,18 +16,24 @@ function layerNorm(x, gain, bias, eps = 1e-5) {
 }
 
 function causalMask(t) {
-  let m = MASKS.get(t);
-  if (m) return m;
-  const data = new Float32Array(t * t);
-  for (let i = 0; i < t; i++) {
-    for (let j = i + 1; j < t; j++) data[i * t + j] = -1e9;
+  if (!maskTensor || maskSize < t) {
+    const data = new Float32Array(t * t);
+    for (let i = 0; i < t; i++) {
+      for (let j = i + 1; j < t; j++) data[i * t + j] = -1e9;
+    }
+    // tf.keep: the mask is usually first created inside a tf.tidy scope
+    // (training / generation). Without keep() tidy disposes it and the
+    // cache then hands out a dead tensor, crashing later steps/tokens.
+    const fresh = tf.keep(tf.tensor(data, [1, 1, t, t]));
+    if (maskTensor) maskTensor.dispose();
+    maskTensor = fresh;
+    maskSize = t;
   }
-  // tf.keep: the mask is usually first created inside a tf.tidy scope
-  // (training minimize / generation). Without keep() tidy disposes it and
-  // the cache then hands out a dead tensor, crashing later steps/tokens.
-  m = tf.keep(tf.tensor(data, [1, 1, t, t]));
-  MASKS.set(t, m);
-  return m;
+  // One kept mask at the largest size seen; smaller contexts slice it
+  // (the slice is an ordinary intermediate the caller's tidy/tape
+  // disposes). The previous per-length cache pinned a kept tensor for
+  // every context length generation visited — ~22 MB at blockSize 256.
+  return maskSize === t ? maskTensor : maskTensor.slice([0, 0, 0, 0], [1, 1, t, t]);
 }
 
 function drop(x, rate, training) {
@@ -779,10 +786,14 @@ export class DeviceTrainer {
 
   async generate(
     prompt,
-    { maxNew = 80, temperature = 0.9, topK = 40, topP = 0.95, repetition = 1.15 } = {}
+    { maxNew = 80, temperature = 0.9, topK = 40, topP = 0.95, repetition = 1.15, seed = null } = {}
   ) {
     if (!this.model) throw new Error("Cast and fire the model first.");
     const temp = Number.isFinite(temperature) && temperature > 0 ? temperature : 0.9;
+    // With a numeric seed, generation is fully reproducible (same brain,
+    // prompt, settings, seed -> same text) — essential for honest
+    // before/after comparisons instead of cherry-picked samples.
+    const rng = Number.isFinite(seed) ? mulberry32(Math.floor(seed) >>> 0) : Math.random;
     let ids = this.tokenizer.encode(prompt || "");
     if (!ids.length) ids = [this.tokenizer.bosId];
     const origin = ids.length;
@@ -814,7 +825,7 @@ export class DeviceTrainer {
           ? [this.tokenizer.padId, this.tokenizer.unkId]
           : [this.tokenizer.padId];
       const banned = emitted < 3 ? [...alwaysBan, ...stopIds] : alwaysBan;
-      const next = sample(arr, { topK, topP, repetition, recent: ids.slice(-48), banned });
+      const next = sample(arr, { topK, topP, repetition, recent: ids.slice(-48), banned, rng });
       if (stopIds.has(next)) {
         stoppedOn = next;
         break;
@@ -825,7 +836,19 @@ export class DeviceTrainer {
     const ms = performance.now() - t0;
     this.lastGenTps = emitted / (ms / 1000);
     const text = this.tokenizer.decode(ids.slice(origin));
-    return { text, tokensPerSec: this.lastGenTps, ms, newTokens: emitted, stoppedOn };
+    return {
+      text,
+      tokensPerSec: this.lastGenTps,
+      ms,
+      newTokens: emitted,
+      stoppedOn,
+      promptTokens: origin,
+      // true when the prompt alone overflowed the context window and
+      // only its last `block` tokens were ever seen — surfaced in the
+      // UI instead of silently pretending the whole prompt counted.
+      contextTrimmed: origin > block,
+      seed: Number.isFinite(seed) ? Math.floor(seed) : null,
+    };
   }
 
   status() {
@@ -861,7 +884,18 @@ export class DeviceTrainer {
   }
 }
 
-function sample(logits, { topK, topP, repetition, recent, banned = [] }) {
+/** Deterministic PRNG (mulberry32) for reproducible generations. */
+export function mulberry32(seed) {
+  let a = seed | 0;
+  return function () {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function sample(logits, { topK, topP, repetition, recent, banned = [], rng = Math.random }) {
   const arr = logits.slice();
   for (const id of banned) {
     if (id >= 0 && id < arr.length) arr[id] = -Infinity;
@@ -894,7 +928,7 @@ function sample(logits, { topK, topP, repetition, recent, banned = [] }) {
   const max = Math.max(...idx.map((p) => p[0]));
   const exps = idx.map((p) => [Math.exp(p[0] - max), p[1]]);
   const z = exps.reduce((s, p) => s + p[0], 0);
-  let r = Math.random() * z;
+  let r = rng() * z;
   for (const [p, i] of exps) {
     r -= p;
     if (r <= 0) return i;

@@ -4,12 +4,12 @@ A **small language model you train yourself**, including **on a phone**. Ember i
 
 ## What it is
 
-- **Vessel** — a compact decoder-only transformer in TensorFlow.js, sized for a phone (~0.2M params default) up to a few million on desktop. Header shows **train tok/s** and **gen tok/s**.
-- **Fuel** — an auto-forager that walks public APIs from *your* browser: the Wikipedia family (Simple/EN wiki, Wikiquote, Wikisource, Wikivoyage, Wikibooks, Wikinews, Wiktionary), Reddit archives (Arctic Shift + PullPush), Stack Exchange, Gutenberg, Open Library, Hacker News. Autopilot keeps discovering related topics and subreddits. Nothing is topic-filtered.
+- **Vessel** — a compact decoder-only transformer in TensorFlow.js, sized for a phone (~0.2M params default) up to a few million on desktop. Header shows **train tok/s** and **gen tok/s**. New vessels learn a **byte-level BPE tokenizer** from your own corpus (the original word-piece tokenizer remains available, and brains already trained with it keep it forever — see `docs/brain-format.md`).
+- **Fuel** — an auto-forager that walks public APIs from *your* browser: the Wikipedia family (Simple/EN wiki, Wikiquote, Wikisource, Wikivoyage, Wikibooks, Wikinews, Wiktionary), Reddit archives (Arctic Shift + PullPush), Stack Exchange, Gutenberg, Open Library, Hacker News. Autopilot keeps discovering related topics and subreddits. Nothing is topic-filtered. Incoming text is cleaned (script/style junk and HTML entities stripped) and exact duplicates are merged automatically; the Corpus card reports corpus health (duplicates, tiny docs, size spread).
 - **Uncensored** — no refusal layer, no banned-topic list, no safety fine-tune. The model completes whatever it absorbed. You own the weights and the consequences.
-- **Fire** — you choose every step, batch, and learning rate. Loss draws itself live. Samples appear while it cooks.
-- **Voice** — prompt it, then **teach by hand**: write the answer you wanted. Lessons are stored with extra weight so the next firing leans toward them.
-- **Memory** — save and load checkpoints.
+- **Fire** — you choose every step, batch, and learning rate. Loss draws itself live alongside **held-out validation loss** (teal) from documents the model never trains on, so you can see memorization vs. actual learning. Gradients are checked before every update (a NaN step is refused, never baked in) with optional gradient clipping; progress reports tokens actually trained, not just corpus size.
+- **Voice** — prompt it, then **teach by hand**: write the answer you wanted. Lessons are stored with extra weight so the next firing leans toward them. Sampling presets, a repetition penalty, and an optional **seed** (same seed = same output) make results reproducible.
+- **Memory** — save and load checkpoints; export/import whole brains as `.json` (v1/v2/v3 supported, schema in `docs/brain-format.md`).
 
 This is not a chat product with a hidden API. The weights are yours. A 1M-parameter model trained for a few minutes will sound like a dream of its fuel — that is the point.
 

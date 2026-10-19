@@ -244,7 +244,7 @@ function syncVesselSliders(cfg, tokenizerType) {
   $("v-vocab").value = cfg.vocabSize;
   $("v-drop").value = cfg.dropout || 0;
   if (tokenizerType && $("v-tokenizer")) $("v-tokenizer").value = tokenizerType;
-  document.querySelectorAll(".chip").forEach((c) => c.classList.remove("on"));
+  document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.remove("on"));
   paramEstimate();
 }
 
@@ -256,7 +256,7 @@ function applyPreset(name) {
   $("v-ctx").value = p.ctx;
   $("v-vocab").value = p.vocab;
   $("v-drop").value = p.drop;
-  document.querySelectorAll(".chip").forEach((c) => c.classList.toggle("on", c.dataset.preset === name));
+  document.querySelectorAll(".chip[data-preset]").forEach((c) => c.classList.toggle("on", c.dataset.preset === name));
   if (name === "phone") {
     $("t-batch").value = 2;
     $("t-steps").value = 150;
@@ -329,7 +329,28 @@ document.querySelectorAll(".tab").forEach((btn) => {
   $(id).addEventListener("input", paramEstimate);
 });
 $("v-tokenizer")?.addEventListener("change", updateVesselDirty);
-document.querySelectorAll(".chip").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
+document.querySelectorAll(".chip[data-preset]").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
+
+// Voice sampling presets: just fill the numeric inputs (nothing hidden),
+// so what the preset does is exactly what the fields show.
+const GEN_PRESETS = {
+  precise: { temp: 0.5, k: 20, p: 0.9, rep: 1.1 },
+  balanced: { temp: 0.9, k: 40, p: 0.95, rep: 1.15 },
+  creative: { temp: 1.2, k: 80, p: 0.98, rep: 1.05 },
+};
+document.querySelectorAll(".chip[data-gen-preset]").forEach((c) =>
+  c.addEventListener("click", () => {
+    const p = GEN_PRESETS[c.dataset.genPreset];
+    if (!p) return;
+    $("gen-temp").value = p.temp;
+    $("gen-k").value = p.k;
+    $("gen-p").value = p.p;
+    if ($("gen-rep")) $("gen-rep").value = p.rep;
+    document
+      .querySelectorAll(".chip[data-gen-preset]")
+      .forEach((x) => x.classList.toggle("on", x === c));
+  })
+);
 
 // ---------- fuel ----------
 
@@ -597,7 +618,11 @@ async function storeCkpt(name, brain) {
 }
 
 async function saveCkpt(name, { quiet = false } = {}) {
-  const brain = await packBrain(name, { includeCorpus: $("export-corpus")?.checked ?? true });
+  // On-device checkpoints are weights-only: the corpus already lives in
+  // IndexedDB next to them, so embedding another full copy in every
+  // checkpoint just eats phone storage. The corpus checkbox governs
+  // file/GitHub EXPORTS, where the corpus must travel with the brain.
+  const brain = await packBrain(name, { includeCorpus: false });
   const stored = await storeCkpt(name, brain);
   await refresh();
   if (!quiet) notifySuccess(`Checkpoint “${name}” saved on this device`, fmtBytes(stored.bytes));
@@ -857,12 +882,15 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
       }
       if (every && m.step % every === 0) {
         try {
+          // Fixed seed + fixed settings: samples across steps and across
+          // runs are comparable evidence, not lucky draws.
           const sample = await state.trainer.generate($("t-prompt").value, {
             maxNew: 40,
             temperature: 0.9,
             topK: 40,
             topP: 0.95,
             repetition: 1.15,
+            seed: 1234,
           });
           const box = document.createElement("div");
           box.className = "sample";
@@ -940,18 +968,25 @@ $("btn-gen").addEventListener("click", async () => {
   renderModelPills();
   $("gen-out").textContent = "thinking…";
   try {
+    const seedRaw = $("gen-seed")?.value.trim();
+    const seed = seedRaw !== "" && Number.isFinite(+seedRaw) ? Math.floor(+seedRaw) : null;
+    const repRaw = Number($("gen-rep")?.value);
     const out = await state.trainer.generate($("gen-prompt").value, {
       maxNew: +$("gen-tokens").value,
       temperature: +$("gen-temp").value,
       topK: +$("gen-k").value,
       topP: +($("gen-p")?.value || 0.95),
-      repetition: 1.15,
+      repetition: Number.isFinite(repRaw) && repRaw >= 1 ? repRaw : 1.15,
+      seed,
     });
     state.lastGeneration = out.text;
     $("gen-out").innerHTML = "";
     const meta = document.createElement("div");
     meta.className = "prompt";
-    meta.textContent = `${fmtTps(out.tokensPerSec)} · ${out.ms.toFixed(0)} ms · ${out.newTokens} tokens · ${tf.getBackend()}`;
+    meta.textContent =
+      `${fmtTps(out.tokensPerSec)} · ${out.ms.toFixed(0)} ms · ${out.newTokens} tokens · ${tf.getBackend()}` +
+      (out.seed != null ? ` · seed ${out.seed} (reproducible)` : "") +
+      (out.contextTrimmed ? ` · ⚠ prompt was ${out.promptTokens} tokens — only the last ${state.trainer.cfg.blockSize} fit the context window` : "");
     $("pill-speed").textContent = `gen ${fmtTps(out.tokensPerSec)}`;
     const p = document.createElement("div");
     p.className = "prompt";
@@ -973,6 +1008,11 @@ $("btn-gen-reset")?.addEventListener("click", () => {
   $("gen-temp").value = 0.9;
   $("gen-k").value = 40;
   $("gen-p").value = 0.95;
+  if ($("gen-rep")) $("gen-rep").value = 1.15;
+  if ($("gen-seed")) $("gen-seed").value = "";
+  document
+    .querySelectorAll(".chip[data-gen-preset]")
+    .forEach((x) => x.classList.toggle("on", x.dataset.genPreset === "balanced"));
   notifyInfo("Voice settings reset to defaults");
 });
 
@@ -1344,6 +1384,24 @@ async function boot() {
   }
   paramEstimate();
   await refresh();
+  // Surface the rolling autosave (written every 50 firing steps) so a
+  // reload doesn't strand the user at "vessel unformed" with no hint
+  // that a trained brain is waiting. Probe-only: we validate and tell,
+  // never auto-load — replacing the live model is the user's call.
+  try {
+    const auto = state.checkpoints.find((c) => c.name === "autosave");
+    const blob = auto ? await state.store.getKv("ckpt:autosave") : null;
+    if (blob) {
+      const norm = validateBrain(blob);
+      const when = auto.mtime ? new Date(auto.mtime).toLocaleString() : "earlier";
+      notifyInfo(
+        "Autosave found",
+        `Step ${norm.step} · ${norm.tokenizer?.type || "legacy"} tokenizer · saved ${when}. Load it from the Memory card (Vessel tab) to pick up where you left off.`
+      );
+    }
+  } catch (e) {
+    notifyWarn("Autosave is unreadable", `It was not loaded. ${e.message} Named checkpoints (if any) are unaffected.`);
+  }
   await loadGhSettings();
   if ($("gh-pull-start")?.checked) {
     pullGithubBrain().catch((e) => notifyWarn("GitHub auto-pull failed", e.message));

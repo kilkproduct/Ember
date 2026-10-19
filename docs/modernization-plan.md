@@ -196,3 +196,32 @@ _Filled in as stages land (real numbers from test/bench runs, not estimates)._
   ~850 chars/s. Loss values are not comparable across tokenizers;
   per-character, BPE reached 0.78 vs legacy 1.01 nats/char after 30
   steps (indicative only). Tests: 58/58 JS + Python OK (11 new).
+
+### Stage E — done
+
+- Generation: seeded sampling (mulberry32; same seed+brain+prompt+
+  settings → identical text, test-proven), repetition penalty exposed
+  (was hardcoded 1.15), Precise/Balanced/Creative presets that only
+  fill the visible inputs, prompt-overflow ("context trimmed") now
+  reported instead of silent, fire-loop samples use a fixed seed.
+- Persistence: on-device checkpoints are weights-only (corpus copies
+  no longer pile up per checkpoint; exports keep the checkbox). Boot
+  probes the rolling autosave — valid → tells you step/tokenizer/time
+  and where to load it; corrupt → warns, never auto-loads.
+- Performance: causal mask is now one kept tensor, sliced per length
+  (was one kept tensor *per length* — up to ~22 MB at blockSize 256).
+  A property test proves earlier logits never depend on later tokens
+  across the mask growth and slice paths.
+- **Quality head-to-head** (`bench.mjs quality`, 12 purpose-written
+  paragraphs ×6 = 12.4k chars, 25% held out, 250 steps, phone config):
+  legacy val 2.237 → **1.737 nats/char**; BPE val 1.447 → **1.473
+  nats/char** with train EMA far lower (1.67 vs 2.36 nats/tok) — on
+  this tiny, repetition-heavy corpus BPE *memorizes* faster and
+  overfits the held-out paragraphs, exactly the failure the new
+  validation line exists to reveal (its fixed-seed sample still reads
+  far more coherently, because it recombines memorized phrases).
+  Honest reading: BPE's proven wins are structural (unseen-text
+  coverage, ~½ the tokens/char ⇒ ~2× effective context, no `<unk>`);
+  a generalization win needs real-scale data and fewer passes, and is
+  **not** claimed from this toy experiment. Watch validation loss and
+  stop when it turns. Tests: 61/61 JS + Python OK.

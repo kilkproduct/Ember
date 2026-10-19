@@ -152,8 +152,8 @@ export const HELP = {
   },
   "export-corpus": {
     title: "Include corpus in export",
-    what: "Also embeds the full fuel corpus (every document) in the brain file, so importing on another device restores the texts too.",
-    why: "Off = much smaller file (weights only) and faster saves. On = the other device can keep training on the same fuel immediately.",
+    what: "For EXPORTED brain files (and GitHub pushes): also embeds the full fuel corpus (every document) in the file, so importing on another device restores the texts too. On-device “Save here” checkpoints never embed the corpus — it already lives on this device, so a copy per checkpoint would just waste storage.",
+    why: "Off = much smaller export file (weights only). On = the other device can keep training on the same fuel immediately, and the file is a complete backup if this device is lost.",
   },
   "gh-repo": {
     title: "GitHub repo",
@@ -260,6 +260,21 @@ export const HELP = {
     what: "After top-k, keep only the smallest set of tokens whose probabilities add up to p, then sample within that set. 1 disables it.",
     why: "Adapts the candidate pool to the model's confidence: few options when it's sure, more when it isn't.",
     start: "0.9–0.95.",
+    applies: NOW,
+  },
+  "gen-rep": {
+    title: "Repetition penalty",
+    what: "Tokens that already appeared in the recent text (last ~48 tokens, prompt included) get their scores divided by this number before sampling — positive scores shrink toward zero, negative scores get more negative. 1.0 disables it.",
+    why: "Tiny models love falling into loops (“the the the…”). A mild penalty breaks the loop without retraining. It is a band-aid, not learning: if text only reads well at 1.5+, the brain needs more/better firing, not more penalty.",
+    up: "Fewer repeats, but common words like “the” also get punished — text can turn stilted or weird.",
+    start: "1.15. Lower toward 1.05 for a well-trained brain; raise to ~1.3 if loops dominate.",
+    applies: NOW,
+  },
+  "gen-seed": {
+    title: "Seed",
+    what: "Fixes the random number generator used for sampling. Same brain + same prompt + same settings + same seed = exactly the same generated text, every time. Blank = fresh randomness each Generate.",
+    why: "Comparing two brains (or before/after a fire) honestly means holding everything else constant — otherwise you're comparing luck. The during-firing samples already use a fixed seed (1234) for this reason.",
+    ex: "Set seed 42, generate, fire 200 more steps, generate again — any difference is the training, not the dice.",
     applies: NOW,
   },
   "teach-weight": {

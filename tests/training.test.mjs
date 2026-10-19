@@ -206,3 +206,59 @@ test("trainStep + validate do not leak tensors", async () => {
   const after = tf.memory().numTensors;
   assert.ok(after - before <= 2, `tensor count grew ${before} -> ${after} over 8 steps + 2 validations`);
 });
+
+test("seeded generation is reproducible; unseeded still works", async () => {
+  const trainer = new DeviceTrainer();
+  await trainer.initDocs(makeDocs(6), CFG, 3e-3, { valFraction: 0 });
+  trainer.setSchedule(trainer.step + 3);
+  for (let i = 0; i < 3; i++) await trainer.trainStep(2);
+  const opts = { maxNew: 24, temperature: 0.9, topK: 40, topP: 0.95, seed: 1234 };
+  const a = await trainer.generate("the river", opts);
+  const b = await trainer.generate("the river", opts);
+  assert.equal(a.text, b.text, "same seed + brain + prompt must give identical text");
+  assert.equal(a.seed, 1234);
+  const c = await trainer.generate("the river", { maxNew: 8 });
+  assert.equal(c.seed, null);
+  assert.ok(c.newTokens > 0);
+});
+
+test("causal mask: earlier logits never depend on later tokens (growth + slice paths)", async () => {
+  const trainer = new DeviceTrainer();
+  await trainer.initDocs(makeDocs(6), CFG, 3e-3, { valFraction: 0 });
+  const model = trainer.model;
+  const V = trainer.tokenizer.vocabSize;
+  async function logits(ids) {
+    const t = tf.tidy(() => model.forward(tf.tensor2d([ids], [1, ids.length], "int32")));
+    const data = await t.data();
+    t.dispose();
+    return data;
+  }
+  // small T first, then a longer T (forces mask growth), then small again (slice path)
+  const base4 = await logits([2, 5, 6, 7]);
+  const alt4 = await logits([2, 5, 9, 10]); // last two tokens differ
+  const long7 = await logits([2, 5, 6, 7, 8, 9, 10]);
+  const base4again = await logits([2, 5, 6, 7]);
+  for (let pos = 0; pos < 2; pos++) {
+    for (let v = 0; v < V; v++) {
+      assert.ok(
+        Math.abs(base4[pos * V + v] - alt4[pos * V + v]) < 1e-5,
+        `position ${pos} changed when a LATER token changed — mask is not causal`
+      );
+    }
+  }
+  for (let i = 0; i < base4.length; i++) {
+    assert.ok(Math.abs(base4[i] - long7[i]) < 1e-5, "prefix logits must not depend on sequence length");
+    assert.ok(Math.abs(base4[i] - base4again[i]) < 1e-6, "sliced mask must reproduce exact-size mask results");
+  }
+});
+
+test("generate reports prompt size and context trimming honestly", async () => {
+  const trainer = new DeviceTrainer();
+  await trainer.initDocs(makeDocs(6), { ...CFG, blockSize: 16 }, 3e-3, { valFraction: 0 });
+  const short = await trainer.generate("the", { maxNew: 4 });
+  assert.equal(short.contextTrimmed, false);
+  const longPrompt = "the river runs past the house and the people watch the warm rain fall over the harbour town";
+  const long = await trainer.generate(longPrompt, { maxNew: 4 });
+  assert.ok(long.promptTokens > 16, `prompt should exceed block 16, got ${long.promptTokens}`);
+  assert.equal(long.contextTrimmed, true);
+});
