@@ -1,5 +1,6 @@
 import { createForager, STARTER } from "./scrape.js";
 import { openStore } from "./store.js";
+import { corpusHealth } from "./corpus.js";
 import { DeviceTrainer, EmberNet, initBackend, estimateParams, fmtTps } from "./engine.js";
 import { Tokenizer } from "./tokenizer.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
@@ -79,6 +80,30 @@ function renderCorpus(stats) {
   $("corpus-meta").textContent = stats.documents
     ? `${stats.documents} documents, ${fmtChars(stats.characters)} characters${src ? " — " + src : ""}`
     : "Nothing in the kiln yet. Lives on this device (IndexedDB).";
+  // Corpus health: what quality problems does this fuel have? Token
+  // count is an estimate (ratio from the live tokenizer when cast,
+  // else a generic 0.30 tok/char) — labeled "est." wherever shown.
+  const stNow = state.trainer.status();
+  const ratio =
+    stNow.ready && stats.characters > 0
+      ? Math.min(1, Math.max(0.05, (stNow.corpus_tokens + stNow.val_tokens) / stats.characters))
+      : 0.3;
+  const health = corpusHealth(stats.docs || [], { tokensPerChar: ratio });
+  state.lastHealth = health;
+  const healthEl = $("corpus-health");
+  if (healthEl) {
+    healthEl.textContent = stats.documents
+      ? `≈${fmtChars(health.estTokens)} tokens (est.) · median doc ${fmtChars(health.medianChars)} chars` +
+        (health.issues.length ? ` · ⚠ ${health.issues.join(" · ")}` : " · no duplicates or tiny-doc problems detected")
+      : "";
+  }
+  const dedupRow = $("dedup-row");
+  if (dedupRow) {
+    dedupRow.hidden = health.exactDuplicateDocs === 0;
+    if (health.exactDuplicateDocs > 0) {
+      $("btn-dedup").textContent = `Remove ${health.exactDuplicateDocs} exact duplicate${health.exactDuplicateDocs > 1 ? "s" : ""} (keeps one copy, merges weights)`;
+    }
+  }
   const list = $("corpus-list");
   list.innerHTML = "";
   for (const d of stats.documents_preview || []) {
@@ -355,6 +380,43 @@ $("btn-clear").addEventListener("click", async () => {
   await state.store.clear();
   await refresh();
   notifyInfo("Corpus emptied");
+});
+
+// Explicit, user-triggered cleanup: for each group of identical texts
+// keep ONE copy (the heaviest), fold the duplicates' weights into it,
+// and delete the rest. Nothing unique is ever removed.
+$("btn-dedup")?.addEventListener("click", async () => {
+  const health = state.lastHealth;
+  const groups = (health?.exactGroups || []).filter((g) => g.length > 1);
+  if (!groups.length) {
+    notifyInfo("No exact duplicates right now");
+    return;
+  }
+  if (!confirm(`Remove ${health.exactDuplicateDocs} duplicate copie(s)? One copy of each text is kept and the duplicates' weights are merged into it.`)) return;
+  try {
+    const stats = await state.store.stats();
+    const byId = new Map((stats.docs || []).map((d) => [d.id, d]));
+    let removed = 0;
+    for (const group of groups) {
+      const docs = group.map((id) => byId.get(id)).filter(Boolean);
+      if (docs.length < 2) continue;
+      const keeper = docs.reduce((a, b) => ((b.weight || 1) > (a.weight || 1) ? b : a));
+      const totalWeight = Math.min(50, docs.reduce((s, d) => s + (d.weight || 1), 0));
+      if (totalWeight !== (keeper.weight || 1)) {
+        await state.store.addDoc({ ...keeper, weight: totalWeight });
+      }
+      for (const d of docs) {
+        if (d.id !== keeper.id) {
+          await state.store.remove(d.id);
+          removed += 1;
+        }
+      }
+    }
+    await refresh();
+    notifySuccess(`Removed ${removed} duplicate${removed === 1 ? "" : "s"}`, "One copy of each text remains, with merged weights.");
+  } catch (e) {
+    notifyError("Dedup failed", e.message);
+  }
 });
 
 const forager = createForager({

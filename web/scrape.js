@@ -6,6 +6,8 @@
  * No content filter, no NSFW skip, no topic blocklist. Public text only.
  */
 
+import { decodeEntities } from "./corpus.js";
+
 const STOP = new Set(`a an the of to in on for and or is are was were be been being
   this that those these it its as at by from with without into about over after
   before between than then so if but not no yes you we they he she i my your our
@@ -54,17 +56,15 @@ function keywords(text, n = 6) {
     .map(([w]) => w);
 }
 
-function stripHtml(s) {
-  return String(s || "")
+export function stripHtml(s) {
+  const noBlocks = String(s || "")
+    // script/style/noscript CONTENTS are not prose — drop them wholesale
+    // (previously only the tags went, leaving CSS/JS as "training text")
+    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
     .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/p>/gi, "\n\n")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
+    .replace(/<\/(p|div|li|h[1-6]|tr|blockquote)>/gi, "\n\n")
+    .replace(/<[^>]+>/g, " ");
+  return decodeEntities(noBlocks)
     .replace(/\[deleted\]|\[removed\]/gi, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")

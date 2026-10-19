@@ -152,3 +152,20 @@ _Filled in as stages land (real numbers from test/bench runs, not estimates)._
   (batch 2, block 64, d64, Node CPU) — no regression. Tests: 40/40
   (9 new in `tests/training.test.mjs`, incl. controlled overfit and a
   tensor-leak guard).
+
+### Stage C — done
+
+- New `web/corpus.js` (pure): `cleanText` (NFC, CRLF, control chars, 3+
+  repeated lines), `decodeEntities` (named + numeric + hex), `textHash`,
+  word-shingle near-dup detection, `corpusHealth` (length distribution,
+  exact/near duplicates, tiny/huge docs, est. tokens, plain-English
+  issues). `stripHtml` now drops script/style *contents* (previously CSS
+  and JS became training text) and uses the shared entity decoder.
+- `Store.addDoc` — the single ingestion choke point — cleans every
+  document and merges exact duplicates (same normalized text) into the
+  stored copy with combined weight; same-URL re-fetches still replace in
+  place without weight inflation. Verified on fake IndexedDB
+  (test-only devDependency `fake-indexeddb@6.2.5`, Apache-2.0).
+- UI: corpus health line (est. tokens, median doc size, issue warnings)
+  and an explicit, confirmed "remove exact duplicates" action that
+  keeps one copy per text. Nothing is auto-deleted. Tests: 47/47.

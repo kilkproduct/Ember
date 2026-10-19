@@ -9,5 +9,8 @@
   "dependencies": {
     "@tensorflow/tfjs": "^4.22.0",
     "jsdom": "^25.0.0"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }
