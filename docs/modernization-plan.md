@@ -128,3 +128,27 @@ cap; measured in bench. Every stage keeps v1/v2 tests green; rollback = git.
 ## 5. Results
 
 _Filled in as stages land (real numbers from test/bench runs, not estimates)._
+
+### Stage B — done
+
+- `trainStep` now computes gradients with `tf.variableGrads`, checks the
+  loss and the global gradient norm, optionally clips (`gradClip`, UI
+  "Grad clip", default 1.0), and only then applies. A NaN step throws
+  "update skipped, weights unchanged" with the step counter untouched —
+  proven by a test that poisons a weight and verifies an untouched tensor
+  is bit-identical afterwards. Honest counters: `tokens_processed`,
+  `sequences_sampled`, `train_seconds`, `grad_norm`; `status().tokens`
+  (corpus size) kept for compatibility but no longer presented as training.
+- Document-level split + `validate()` (fixed windows, eval mode): a test
+  proves held-out markers never enter the training stream and that
+  validation leaves weights/step bit-identical. UI draws validation loss
+  (teal) on the heat chart and logs perplexity.
+- Optional epoch sampler with exactly-once-per-pass coverage test.
+  **Baseline comparison** (`tests/bench.mjs compare`, synthetic 40-doc
+  corpus, phone-size config, CPU): 200 steps — random: train 2.228 /
+  val 2.233; epoch: train 2.246 / val 2.242. Indistinguishable → `random`
+  stays the default; epoch remains opt-in, as the brief requires.
+- Perf after the safety rewrite: 441.6 ms/step vs 445.6 baseline
+  (batch 2, block 64, d64, Node CPU) — no regression. Tests: 40/40
+  (9 new in `tests/training.test.mjs`, incl. controlled overfit and a
+  tensor-leak guard).

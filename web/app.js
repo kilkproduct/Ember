@@ -35,6 +35,7 @@ const PRESETS = {
 const state = {
   forageStop: true,
   losses: [],
+  vals: [], // [{at: losses.length when measured, loss}] for the heat chart
   lastGeneration: "",
   stopTrain: false,
   firing: false,
@@ -64,14 +65,9 @@ function fmtBytes(n) {
   return `${n} B`;
 }
 
-function corpusTexts(docs) {
-  const parts = [];
-  for (const d of docs) {
-    const w = Math.max(1, d.weight || 1);
-    for (let i = 0; i < w; i++) parts.push(d.text);
-  }
-  return parts;
-}
+// (Documents now travel to the trainer as {text, weight, kind} objects so
+// the train/validation split can work at document level — see
+// DeviceTrainer.setDocs. Weight expansion happens inside the trainer.)
 
 // ---------- corpus / checkpoints rendering ----------
 
@@ -251,15 +247,17 @@ function drawChart() {
   ctx.fillRect(0, 0, w, h);
   const pts = state.losses;
   if (pts.length < 2) return;
-  const min = Math.min(...pts);
-  const max = Math.max(...pts);
+  const vals = state.vals.filter((v) => v.at >= 1 && v.at <= pts.length);
+  const all = vals.length ? [...pts, ...vals.map((v) => v.loss)] : pts;
+  const min = Math.min(...all);
+  const max = Math.max(...all);
   const span = Math.max(max - min, 1e-4);
+  const X = (i) => (i / (pts.length - 1)) * (w - 24) + 12;
+  const Y = (y) => h - 16 - ((y - min) / span) * (h - 32);
   ctx.beginPath();
   pts.forEach((y, i) => {
-    const x = (i / (pts.length - 1)) * (w - 24) + 12;
-    const yy = h - 16 - ((y - min) / span) * (h - 32);
-    if (i === 0) ctx.moveTo(x, yy);
-    else ctx.lineTo(x, yy);
+    if (i === 0) ctx.moveTo(X(i), Y(y));
+    else ctx.lineTo(X(i), Y(y));
   });
   const grad = ctx.createLinearGradient(0, 0, w, 0);
   grad.addColorStop(0, "#e85d04");
@@ -267,9 +265,30 @@ function drawChart() {
   ctx.strokeStyle = grad;
   ctx.lineWidth = 2.2;
   ctx.stroke();
+  if (vals.length) {
+    // held-out validation loss (teal): measured on documents the model
+    // never trains on, so it tracks generalization, not memorization.
+    ctx.beginPath();
+    vals.forEach((v, i) => {
+      const x = X(v.at - 1);
+      const y = Y(v.loss);
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    });
+    ctx.strokeStyle = "#2ec4b6";
+    ctx.lineWidth = 1.8;
+    ctx.stroke();
+    ctx.fillStyle = "#2ec4b6";
+    for (const v of vals) {
+      ctx.beginPath();
+      ctx.arc(X(v.at - 1), Y(v.loss), 2.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   ctx.fillStyle = "#d4a574";
   ctx.font = "12px IBM Plex Mono, monospace";
-  ctx.fillText(`loss ${pts[pts.length - 1].toFixed(3)}`, 12, 18);
+  const lastVal = vals.length ? ` · val ${vals[vals.length - 1].loss.toFixed(3)}` : "";
+  ctx.fillText(`loss ${pts[pts.length - 1].toFixed(3)}${lastVal}`, 12, 18);
 }
 
 document.querySelectorAll(".tab").forEach((btn) => {
@@ -452,7 +471,7 @@ $("btn-init").addEventListener("click", async () => {
   $("btn-init").disabled = true;
   $("btn-init").textContent = "Casting…";
   try {
-    await state.trainer.init(corpusTexts(stats.docs), {
+    await state.trainer.initDocs(stats.docs, {
       nLayer: +$("v-layer").value,
       nHead,
       nEmbd,
@@ -461,13 +480,14 @@ $("btn-init").addEventListener("click", async () => {
       dropout: +$("v-drop").value,
     }, lr);
     state.losses = [];
+    state.vals = [];
     drawChart();
     $("heat-meta").textContent = "Fresh vessel. Loss will draw itself here once you Fire.";
     markVesselApplied();
     renderModelPills();
     const st = state.trainer.status();
-    logEl($("train-log"), `cast ${st.n_params} params on ${tf.getBackend()} · vocab ${st.vocab_size} · ${st.tokens} tokens`);
-    notifySuccess("Vessel cast", `${(st.n_params / 1e6).toFixed(2)}M params · vocab ${st.vocab_size} · ${st.tokens} training tokens. Press Fire to train.`);
+    logEl($("train-log"), `cast ${st.n_params} params on ${tf.getBackend()} · vocab ${st.vocab_size} · corpus ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out for validation` : ""}`);
+    notifySuccess("Vessel cast", `${(st.n_params / 1e6).toFixed(2)}M params · vocab ${st.vocab_size} · ${st.corpus_tokens} corpus tokens ready. Press Fire to train.`);
     document.querySelector('[data-tab="fire"]').click();
   } catch (e) {
     notifyError("Casting failed", e.message);
@@ -554,10 +574,11 @@ async function applyBrain(raw) {
     }
   }
   const stats = await state.store.stats();
-  state.trainer.refreshCorpus(corpusTexts(stats.docs || []));
+  state.trainer.refreshDocs(stats.docs || []);
   syncVesselSliders(cfg);
   markVesselApplied();
   state.losses = [];
+  state.vals = [];
   drawChart();
   renderModelPills();
   return norm;
@@ -702,7 +723,11 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
     return;
   }
   const stats = await state.store.stats();
-  state.trainer.refreshCorpus(corpusTexts(stats.docs || []));
+  state.trainer.refreshDocs(stats.docs || []);
+  const clipRaw = Number($("t-clip")?.value);
+  state.trainer.gradClip = Number.isFinite(clipRaw) && clipRaw > 0 ? clipRaw : 0;
+  state.trainer.samplerMode = $("t-sampler")?.value === "epoch" ? "epoch" : "random";
+  const valEvery = Math.max(0, Math.floor(+$("t-val")?.value) || 0);
   state.stopTrain = false;
   state.firing = true;
   $("btn-douse").disabled = false;
@@ -710,17 +735,34 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
   const every = +$("t-every").value;
   const until = state.trainer.step + steps;
   state.trainer.setSchedule(until);
-  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
+  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
+  const st0 = state.trainer.status();
+  logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} tokens trained so far`);
   renderModelPills();
   let outcome = "completed";
   try {
     while (!state.stopTrain && state.trainer.step < until) {
       const m = await state.trainer.trainStep(batch);
       state.losses.push(m.loss);
-      if (state.losses.length > 400) state.losses.shift();
+      if (state.losses.length > 400) {
+        state.losses.shift();
+        state.vals = state.vals.map((v) => ({ ...v, at: v.at - 1 })).filter((v) => v.at >= 1);
+      }
+      if (valEvery && m.step % valEvery === 0) {
+        try {
+          const v = await state.trainer.validate();
+          if (v) {
+            state.vals.push({ at: state.losses.length, loss: v.loss });
+            logEl($("train-log"), `step ${m.step}  val loss ${v.loss.toFixed(4)}  ppl ${v.ppl.toFixed(1)}  (${v.windows} held-out windows)`);
+          }
+        } catch (err) {
+          logEl($("train-log"), `! validation failed: ${err.message}`);
+        }
+      }
       drawChart();
+      const valTxt = state.vals.length ? ` · val ${state.vals[state.vals.length - 1].loss.toFixed(3)}` : "";
       $("heat-meta").textContent =
-        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)} · ema ${m.ema.toFixed(3)} · best ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)}`;
+        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)}${valTxt} · ema ${m.ema.toFixed(3)} · best ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · |grad| ${m.grad_norm != null ? m.grad_norm.toFixed(2) : "—"}${m.clipped ? " (clipped)" : ""} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)} · ${fmtChars(m.tokens_processed)} tok trained`;
       $("pill-speed").textContent = `train ${fmtTps(m.train_tps)}`;
       $("pill-fire").textContent = `firing ${m.step}/${until}`;
       $("pill-model").textContent = `${(state.trainer.model.nParams() / 1e6).toFixed(2)}M · ${tf.getBackend()} · step ${m.step}`;
@@ -777,7 +819,7 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
     const st = state.trainer.status();
     notifySuccess(
       `Firing complete — step ${st.step}`,
-      `Best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"} · train ${fmtTps(st.train_tps)}. Save or export the brain to keep it.`
+      `Best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}${st.val_loss != null ? ` · val ${st.val_loss.toFixed(3)} (ppl ${st.val_ppl.toFixed(0)})` : ""} · ${fmtChars(st.tokens_processed)} tokens trained · train ${fmtTps(st.train_tps)}. Save or export the brain to keep it.`
     );
     osNotify("Ember: firing complete", `Step ${st.step} · best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}`);
   } else if (outcome === "doused") {
@@ -798,6 +840,9 @@ $("btn-fire-reset")?.addEventListener("click", () => {
   $("t-batch").value = 2;
   $("t-lr").value = 0.0003;
   $("t-every").value = 25;
+  if ($("t-clip")) $("t-clip").value = 1;
+  if ($("t-val")) $("t-val").value = 50;
+  if ($("t-sampler")) $("t-sampler").value = "random";
   notifyInfo("Firing schedule reset to defaults");
 });
 

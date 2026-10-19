@@ -179,8 +179,8 @@ export class EmberNet {
     return linear(x, this.wte, null, true);
   }
 
-  loss(idx, targets) {
-    const logits = this.forward(idx, true);
+  loss(idx, targets, training = true) {
+    const logits = this.forward(idx, training);
     const [B, T, V] = logits.shape;
     // Cross-entropy via one-hot: tf.gatherND has NO registered gradient in
     // TF.js, so picking the target log-probs with gatherND (the old code)
@@ -296,12 +296,81 @@ export class EmberNet {
   }
 }
 
+/**
+ * Build a fresh, untrained tokenizer of the requested kind. "legacy" is the
+ * original greedy word-piece tokenizer (web/tokenizer.js) that every existing
+ * brain depends on; Stage D adds "byte-bpe". Existing brains NEVER come
+ * through here — they rebuild their own tokenizer from brain metadata.
+ */
+export function createTokenizer(type = "legacy") {
+  if (type === "legacy") return new Tokenizer();
+  throw new Error(`Unknown tokenizer type "${type}".`);
+}
+
+/** FNV-1a 32-bit — stable across devices/runs, used for the data split. */
+export function fnv1a(text) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+/**
+ * Normalize caller-supplied documents to [{text, weight, kind, hash}].
+ * Accepts plain strings or store-shaped docs. Identical texts collapse
+ * into one document whose weight counts the copies — this preserves the
+ * old "repeat weighted docs in the stream" semantics for legacy callers
+ * while giving the train/validation split unique documents to split.
+ */
+export function normalizeDocs(docs) {
+  const byText = new Map();
+  for (const raw of docs || []) {
+    const text = typeof raw === "string" ? raw : raw?.text;
+    if (typeof text !== "string" || !text.trim()) continue;
+    const w = Math.max(1, Math.min(50, Math.floor(Number(raw?.weight) || 1)));
+    const kind = typeof raw === "object" && raw?.kind ? String(raw.kind) : "page";
+    const prev = byText.get(text);
+    if (prev) {
+      prev.weight = Math.min(50, prev.weight + w);
+      if (kind === "lesson") prev.kind = "lesson";
+    } else {
+      byText.set(text, { text, weight: w, kind, hash: fnv1a(text) });
+    }
+  }
+  return [...byText.values()];
+}
+
+/**
+ * Deterministic document-level train/validation split. Documents are
+ * ordered by their content hash and a prefix becomes validation, so the
+ * split is a pure function of the current document set (reproducible;
+ * adding documents may move a boundary document — compare validation
+ * numbers within one corpus state). Lessons and weighted documents always
+ * train: the user explicitly asked the model to learn those. Fewer than 5
+ * eligible documents → no split (too little data to spare).
+ */
+export function splitDocs(docs, valFraction = 0.1) {
+  const eligible = docs.filter((d) => d.weight <= 1 && d.kind !== "lesson");
+  const forced = docs.filter((d) => d.weight > 1 || d.kind === "lesson");
+  if (!valFraction || eligible.length < 5) return { train: docs, val: [] };
+  const nVal = Math.max(1, Math.round(eligible.length * valFraction));
+  if (eligible.length - nVal < 1) return { train: docs, val: [] };
+  const valSet = new Set([...eligible].sort((a, b) => a.hash - b.hash).slice(0, nVal));
+  return {
+    train: [...forced, ...eligible.filter((d) => !valSet.has(d))],
+    val: [...valSet],
+  };
+}
+
 export class DeviceTrainer {
   constructor() {
     this.model = null;
     this.opt = null;
     this.tokenizer = new Tokenizer();
-    this.tokens = null;
+    this.tokens = null; // training token stream (<doc>-separated documents)
+    this.valTokens = null; // held-out stream, never used for gradient updates
     this.cfg = null;
     this.step = 0;
     this.bestLoss = Infinity;
@@ -314,6 +383,18 @@ export class DeviceTrainer {
     this.baseLr = 3e-4;
     this.scheduleStart = 0;
     this.scheduleUntil = 0;
+    // training safety + honest bookkeeping (Stage B)
+    this.gradClip = 1.0; // global-norm clip; 0 disables
+    this.lastGradNorm = null;
+    this.samplerMode = "random"; // "random" | "epoch"
+    this._epochQueue = [];
+    this.passesCompleted = 0;
+    this.tokensProcessed = 0; // tokens that actually went through training batches
+    this.sequencesSampled = 0;
+    this.trainSeconds = 0;
+    this.lastValLoss = null;
+    this.lastValPpl = null;
+    this.valFraction = 0.1;
   }
 
   _disposeCurrent() {
@@ -344,12 +425,33 @@ export class DeviceTrainer {
     return n;
   }
 
-  async init(texts, cfg, lr = 3e-4) {
+  /** Backward-compatible cast from plain texts (no validation split). */
+  async init(texts, cfg, lr = 3e-4, opts = {}) {
+    return this.initDocs(
+      (texts || []).map((text) => ({ text })),
+      cfg,
+      lr,
+      { valFraction: 0, ...opts }
+    );
+  }
+
+  /**
+   * Cast a fresh vessel from documents ([{text, weight?, kind?}]).
+   * The tokenizer trains on ALL documents (train + validation): standard
+   * practice, and with the legacy tokenizer it avoids a held-out page
+   * turning into a wall of <unk>. Only the model weights are kept honest —
+   * validation documents never produce gradients (see setDocs/validate).
+   */
+  async initDocs(docs, cfg, lr = 3e-4, { valFraction = 0.1, tokenizerType = "legacy" } = {}) {
     this.setLr(lr);
-    this.tokenizer.train(texts, cfg.vocabSize);
-    const fullCfg = { ...cfg, vocabSize: this.tokenizer.vocabSize };
+    const clean = normalizeDocs(docs);
+    if (!clean.length) throw new Error("No documents to cast from. Add fuel first.");
+    const tokenizer = createTokenizer(tokenizerType);
+    tokenizer.train(clean.map((d) => d.text), cfg.vocabSize);
+    const fullCfg = { ...cfg, vocabSize: tokenizer.vocabSize };
     const model = new EmberNet(fullCfg); // build first; swap only on success
     this._disposeCurrent();
+    this.tokenizer = tokenizer;
     this.cfg = fullCfg;
     this.model = model;
     this.opt = this._newOptimizer();
@@ -360,7 +462,20 @@ export class DeviceTrainer {
     this.backend = tf.getBackend();
     this.scheduleStart = 0;
     this.scheduleUntil = 0;
-    this._rebuild(texts);
+    this._resetTrainingStats();
+    this.valFraction = valFraction;
+    this.setDocs(clean);
+  }
+
+  _resetTrainingStats() {
+    this.tokensProcessed = 0;
+    this.sequencesSampled = 0;
+    this.trainSeconds = 0;
+    this.passesCompleted = 0;
+    this._epochQueue = [];
+    this.lastGradNorm = null;
+    this.lastValLoss = null;
+    this.lastValPpl = null;
   }
 
   /**
@@ -383,24 +498,59 @@ export class DeviceTrainer {
     this.backend = tf.getBackend();
     this.scheduleStart = this.step;
     this.scheduleUntil = this.step;
+    this._resetTrainingStats();
+    this.valTokens = null; // caller re-supplies the corpus via refreshDocs
   }
 
-  _rebuild(texts) {
+  /** Encode documents into one <doc>-separated token stream. */
+  _stream(docs, { expandWeights, shuffle }) {
+    const order = [...docs];
+    if (shuffle) {
+      for (let i = order.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [order[i], order[j]] = [order[j], order[i]];
+      }
+    }
     const ids = [];
-    const shuffled = [...texts];
-    for (let i = shuffled.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+    for (const d of order) {
+      const enc = this.tokenizer.encode(d.text);
+      const reps = expandWeights ? d.weight : 1;
+      for (let r = 0; r < reps; r++) {
+        ids.push(this.tokenizer.docId);
+        ids.push(...enc);
+      }
     }
-    for (const text of shuffled) {
-      ids.push(this.tokenizer.docId);
-      ids.push(...this.tokenizer.encode(text));
-    }
-    this.tokens = ids.length ? ids : [this.tokenizer.bosId];
+    return ids.length ? ids : [this.tokenizer.bosId];
   }
 
+  /**
+   * (Re)build the training and validation streams from documents. The
+   * split is at document level (never overlapping windows of one page on
+   * both sides). Returns the split sizes for reporting.
+   */
+  setDocs(docs) {
+    const clean = normalizeDocs(docs);
+    const { train, val } = splitDocs(clean, this.valFraction);
+    this.tokens = this._stream(train, { expandWeights: true, shuffle: true });
+    this.valTokens = val.length
+      ? this._stream(val, { expandWeights: false, shuffle: false })
+      : null;
+    if (this.valTokens && this.valTokens.length < (this.cfg?.blockSize || 64) + 1) {
+      this.valTokens = null; // too small for even one validation window
+    }
+    this._epochQueue = [];
+    this.lastValLoss = null;
+    this.lastValPpl = null;
+    return { trainDocs: train.length, valDocs: val.length, documents: clean.length };
+  }
+
+  refreshDocs(docs) {
+    return this.setDocs(docs);
+  }
+
+  /** Backward-compatible: plain texts, duplicates become weights. */
   refreshCorpus(texts) {
-    this._rebuild(texts);
+    return this.setDocs((texts || []).map((text) => ({ text })));
   }
 
   /**
@@ -435,25 +585,59 @@ export class DeviceTrainer {
     return lr;
   }
 
-  _batch(batchSize) {
+  _tiledTokens() {
     const block = this.cfg.blockSize;
     let toks = this.tokens;
     if (toks.length < block + 2) {
       const reps = Math.ceil((block + 2) / Math.max(toks.length, 1)) + 1;
       toks = Array.from({ length: reps }, () => toks).flat();
     }
-    const x = [];
-    const y = [];
-    const hi = toks.length - block - 1;
-    for (let b = 0; b < batchSize; b++) {
-      const i = Math.floor(Math.random() * Math.max(hi, 1));
-      x.push(toks.slice(i, i + block));
-      y.push(toks.slice(i + 1, i + 1 + block));
-    }
+    return toks;
+  }
+
+  _batchFromStarts(toks, starts) {
+    const block = this.cfg.blockSize;
+    const x = starts.map((i) => toks.slice(i, i + block));
+    const y = starts.map((i) => toks.slice(i + 1, i + 1 + block));
     return {
-      xt: tf.tensor2d(x, [batchSize, block], "int32"),
-      yt: tf.tensor2d(y, [batchSize, block], "int32"),
+      xt: tf.tensor2d(x, [starts.length, block], "int32"),
+      yt: tf.tensor2d(y, [starts.length, block], "int32"),
     };
+  }
+
+  _batch(batchSize) {
+    const block = this.cfg.blockSize;
+    const toks = this._tiledTokens();
+    if (this.samplerMode === "epoch") {
+      // Shuffled NON-overlapping windows, each served exactly once per
+      // pass over the stream (then reshuffled). Guarantees coverage;
+      // "random" mode below samples with replacement and can starve or
+      // over-visit regions.
+      const starts = [];
+      while (starts.length < batchSize) {
+        if (!this._epochQueue.length) {
+          const q = [];
+          const stride = block + 1;
+          for (let i = 0; i + stride <= toks.length; i += stride) q.push(i);
+          for (let i = q.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [q[i], q[j]] = [q[j], q[i]];
+          }
+          this._epochQueue = q;
+          if (!q.length) break;
+        }
+        starts.push(this._epochQueue.pop());
+        if (!this._epochQueue.length) this.passesCompleted += 1;
+      }
+      const hi = Math.max(toks.length - block - 1, 1);
+      while (starts.length < batchSize) starts.push(Math.floor(Math.random() * hi));
+      return this._batchFromStarts(toks, starts);
+    }
+    const hi = toks.length - block - 1;
+    const starts = Array.from({ length: batchSize }, () =>
+      Math.floor(Math.random() * Math.max(hi, 1))
+    );
+    return this._batchFromStarts(toks, starts);
   }
 
   async trainStep(batchSize) {
@@ -461,13 +645,55 @@ export class DeviceTrainer {
     const lr = this._lr();
     const t0 = performance.now();
     const { xt, yt } = this._batch(batchSize);
-    const lossT = this.opt.minimize(() => this.model.loss(xt, yt), true, this.model.parameters());
-    const loss = (await lossT.data())[0];
-    lossT.dispose();
+    let lossT;
+    let grads;
+    try {
+      ({ value: lossT, grads } = tf.variableGrads(
+        () => this.model.loss(xt, yt, true),
+        this.model.parameters()
+      ));
+    } catch (e) {
+      xt.dispose();
+      yt.dispose();
+      throw e;
+    }
     xt.dispose();
     yt.dispose();
-    if (!Number.isFinite(loss)) {
-      throw new Error("Loss exploded (NaN). Lower the learning rate and fire again.");
+    const loss = (await lossT.data())[0];
+    lossT.dispose();
+    // Global gradient norm doubles as the finiteness tripwire: a NaN in
+    // any gradient poisons the norm, and we reject the update BEFORE
+    // applyGradients can bake it into the weights. (The old code used
+    // opt.minimize, which applied first and let us check the corpse —
+    // one exploded step could permanently NaN a brain.)
+    const normT = tf.tidy(() => {
+      let s = tf.scalar(0);
+      for (const g of Object.values(grads)) s = s.add(g.square().sum());
+      return s.sqrt();
+    });
+    const gradNorm = (await normT.data())[0];
+    normT.dispose();
+    if (!Number.isFinite(loss) || !Number.isFinite(gradNorm)) {
+      for (const g of Object.values(grads)) g.dispose();
+      throw new Error(
+        `Non-finite ${Number.isFinite(loss) ? "gradient" : "loss"} at step ${this.step + 1} — update skipped, weights unchanged. Lower the learning rate and fire again.`
+      );
+    }
+    let clipped = false;
+    if (this.gradClip > 0 && gradNorm > this.gradClip) {
+      const scale = this.gradClip / gradNorm;
+      const scaled = {};
+      for (const [k, g] of Object.entries(grads)) {
+        scaled[k] = g.mul(scale);
+        g.dispose();
+      }
+      grads = scaled;
+      clipped = true;
+    }
+    try {
+      this.opt.applyGradients(grads);
+    } finally {
+      for (const g of Object.values(grads)) g.dispose();
     }
     this.step += 1;
     if (loss < this.bestLoss) this.bestLoss = loss;
@@ -475,6 +701,10 @@ export class DeviceTrainer {
     const ms = performance.now() - t0;
     this.lastStepMs = ms;
     this.lastTrainTps = (batchSize * this.cfg.blockSize) / (ms / 1000);
+    this.lastGradNorm = gradNorm;
+    this.tokensProcessed += batchSize * this.cfg.blockSize;
+    this.sequencesSampled += batchSize;
+    this.trainSeconds += ms / 1000;
     return {
       type: "step",
       step: this.step,
@@ -484,8 +714,65 @@ export class DeviceTrainer {
       lr,
       ms,
       train_tps: this.lastTrainTps,
-      tokens: this.tokens.length,
+      grad_norm: gradNorm,
+      clipped,
+      tokens_processed: this.tokensProcessed,
+      corpus_tokens: this.tokens ? this.tokens.length : 0,
+      tokens: this.tokens.length, // legacy field: corpus stream length
     };
+  }
+
+  /**
+   * Held-out loss + perplexity on FIXED, evenly spaced validation
+   * windows (dropout off, no gradients, weights untouched). Same windows
+   * every call, so numbers are comparable across a run. Returns null
+   * when no validation set exists. Deliberately cheap: 8×2 windows.
+   */
+  async validate({ batches = 8, batchSize = 2 } = {}) {
+    if (!this.model || !this.valTokens) return null;
+    const block = this.cfg.blockSize;
+    const toks = this.valTokens;
+    const maxStart = toks.length - block - 1;
+    if (maxStart < 0) return null;
+    const total = Math.min(batches * batchSize, maxStart + 1);
+    let lossSum = 0;
+    let windows = 0;
+    for (let b = 0; b < batches; b++) {
+      const starts = [];
+      for (let r = 0; r < batchSize; r++) {
+        const k = b * batchSize + r;
+        if (k >= total) break;
+        starts.push(total === 1 ? 0 : Math.floor((k * maxStart) / (total - 1)));
+      }
+      if (!starts.length) break;
+      const { xt, yt } = this._batchFromStarts(toks, starts);
+      const lossT = tf.tidy(() => this.model.loss(xt, yt, false));
+      const l = (await lossT.data())[0];
+      lossT.dispose();
+      xt.dispose();
+      yt.dispose();
+      if (!Number.isFinite(l)) return null;
+      lossSum += l * starts.length;
+      windows += starts.length;
+    }
+    if (!windows) return null;
+    const loss = lossSum / windows;
+    this.lastValLoss = loss;
+    this.lastValPpl = Math.exp(loss);
+    return { loss, ppl: this.lastValPpl, windows };
+  }
+
+  /** True when every parameter is finite (one fused abs-sum tripwire). */
+  async checkFiniteParams() {
+    if (!this.model) return false;
+    const t = tf.tidy(() => {
+      let s = tf.scalar(0);
+      for (const v of this.model.parameters()) s = s.add(v.abs().sum());
+      return s;
+    });
+    const v = (await t.data())[0];
+    t.dispose();
+    return Number.isFinite(v);
   }
 
   async generate(
@@ -540,7 +827,22 @@ export class DeviceTrainer {
       ema: this.emaLoss,
       n_params: this.model ? this.model.nParams() : 0,
       vocab_size: this.tokenizer.vocabSize,
+      tokenizer_type: this.tokenizer.type || "legacy",
+      // "tokens" is the legacy field name for the TRAINING stream length
+      // (corpus size) — kept for compatibility; tokens_processed is the
+      // honest "how much training actually happened" counter.
       tokens: this.tokens ? this.tokens.length : 0,
+      corpus_tokens: this.tokens ? this.tokens.length : 0,
+      val_tokens: this.valTokens ? this.valTokens.length : 0,
+      tokens_processed: this.tokensProcessed,
+      sequences_sampled: this.sequencesSampled,
+      train_seconds: this.trainSeconds,
+      val_loss: this.lastValLoss,
+      val_ppl: this.lastValPpl,
+      grad_norm: this.lastGradNorm,
+      grad_clip: this.gradClip,
+      sampler: this.samplerMode,
+      passes: this.passesCompleted,
       backend: this.backend,
       train_tps: this.lastTrainTps,
       gen_tps: this.lastGenTps,

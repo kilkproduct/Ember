@@ -293,6 +293,20 @@
               <input id="t-prompt" type="text" placeholder="Once upon a time" />
             </label>
           </div>
+          <div class="row">
+            <label>Grad clip
+              <input id="t-clip" type="number" step="0.1" min="0" value="1" />
+            </label>
+            <label>Validate every
+              <input id="t-val" type="number" min="0" max="1000" value="50" />
+            </label>
+            <label>Sampler
+              <select id="t-sampler">
+                <option value="random" selected>Random windows</option>
+                <option value="epoch">Shuffled pass (each once)</option>
+              </select>
+            </label>
+          </div>
           <div class="actions">
             <button id="btn-fire" class="btn ember">Fire</button>
             <button id="btn-douse" class="btn ghost" disabled>Douse</button>

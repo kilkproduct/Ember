@@ -200,6 +200,29 @@ export const HELP = {
     what: "The starter text used for the during-firing samples above. Leave empty to sample from a beginning-of-document token.",
     applies: FIRE,
   },
+  "t-clip": {
+    title: "Grad clip",
+    what: "The largest gradient size (global norm over all weights) one batch may hand to the optimizer. Bigger gradients are scaled down to this size, keeping their direction. 0 turns clipping off. Every step's gradient is also checked: if the loss or any gradient is NaN, the update is refused BEFORE it touches the weights.",
+    why: "One freak batch (odd page, too-high LR) can otherwise poison the optimizer's memory for many steps. The chart's log line shows |grad| so you can see it working.",
+    up: "Looser leash — closer to raw Adam. Only raise it if you know the gradients are naturally large.",
+    down: "Tighter leash, calmer training; very small values (0.1) can slow learning down.",
+    start: "1.0 is the standard default. Leave it unless loss keeps exploding — then try 0.5 and lower the LR too.",
+    applies: FIRE,
+  },
+  "t-val": {
+    title: "Validate every",
+    what: "Every N steps, Ember scores itself on held-out documents it never trains on (about 10% of your corpus, chosen deterministically per document; lessons and weighted pages are never held out). The teal line on the heat chart is this validation loss; the log also shows perplexity — roughly how many tokens the model is torn between at each step. 0 turns it off.",
+    why: "Training loss can fall just because the model memorizes. Validation loss only falls when the model gets better at text it hasn't seen — that's the number that predicts generation quality. If training loss falls but validation rises, it's memorizing: more diverse fuel beats more steps.",
+    start: "50. Validation needs at least 5 ordinary documents in the corpus; with fewer, there's nothing to hold out and this does nothing.",
+    applies: FIRE,
+  },
+  "t-sampler": {
+    title: "Sampler",
+    what: "How training windows are picked from the corpus. “Random windows” draws random positions with replacement — some passages are visited often, some never. “Shuffled pass” deals out non-overlapping windows in random order, each exactly once per pass, then reshuffles.",
+    why: "Shuffled pass guarantees full coverage (the log counts completed passes); random is what Ember always did. Neither is magic — on small corpora both behave similarly.",
+    start: "Random windows (default). Try shuffled pass and compare validation loss on the same corpus if you're curious.",
+    applies: FIRE,
+  },
 
   // ---------- Voice ----------
   "gen-tokens": {
