@@ -222,6 +222,11 @@ export function validateBrain(raw) {
       if (w.data.length !== size) {
         throw new Error(`weight "${key}" has ${w.data.length} values but shape ${want.join("x")} needs ${size}`);
       }
+      for (let i = 0; i < w.data.length; i++) {
+        if (typeof w.data[i] !== "number" || !Number.isFinite(w.data[i])) {
+          throw new Error(`weight "${key}" contains a non-finite value at index ${i}`);
+        }
+      }
     }
     for (const key of Object.keys(weights)) {
       if (!(key in shapes)) {

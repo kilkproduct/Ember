@@ -25,6 +25,20 @@ function tinyValidV2() {
   };
 }
 
+test("non-finite or non-numeric weight values are rejected at validation", () => {
+  // Regression: validateBrain used to check only shape/length for
+  // v2/v3, so a NaN/string weight passed validation and only failed
+  // later at setWeights — despite the docs promising finite checks.
+  const nan = tinyValidV2();
+  nan.weights.wte.data[3] = NaN;
+  assert.throws(() => validateBrain(nan), /non-finite value at index 3/);
+  const str = tinyValidV2();
+  str.weights["blocks.0.fcW"].data[0] = "not-a-number";
+  assert.throws(() => validateBrain(str), /non-finite value at index 0/);
+  // and a valid brain now self-certifies as legacy-tokenizer
+  assert.equal(validateBrain(tinyValidV2()).tokenizer.type, "legacy");
+});
+
 test("a minimal valid v2 brain passes validation", () => {
   const norm = validateBrain(tinyValidV2());
   assert.equal(norm.version, 2);
