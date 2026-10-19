@@ -291,6 +291,27 @@ export const HELP = {
     start: "Off for a single-topic corpus. On when you deliberately mixed sources of very different sizes and want the small ones heard. Compare validation loss both ways before trusting it.",
     applies: FIRE,
   },
+  "t-lessonloss": {
+    title: "Lesson loss",
+    what: "Lessons are the Prompt/Response pairs from Teach and the skill packs. “Prompt + response” (default) trains the brain to predict both sides, like ordinary text. “Response only” masks the prompt out of the loss — the brain is still shown the question, but graded only on its answer. This is the standard instruction-tuning choice: with a tiny model's limited capacity, spending gradient on learning to *generate questions* is usually wasted when what you want is answers (translations, summaries, QA). Applies to stream-format-2 brains, where lessons are parsed; baked into the stream at Fire time.",
+    why: "If you are training skills (translation pairs, passage QA), response-only converges on the skill faster per step. If you want the brain to also imitate the style of your prompts (e.g. write its own questions), keep both.",
+    start: "Response only when firing mostly on lessons/skill packs. Prompt + response for general text corpora — it makes no difference to non-lesson documents.",
+    applies: FIRE,
+  },
+  "gen-task": {
+    title: "Task",
+    what: "Phrases your input in the exact lesson format the skill packs teach, so the brain is asked in a shape it trained on: Translate prefixes “Translate from English to <language>: …”; Summarize prefixes “Summarize in one sentence: …”; “Answer from my documents” searches your corpus for the most relevant passages (word-overlap retrieval, entirely on-device) and asks the question against those passages — the output meta line names the documents used. Continue is plain text continuation. These only work as well as the lessons you trained: load the matching packs on the Fuel tab and Fire. Nothing here calls an outside service or hard-codes answers.",
+    why: "A base language model has no built-in notion of “translate this” — it only continues patterns. Training lessons + identically-shaped prompts is how a locally-trained model learns task behavior at all.",
+    start: "Continue for stories/completion. For skills: load the pack, fire a few hundred steps, then pick the matching task here.",
+    applies: NOW,
+  },
+  "gen-lang": {
+    title: "Translate to",
+    what: "The target language name used by the Translate task, written into the prompt exactly as the translation lessons phrase it (“Translate from English to Spanish: …”). The starter pack covers Spanish (both directions), French, German, Malay and Chinese. For other languages, teach your own pairs with the same sentence shape via Teach-by-hand — the byte-BPE tokenizer can represent any script.",
+    why: "The language name is the only signal telling the brain which language to answer in, so it must match the wording used in training lessons.",
+    start: "Spanish (the deepest starter coverage).",
+    applies: NOW,
+  },
   "gen-sub": {
     title: "Write as r/… (subreddit conditioning)",
     what: "For brains cast with structured stream format 2, typing a subreddit name here prefixes your prompt with the same “<sub> name” header the brain saw in training, biasing it toward that community's vocabulary and habits. Older brains ignore it (the output meta line says so). Nothing is hard-coded — if the brain never trained on that subreddit, the name means little to it.",

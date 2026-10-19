@@ -1,7 +1,7 @@
-import { createForager, STARTER, TOPIC_PACK } from "./scrape.js";
+import { createForager, STARTER, TOPIC_PACK, TRANSLATION_PACK, RESEARCH_PACK, SKILLS_PACK } from "./scrape.js";
 import { openStore } from "./store.js";
-import { corpusHealth } from "./corpus.js";
-import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, fmtTps } from "./engine.js";
+import { corpusHealth, searchDocs } from "./corpus.js";
+import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, fmtTps, formatLessonPrompt } from "./engine.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
 import { githubPull, githubPush, githubHead } from "./github.js";
 import {
@@ -419,6 +419,38 @@ $("btn-topic-pack")?.addEventListener("click", async () => {
     notifyError("Could not add the topic pack", e.message);
   }
 });
+
+// Skill packs: lesson-formatted training data for general-purpose tasks.
+async function addSkillPack(pack, source, doneMessage) {
+  try {
+    for (const doc of pack) await state.store.addDoc({ ...doc, source });
+    await refresh();
+    notifySuccess(doneMessage);
+  } catch (e) {
+    notifyError("Could not add the lesson pack", e.message);
+  }
+}
+$("btn-translation-pack")?.addEventListener("click", () =>
+  addSkillPack(
+    TRANSLATION_PACK,
+    "translation-pack",
+    `Translation lessons added (${TRANSLATION_PACK.length}: English↔Spanish plus French, German, Malay, Chinese). Cast with the byte-BPE tokenizer (it covers every script), Fire, then use Voice → Task: Translate. A starter scaffold — add your own parallel sentences as Teach lessons for real coverage.`
+  )
+);
+$("btn-research-pack")?.addEventListener("click", () =>
+  addSkillPack(
+    RESEARCH_PACK,
+    "research-pack",
+    `Research lessons added (${RESEARCH_PACK.length}: answering questions from a passage, including "the passage does not say"). After firing, Voice → Task: Answer from my documents grounds answers in your own corpus.`
+  )
+);
+$("btn-skills-pack")?.addEventListener("click", () =>
+  addSkillPack(
+    SKILLS_PACK,
+    "skills-pack",
+    `General-skills lessons added (${SKILLS_PACK.length}: summarize, explain simply, rewrite politely, keywords, grammar, story continuation). Fire to train; add your own Teach lessons in the same shapes to extend them.`
+  )
+);
 
 $("btn-clear").addEventListener("click", async () => {
   if (!confirm("Empty the entire corpus on this device? (Weights already trained are kept.)")) return;
@@ -848,8 +880,10 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
     return;
   }
   // balancing changes stream composition, so it must be set BEFORE the
-  // corpus refresh below (boundary/clip flags apply per-batch instead)
+  // corpus refresh below (boundary/clip flags apply per-batch instead);
+  // lesson-loss masking is also baked into the stream, same reason
   state.trainer.balanceMode = $("t-balance")?.value === "sqrt" ? "sqrt" : "off";
+  state.trainer.maskLessonPrompts = $("t-lessonloss")?.value === "response";
   const stats = await state.store.stats();
   state.trainer.refreshDocs(stats.docs || []);
   const clipRaw = Number($("t-clip")?.value);
@@ -866,7 +900,7 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
   const every = +$("t-every").value;
   const until = state.trainer.step + steps;
   state.trainer.setSchedule(until);
-  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
+  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat}${state.trainer.maskLessonPrompts ? " · lesson loss: response-only" : ""} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
   const st0 = state.trainer.status();
   logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} tokens trained so far`);
   const srcParts = Object.entries(st0.source_tokens || {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
@@ -982,6 +1016,7 @@ $("btn-fire-reset")?.addEventListener("click", () => {
   if ($("t-sampler")) $("t-sampler").value = "random";
   if ($("t-boundaries")) $("t-boundaries").value = "respect";
   if ($("t-balance")) $("t-balance").value = "off";
+  if ($("t-lessonloss")) $("t-lessonloss").value = "both";
   notifyInfo("Firing schedule reset to defaults");
 });
 
@@ -1006,13 +1041,45 @@ $("btn-gen").addEventListener("click", async () => {
     const seedRaw = $("gen-seed")?.value.trim();
     const seed = seedRaw !== "" && Number.isFinite(+seedRaw) ? Math.floor(+seedRaw) : null;
     const repRaw = Number($("gen-rep")?.value);
+    // Task modes phrase the request in the exact lesson format the
+    // skill packs teach (formatLessonPrompt), so the brain is asked in
+    // a shape it was actually trained on. "documents" additionally
+    // grounds the prompt in retrieved corpus passages (research).
+    const promptText = $("gen-prompt").value;
+    const task = $("gen-task")?.value || "continue";
+    let instruction = null;
+    let taskNote = "";
+    if (task === "translate") {
+      const lang = ($("gen-lang")?.value || "").trim() || "Spanish";
+      instruction = `Translate from English to ${lang}: ${promptText}`;
+      taskNote = ` · task: translate → ${lang}`;
+    } else if (task === "summarize") {
+      instruction = `Summarize in one sentence: ${promptText}`;
+      taskNote = " · task: summarize";
+    } else if (task === "documents") {
+      const stats = await state.store.stats();
+      const hits = searchDocs(stats.docs || [], promptText, { k: 2 });
+      if (!hits.length) {
+        $("gen-out").textContent =
+          "No documents in your corpus match that question yet. Forage or add fuel on the topic first — this mode answers from your documents, it does not invent sources.";
+        notifyWarn("No matching documents", "Add fuel on this topic, then ask again.");
+        return;
+      }
+      const ctxText = hits.map((h) => h.doc.text.slice(0, 600)).join("\n---\n");
+      instruction = `Passage: ${ctxText}\nQuestion: ${promptText}`;
+      taskNote = ` · task: answer from documents (${hits.map((h) => h.doc.title).join("; ")})`;
+    }
     // optional subreddit conditioning: only format-2 brains were trained
     // with <sub> headers, so only they get the prefix (shown honestly in
-    // the meta line below; never silently injected for old brains)
+    // the meta line below; never silently injected for old brains).
+    // Applies to plain continuation only — task modes use lesson shape.
     const subWanted = ($("gen-sub")?.value || "").trim().replace(/^r\//, "");
-    const subApplied = subWanted && state.trainer.streamFormat === 2 ? subWanted : null;
-    const promptText = $("gen-prompt").value;
-    const fullPrompt = subApplied ? `<sub> ${subApplied}\n<comment> ${promptText}` : promptText;
+    const subApplied = !instruction && subWanted && state.trainer.streamFormat === 2 ? subWanted : null;
+    const fullPrompt = instruction
+      ? formatLessonPrompt(state.trainer.streamFormat, instruction)
+      : subApplied
+        ? `<sub> ${subApplied}\n<comment> ${promptText}`
+        : promptText;
     const out = await state.trainer.generate(fullPrompt, {
       maxNew: +$("gen-tokens").value,
       temperature: +$("gen-temp").value,
@@ -1029,7 +1096,8 @@ $("btn-gen").addEventListener("click", async () => {
     meta.textContent =
       `${fmtTps(out.tokensPerSec)} · ${out.ms.toFixed(0)} ms · ${out.newTokens} tokens · ${tf.getBackend()}` +
       (out.seed != null ? ` · seed ${out.seed} (reproducible)` : "") +
-      (subApplied ? ` · conditioned on r/${subApplied}` : subWanted ? ` · ⚠ r/${subWanted} ignored — this brain predates structured stream format 2` : "") +
+      taskNote +
+      (subApplied ? ` · conditioned on r/${subApplied}` : !instruction && subWanted ? ` · ⚠ r/${subWanted} ignored — this brain predates structured stream format 2` : "") +
       (out.contextTrimmed ? ` · ⚠ prompt was ${out.promptTokens} tokens — only the last ${state.trainer.cfg.blockSize} fit the context window` : "");
     $("pill-speed").textContent = `gen ${fmtTps(out.tokensPerSec)}`;
     const p = document.createElement("div");
@@ -1056,6 +1124,8 @@ $("btn-gen-reset")?.addEventListener("click", () => {
   if ($("gen-seed")) $("gen-seed").value = "";
   if ($("gen-sub")) $("gen-sub").value = "";
   if ($("gen-stop")) $("gen-stop").value = "stop";
+  if ($("gen-task")) $("gen-task").value = "continue";
+  if ($("gen-lang")) $("gen-lang").value = "Spanish";
   document
     .querySelectorAll(".chip[data-gen-preset]")
     .forEach((x) => x.classList.toggle("on", x.dataset.genPreset === "balanced"));

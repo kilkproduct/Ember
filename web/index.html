@@ -137,6 +137,9 @@
             </label>
             <button id="btn-alice" class="btn ghost">Load public-domain starter</button>
             <button id="btn-topic-pack" class="btn ghost">Load topic-training pack</button>
+            <button id="btn-translation-pack" class="btn ghost">Load translation lessons</button>
+            <button id="btn-research-pack" class="btn ghost">Load research/QA lessons</button>
+            <button id="btn-skills-pack" class="btn ghost">Load general-skills lessons</button>
           </div>
         </article>
       </div>
@@ -337,6 +340,12 @@
                 <option value="sqrt">Boost minority sources</option>
               </select>
             </label>
+            <label>Lesson loss
+              <select id="t-lessonloss">
+                <option value="both" selected>Prompt + response</option>
+                <option value="response">Response only (skill focus)</option>
+              </select>
+            </label>
           </div>
           <div class="actions">
             <button id="btn-fire" class="btn ember">Fire</button>
@@ -403,6 +412,17 @@
             </label>
             <label>Write as r/ <span class="opt">(optional)</span>
               <input id="gen-sub" type="text" placeholder="e.g. bikewrench" maxlength="60" />
+            </label>
+            <label>Task
+              <select id="gen-task">
+                <option value="continue" selected>Continue the text</option>
+                <option value="translate">Translate (from English)</option>
+                <option value="summarize">Summarize in one sentence</option>
+                <option value="documents">Answer from my documents</option>
+              </select>
+            </label>
+            <label>Translate to
+              <input id="gen-lang" type="text" value="Spanish" maxlength="40" />
             </label>
             <label>Ending
               <select id="gen-stop">
