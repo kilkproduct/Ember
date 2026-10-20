@@ -1,7 +1,8 @@
 import { createForager, STARTER, TOPIC_PACK, TRANSLATION_PACK, RESEARCH_PACK, SKILLS_PACK } from "./scrape.js";
 import { openStore } from "./store.js";
 import { corpusHealth, searchDocs } from "./corpus.js";
-import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, fmtTps, formatLessonPrompt } from "./engine.js";
+import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, validateModelConfig, fmtTps, formatLessonPrompt } from "./engine.js";
+import { beginBackgroundWork } from "./lifecycle.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
 import { githubPull, githubPush, githubHead } from "./github.js";
 import {
@@ -40,13 +41,29 @@ const state = {
   lastGeneration: "",
   stopTrain: false,
   firing: false,
+  startingFire: false,
+  casting: false,
   generating: false,
+  forageRunning: false,
+  forageSnapshot: null,
+  forageCheckpoint: null,
+  forageTimer: null,
+  forageSaveQueue: Promise.resolve(),
+  forageAutoSaveQueue: Promise.resolve(),
   store: null,
+  corpusStats: null,
   trainer: new DeviceTrainer(),
   checkpoints: [],
   desk: null,
   appliedSliders: null, // vessel slider snapshot matching the live brain
 };
+
+window.addEventListener("ember-background-work-unavailable", () => {
+  notifyWarn(
+    "Android background service could not start",
+    "Training or foraging still runs while Ember is open, but the OS may pause it in the background. Every fetched page is saved and interrupted foraging resumes on the next launch."
+  );
+});
 
 function logEl(el, line) {
   const t = new Date().toLocaleTimeString();
@@ -64,6 +81,10 @@ function fmtBytes(n) {
   if (n > 1_000_000) return `${(n / 1_000_000).toFixed(1)} MB`;
   if (n > 1000) return `${(n / 1000).toFixed(0)} KB`;
   return `${n} B`;
+}
+
+function fmtInt(n) {
+  return new Intl.NumberFormat().format(Math.max(0, Math.round(Number(n) || 0)));
 }
 
 // (Documents now travel to the trainer as {text, weight, kind} objects so
@@ -117,6 +138,7 @@ function renderCorpus(stats) {
     const p = document.createElement("p");
     p.textContent = d.excerpt;
     const rm = document.createElement("button");
+    rm.type = "button";
     rm.textContent = "remove";
     rm.addEventListener("click", async () => {
       await state.store.remove(d.id);
@@ -136,10 +158,12 @@ function renderCkpts() {
     name.textContent = `${c.name}  (${Math.max(1, Math.round(c.bytes / 1024))} kb)`;
     const actions = document.createElement("span");
     const load = document.createElement("button");
+    load.type = "button";
     load.className = "btn ghost";
     load.textContent = "Load";
     load.addEventListener("click", () => loadCkpt(c.name));
     const exp = document.createElement("button");
+    exp.type = "button";
     exp.className = "btn ghost";
     exp.textContent = "Export";
     exp.addEventListener("click", () =>
@@ -151,6 +175,52 @@ function renderCkpts() {
   }
 }
 
+function renderVesselActual(st) {
+  const el = $("vessel-actual");
+  if (!el) return;
+  if (!st.ready) {
+    el.textContent = "No active brain yet. Parameter count is determined by the selected architecture and the tokenizer's actual vocabulary; it does not grow with training steps.";
+    return;
+  }
+  const cfg = st.config || {};
+  const saved = st.training_data || null;
+  const trainDocs = saved?.trainDocuments ?? st.train_documents ?? 0;
+  const valDocs = saved?.validationDocuments ?? st.validation_documents ?? 0;
+  const trainStreamTokens = saved?.trainStreamTokens ?? st.corpus_tokens ?? 0;
+  const valStreamTokens = saved?.validationStreamTokens ?? st.val_tokens ?? 0;
+  const sourceTokens = saved?.sourceTokens || st.source_tokens || {};
+  const sourceSummary = Object.entries(sourceTokens || {})
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 6)
+    .map(([source, count]) => `${source} ${fmtInt(count)}`)
+    .join(" · ");
+  const validation = st.val_loss != null
+    ? `latest validation loss ${st.val_loss.toFixed(3)}${st.best_val_loss != null ? ` · best ${st.best_val_loss.toFixed(3)}` : ""}`
+    : st.best_val_loss != null
+      ? `best saved validation loss ${st.best_val_loss.toFixed(3)}; no current validation run`
+      : "validation loss not measured";
+  const corpusText = saved
+    ? `Trainer training-data snapshot: ${fmtInt(trainDocs)} train docs / ${fmtInt(trainStreamTokens)} train-stream tokens + ${fmtInt(valDocs)} validation docs / ${fmtInt(valStreamTokens)} validation-stream tokens.`
+    : st.documents > 0
+      ? `Trainer corpus: ${fmtInt(trainDocs)} train docs / ${fmtInt(trainStreamTokens)} train-stream tokens + ${fmtInt(valDocs)} validation docs / ${fmtInt(valStreamTokens)} validation-stream tokens.`
+      : "No training-data summary is stored with this brain.";
+  const storedDocs = Number(state.corpusStats?.documents);
+  const storedCorpusText = Number.isFinite(storedDocs)
+    ? ` Device corpus currently stores ${fmtInt(storedDocs)} documents${storedDocs !== trainDocs + valDocs ? `; it differs from this trainer snapshot and will be re-split when Fire starts` : ""}.`
+    : "";
+  const sourcesText = sourceSummary ? ` Stream tokens by source: ${sourceSummary}.` : "";
+  const trainingText =
+    `Recorded training totals: ${fmtInt(st.step)} optimizer steps · ${fmtInt(st.tokens_processed)} input positions processed · ${fmtInt(st.loss_tokens_processed)} prediction targets included in loss · ${Number(st.train_seconds || 0).toFixed(1)} recorded training seconds.` +
+    ` Best recorded training loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "not measured"}; ${validation}.`;
+  const run = st.last_run;
+  const runText = run
+    ? ` Last Fire config: ${fmtInt(run.completedSteps)}/${fmtInt(run.requestedSteps)} steps · batch ${run.batchSize} × context ${cfg.blockSize} · base LR ${run.baseLr != null ? run.baseLr.toExponential(1) : "unknown"} · gradient clip ${run.gradientClip > 0 ? run.gradientClip : "off"} · ${run.sampler} sampler · ${run.boundaries} boundaries · source balance ${run.balanceMode} · lesson loss ${run.lessonLoss} · validation every ${run.validationEvery || "off"} steps · ${run.outcome}.`
+    : " No saved firing configuration is available for this brain.";
+  el.textContent =
+    `Active brain · ${fmtInt(st.n_params)} exact parameters · ${cfg.nLayer} layers · ${cfg.nHead} heads · width ${cfg.nEmbd} · FFN ${cfg.ffnMult || 4}× · context ${cfg.blockSize} · vocab ${fmtInt(st.vocab_size)} actual tokens · ${st.tokenizer_type}. ` +
+    corpusText + storedCorpusText + sourcesText + " " + trainingText + runText;
+}
+
 function renderModelPills() {
   const st = state.trainer.status();
   if (st.ready) {
@@ -159,22 +229,37 @@ function renderModelPills() {
   } else {
     $("pill-model").textContent = "vessel unformed";
   }
-  $("pill-fire").textContent = state.firing ? "firing" : st.ready ? "ready" : "idle";
+  renderVesselActual(st);
+  $("pill-fire").textContent = state.firing
+    ? "firing"
+    : state.startingFire
+      ? "preparing fire"
+      : state.casting
+        ? "casting"
+        : state.forageRunning
+          ? "foraging"
+          : st.ready ? "ready" : "idle";
   const tps = st.gen_tps || st.train_tps;
   $("pill-speed").textContent = tps ? fmtTps(tps) : "tok/s —";
-  // controls that would race or dispose the model mid-run
-  $("btn-gen").disabled = !st.ready || state.firing || state.generating;
+  // Reserve state synchronously before any asynchronous storage/model work;
+  // a quick repeat tap cannot start a racing second operation.
+  $("btn-gen").disabled = !st.ready || state.firing || state.startingFire || state.casting || state.generating;
   $("btn-gen").title = !st.ready
     ? "Cast a vessel first (Vessel tab)"
-    : state.firing
-      ? "Wait for firing to finish, or Douse it"
-      : "";
-  $("btn-init").disabled = state.firing;
-  $("btn-fire").disabled = state.firing || state.generating;
+    : state.firing || state.startingFire
+      ? "Wait for training to finish, or Douse it"
+      : state.casting
+        ? "Wait for casting to finish"
+        : "";
+  $("btn-init").disabled = state.firing || state.startingFire || state.casting || state.generating;
+  $("btn-init").textContent = state.casting ? "Casting…" : "Cast vessel from corpus";
+  $("btn-fire").disabled = state.firing || state.startingFire || state.casting || state.generating;
+  $("btn-fire").textContent = state.startingFire ? "Preparing…" : state.firing ? "Firing…" : "Fire";
 }
 
 async function refresh() {
   const stats = await state.store.stats();
+  state.corpusStats = stats;
   renderCorpus(stats);
   state.checkpoints = await state.store.listCkpts();
   renderCkpts();
@@ -215,26 +300,33 @@ function markVesselApplied() {
 }
 
 function paramEstimate() {
-  const nLayer = +$("v-layer").value;
-  const nHead = +$("v-head").value;
-  const nEmbd = +$("v-embd").value;
-  const blockSize = +$("v-ctx").value;
-  const vocabSize = +$("v-vocab").value;
-  $("v-layer-n").textContent = nLayer;
-  $("v-head-n").textContent = nHead;
-  $("v-embd-n").textContent = nEmbd;
-  $("v-ctx-n").textContent = blockSize;
-  $("v-vocab-n").textContent = vocabSize;
-  $("v-drop-n").textContent = Number($("v-drop").value).toFixed(2);
-  if (nEmbd % nHead !== 0) {
-    $("param-est").textContent = "Heads must divide embedding size";
-    updateVesselDirty();
-    return;
-  }
+  const nLayer = Number($("v-layer").value);
+  const nHead = Number($("v-head").value);
+  const nEmbd = Number($("v-embd").value);
+  const blockSize = Number($("v-ctx").value);
+  const vocabSize = Number($("v-vocab").value);
+  const dropout = Number($("v-drop").value);
   const ffnMult = Number($("v-ffn")?.value || 4);
-  const n = estimateParams({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult });
-  const trainMB = (estimateTrainBytes({ nLayer, nHead, nEmbd, blockSize, vocabSize, ffnMult }) / 1048576).toFixed(1);
-  $("param-est").textContent = `≈ ${(n / 1e6).toFixed(2)}M parameters · ~${trainMB} MB training memory (weights + optimizer, before activations) · trains on this ${isPhone ? "phone" : "device"}`;
+  $("v-layer-n").textContent = Number.isFinite(nLayer) ? nLayer : "—";
+  $("v-head-n").textContent = Number.isFinite(nHead) ? nHead : "—";
+  $("v-embd-n").textContent = Number.isFinite(nEmbd) ? nEmbd : "—";
+  $("v-ctx-n").textContent = Number.isFinite(blockSize) ? blockSize : "—";
+  $("v-vocab-n").textContent = Number.isFinite(vocabSize) ? fmtInt(vocabSize) : "—";
+  $("v-drop-n").textContent = Number.isFinite(dropout) ? dropout.toFixed(2) : "—";
+  try {
+    const cfg = validateModelConfig({ nLayer, nHead, nEmbd, blockSize, vocabSize, dropout, ffnMult });
+    const params = estimateParams(cfg);
+    const trainMB = estimateTrainBytes(cfg) / 1048576;
+    const roughBudgetMB = isPhone ? 768 : 3072;
+    const warning = trainMB > roughBudgetMB
+      ? ` · ⚠ ${trainMB.toFixed(0)} MB weights/gradient/Adam floor exceeds a rough ${roughBudgetMB} MB device budget; activations need more`
+      : "";
+    $("param-est").textContent =
+      `Selected config at vocab cap: ${fmtInt(params)} parameters · ${trainMB.toFixed(1)} MB minimum training memory (weights + gradients + Adam; activations add more).` +
+      ` Exact active-brain count appears after casting${warning}`;
+  } catch (error) {
+    $("param-est").textContent = error.message;
+  }
   updateVesselDirty();
 }
 
@@ -334,6 +426,17 @@ document.querySelectorAll(".tab").forEach((btn) => {
 });
 $("v-tokenizer")?.addEventListener("change", updateVesselDirty);
 $("v-ffn")?.addEventListener("change", paramEstimate);
+document.querySelectorAll("[data-seed-topic]").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const input = $("seeds");
+    const topics = input.value.split(/[,;\n]/).map((topic) => topic.trim()).filter(Boolean);
+    const suggestion = chip.dataset.seedTopic;
+    if (!topics.some((topic) => topic.toLocaleLowerCase() === suggestion.toLocaleLowerCase())) {
+      topics.push(suggestion);
+      input.value = topics.join(", ");
+    }
+  });
+});
 document.querySelectorAll(".chip[data-preset]").forEach((c) => c.addEventListener("click", () => applyPreset(c.dataset.preset)));
 
 // Voice sampling presets: just fill the numeric inputs (nothing hidden),
@@ -496,106 +599,262 @@ $("btn-dedup")?.addEventListener("click", async () => {
   }
 });
 
+function readForagerOptions() {
+  const wikiVal = $("wiki").value;
+  return {
+    seeds: $("seeds").value.trim(),
+    subreddits: $("subreddits").value.trim(),
+    wiki: wikiVal === "family" ? "" : wikiVal,
+    wikiFamily: wikiVal === "family",
+    budget: Math.max(1, Math.min(250, Number($("budget").value) || 24)),
+    wikiOn: $("src-wiki").checked,
+    redditArctic: $("src-reddit").checked,
+    redditPullpush: $("src-pullpush").checked,
+    reddit: $("src-reddit").checked || $("src-pullpush").checked,
+    stack: $("src-stack").checked,
+    gutenberg: $("src-gutenberg").checked,
+    openlibrary: $("src-ol").checked,
+    hn: $("src-hn").checked,
+    wander: $("src-wander").checked,
+    autopilot: $("src-autopilot").checked,
+    autoFire: $("src-autofire").checked,
+  };
+}
+
+function applyForagerOptions(options = {}) {
+  if (options.seeds != null) $("seeds").value = options.seeds;
+  if (options.subreddits != null) $("subreddits").value = options.subreddits;
+  if ($("wiki")) $("wiki").value = options.wikiFamily ? "family" : options.wiki || "family";
+  if (options.budget != null) $("budget").value = options.budget;
+  for (const [key, id] of Object.entries({
+    wikiOn: "src-wiki",
+    redditArctic: "src-reddit",
+    redditPullpush: "src-pullpush",
+    stack: "src-stack",
+    gutenberg: "src-gutenberg",
+    openlibrary: "src-ol",
+    hn: "src-hn",
+    wander: "src-wander",
+    autopilot: "src-autopilot",
+    autoFire: "src-autofire",
+  })) {
+    if (options[key] != null && $(id)) $(id).checked = !!options[key];
+  }
+}
+
+async function saveForageCheckpoint(reason = "periodic") {
+  if (!state.store || !state.forageSnapshot) return null;
+  const task = state.forageAutoSaveQueue.catch(() => {}).then(async () => {
+    // Each document has already been committed to IndexedDB by onDoc.
+    // Wait for the in-flight write queue before advancing the resume marker.
+    await state.forageSaveQueue.catch(() => {});
+    const now = Date.now();
+    const checkpoint = {
+      ...state.forageSnapshot,
+      options: { ...(state.forageSnapshot.options || {}) },
+      running: !!state.forageRunning && !state.forageStop,
+      updatedAt: now,
+      savedAt: now,
+      saveReason: reason,
+    };
+    await state.store.setKv("forager:autosave", checkpoint);
+    state.forageCheckpoint = now;
+    if (reason !== "started" && reason !== "stopped") {
+      logEl($("forage-log"), `autosaved forager session · ${fmtInt(checkpoint.documentsAccepted || 0)} documents accepted · ${reason}`);
+    }
+    return checkpoint;
+  });
+  state.forageAutoSaveQueue = task.catch(() => {});
+  return task;
+}
+
 const forager = createForager({
   onLog: (line) => logEl($("forage-log"), line),
   shouldStop: () => state.forageStop,
-  onDoc: async (doc) => {
-    await state.store.addDoc({
-      text: doc.text,
-      title: doc.title,
-      source: doc.source,
-      url: doc.url || "",
-      kind: doc.kind || "page",
-      meta: doc.meta || null, // subreddit/thread structure, when the source has it
+  onDoc: (doc) => {
+    const task = state.forageSaveQueue.catch(() => {}).then(async () => {
+      const saved = await state.store.addDoc({
+        text: doc.text,
+        title: doc.title,
+        source: doc.source,
+        url: doc.url || "",
+        kind: doc.kind || "page",
+        meta: doc.meta || null, // subreddit/thread structure, when the source has it
+      });
+      if (state.forageSnapshot) {
+        state.forageSnapshot.documentsAccepted = (state.forageSnapshot.documentsAccepted || 0) + 1;
+        state.forageSnapshot.lastDocument = String(saved?.title || doc.title || "").slice(0, 240);
+        state.forageSnapshot.lastUrl = String(saved?.url || doc.url || "").slice(0, 1000);
+      }
+      return saved;
     });
+    state.forageSaveQueue = task.catch(() => {});
+    return task;
   },
 });
 
-$("btn-forage").addEventListener("click", async () => {
+async function startForaging({ resumeSnapshot = null } = {}) {
+  if (state.forageRunning) return;
+  const options = resumeSnapshot?.options
+    ? { ...readForagerOptions(), ...resumeSnapshot.options }
+    : readForagerOptions();
+  if (resumeSnapshot) applyForagerOptions({ ...options, seeds: resumeSnapshot.currentSeeds || options.seeds });
+  let seeds = String(resumeSnapshot?.currentSeeds || options.seeds || "").trim();
+  if (!seeds) {
+    notifyWarn("Add a seed topic", "Enter one or more useful topics before starting the forager.");
+    return;
+  }
+
+  // Reserve immediately. Starting another tap cannot create overlapping
+  // fetch loops, and every successful result is written before its
+  // checkpoint advances.
+  state.forageRunning = true;
   state.forageStop = false;
-  $("btn-forage").disabled = true;
-  $("btn-forage-stop").disabled = false;
-  $("forage-log").textContent = "";
-  const optsBase = () => {
-    const wikiVal = $("wiki").value;
-    return {
-      seeds: $("seeds").value,
-      subreddits: $("subreddits").value,
-      wiki: wikiVal === "family" ? "" : wikiVal,
-      wikiFamily: wikiVal === "family",
-      budget: +$("budget").value,
-      wikiOn: $("src-wiki").checked,
-      reddit: $("src-reddit").checked || $("src-pullpush").checked,
-      redditArctic: $("src-reddit").checked,
-      redditPullpush: $("src-pullpush").checked,
-      stack: $("src-stack").checked,
-      gutenberg: $("src-gutenberg").checked,
-      openlibrary: $("src-ol").checked,
-      hn: $("src-hn").checked,
-      wander: $("src-wander").checked,
-    };
+  state.forageSnapshot = {
+    version: 1,
+    running: true,
+    startedAt: resumeSnapshot?.startedAt || Date.now(),
+    updatedAt: Date.now(),
+    currentSeeds: seeds,
+    options: { ...options },
+    documentsAccepted: Number.isSafeInteger(resumeSnapshot?.documentsAccepted) ? resumeSnapshot.documentsAccepted : 0,
+    lastDocument: resumeSnapshot?.lastDocument || "",
+    lastUrl: resumeSnapshot?.lastUrl || "",
   };
+  $("btn-forage").disabled = true;
+  $("btn-forage").textContent = "Foraging…";
+  $("btn-forage-stop").disabled = false;
+  if (!resumeSnapshot) $("forage-log").textContent = "";
+  logEl($("forage-log"), resumeSnapshot
+    ? `resuming saved foraging session from ${new Date(resumeSnapshot.updatedAt || Date.now()).toLocaleString()}`
+    : "foraging started — each document is saved to this device as it arrives");
+  renderModelPills();
+
   let failed = false;
+  let releaseBackground = null;
+  const forageArgs = (seedTopics) => ({
+    seeds: seedTopics,
+    subreddits: options.subreddits,
+    wiki: options.wiki,
+    wikiFamily: options.wikiFamily,
+    budget: options.budget,
+    wikiOn: options.wikiOn,
+    reddit: options.redditArctic || options.redditPullpush,
+    redditArctic: options.redditArctic,
+    redditPullpush: options.redditPullpush,
+    stack: options.stack,
+    gutenberg: options.gutenberg,
+    openlibrary: options.openlibrary,
+    hn: options.hn,
+    wander: options.wander,
+  });
+
   try {
-    let seeds = $("seeds").value;
+    await saveForageCheckpoint("started");
+    releaseBackground = await beginBackgroundWork("Foraging");
+    state.forageTimer = setInterval(() => {
+      saveForageCheckpoint("60-second timer").catch((error) =>
+        logEl($("forage-log"), `! forager autosave failed: ${error.message}`)
+      );
+    }, 60_000);
+
     do {
-      const result = await forager.forageOnce({ ...optsBase(), seeds });
+      state.forageSnapshot.currentSeeds = seeds;
+      state.forageSnapshot.options = { ...options, seeds };
+      const result = await forager.forageOnce(forageArgs(seeds));
+      await state.forageSaveQueue.catch(() => {});
+      await saveForageCheckpoint("pass complete");
       await refresh();
-      if ($("src-autofire")?.checked && state.trainer.ready && !state.firing) {
+      if (options.autoFire && state.trainer.ready && !state.firing && !state.startingFire) {
         logEl($("forage-log"), "auto-fire 40 steps on new fuel");
-        // NOTE: passes steps directly — never rewrites the Steps input.
+        // Pass steps directly — never rewrite the Steps input.
         startFire(40, { jump: false, source: "auto-fire" }).catch((e) =>
           logEl($("forage-log"), `! auto-fire failed: ${e.message}`)
         );
       }
-      if (!$("src-autopilot").checked || state.forageStop) break;
+      if (!options.autopilot || state.forageStop) break;
       if (result.extraTopics.length) {
         seeds = result.extraTopics.slice(0, 6).join(", ");
         $("seeds").value = seeds;
         logEl($("forage-log"), `autopilot next seeds: ${seeds}`);
       }
       if (result.extraSubs?.length) {
-        const cur = $("subreddits").value.split(/[,;\s]+/).filter(Boolean);
+        const cur = options.subreddits.split(/[,;\s]+/).filter(Boolean);
         const merged = [...new Set([...cur, ...result.extraSubs])].slice(0, 16);
-        $("subreddits").value = merged.join(", ");
+        options.subreddits = merged.join(", ");
+        $("subreddits").value = options.subreddits;
       }
-      await new Promise((r) => setTimeout(r, 600));
+      state.forageSnapshot.currentSeeds = seeds;
+      state.forageSnapshot.options = { ...options, seeds };
+      await saveForageCheckpoint("autopilot update");
+      await new Promise((resolve) => setTimeout(resolve, 600));
     } while (!state.forageStop);
-  } catch (e) {
+  } catch (error) {
     failed = true;
-    logEl($("forage-log"), `! ${e.message}`);
-    notifyError("Foraging stopped with an error", e.message);
+    logEl($("forage-log"), `! ${error.message}`);
+    notifyError("Foraging stopped with an error", error.message);
   } finally {
     state.forageStop = true;
+    if (state.forageTimer) clearInterval(state.forageTimer);
+    state.forageTimer = null;
+    await state.forageSaveQueue.catch(() => {});
+    state.forageRunning = false;
+    try {
+      await saveForageCheckpoint(failed ? "failed" : "stopped");
+    } catch (error) {
+      logEl($("forage-log"), `! final forager autosave failed: ${error.message}`);
+    }
+    try {
+      await releaseBackground?.();
+    } catch {
+      /* a wake-lock failure must not strand the controls */
+    }
     $("btn-forage").disabled = false;
+    $("btn-forage").textContent = "Start foraging";
     $("btn-forage-stop").disabled = true;
+    renderModelPills();
     if (!failed) {
-      const stats = await state.store.stats();
-      notifyInfo("Foraging finished", `Corpus now holds ${stats.documents} pages · ${fmtChars(stats.characters)} chars.`);
+      try {
+        const stats = await state.store.stats();
+        notifyInfo("Foraging finished", `Corpus now holds ${fmtInt(stats.documents)} documents · ${fmtChars(stats.characters)} chars. Forager progress was autosaved on this device.`);
+      } catch {
+        notifyInfo("Foraging stopped", "Fetched documents are saved on this device; the final count is unavailable.");
+      }
     }
   }
+}
+
+$("btn-forage").addEventListener("click", () => {
+  startForaging().catch((error) => notifyError("Foraging could not start", error.message));
 });
 
 $("btn-forage-stop").addEventListener("click", () => {
   state.forageStop = true;
+  saveForageCheckpoint("stop requested").catch((error) =>
+    logEl($("forage-log"), `! stop marker could not be saved: ${error.message}`)
+  );
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (state.forageRunning) {
+    const reason = document.visibilityState === "hidden" ? "backgrounded" : "foregrounded";
+    saveForageCheckpoint(reason).catch((error) =>
+      logEl($("forage-log"), `! forager lifecycle save failed: ${error.message}`)
+    );
+  }
 });
 
 // ---------- cast ----------
 
 $("btn-init").addEventListener("click", async () => {
-  if (state.firing) {
-    notifyWarn("Still firing", "Douse the fire before recasting.");
+  if (state.firing || state.startingFire || state.casting || state.generating) {
+    notifyWarn("Another operation is running", "Wait for it to finish before casting a new vessel.");
     return;
   }
   const nHead = +$("v-head").value;
   const nEmbd = +$("v-embd").value;
   if (nEmbd % nHead !== 0) {
     notifyError("Heads must divide embedding size", `Embedding ${nEmbd} ÷ Heads ${nHead} is not whole. Adjust one of them (ⓘ explains why).`);
-    return;
-  }
-  const stats = await state.store.stats();
-  if (!stats.documents) {
-    notifyWarn("No fuel yet", "Forage or paste some text in the Fuel tab first.");
     return;
   }
   let lr;
@@ -613,9 +872,16 @@ $("btn-init").addEventListener("click", async () => {
       : "Casting again wipes the current brain (step " + state.trainer.step + "). Export it first if you want to keep it. Continue?";
     if (!confirm(msg)) return;
   }
-  $("btn-init").disabled = true;
-  $("btn-init").textContent = "Casting…";
+
+  // Claim the operation before IndexedDB reads; repeated taps are ignored.
+  state.casting = true;
+  renderModelPills();
   try {
+    const stats = await state.store.stats();
+    if (!stats.documents) {
+      notifyWarn("No fuel yet", "Forage or paste some text in the Fuel tab first.");
+      return;
+    }
     if (switchingTok && state.trainer.step > 0) {
       // Rollback point: the old brain stays loadable after the switch.
       const rollback = `pre-tokenizer-switch-step-${state.trainer.step}`;
@@ -639,13 +905,12 @@ $("btn-init").addEventListener("click", async () => {
     renderModelPills();
     const st = state.trainer.status();
     logEl($("train-log"), `cast ${st.n_params} params on ${tf.getBackend()} · ${st.tokenizer_type} tokenizer · vocab ${st.vocab_size} · corpus ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out for validation` : ""}`);
-    notifySuccess("Vessel cast", `${(st.n_params / 1e6).toFixed(2)}M params · vocab ${st.vocab_size} (${st.tokenizer_type}) · ${st.corpus_tokens} corpus tokens ready. Press Fire to train.`);
+    notifySuccess("Vessel cast", `${fmtInt(st.n_params)} exact params · vocab ${fmtInt(st.vocab_size)} actual tokens (${st.tokenizer_type}) · ${fmtInt(st.corpus_tokens)} train-stream tokens ready. Press Fire to train.`);
     document.querySelector('[data-tab="fire"]').click();
   } catch (e) {
     notifyError("Casting failed", e.message);
   } finally {
-    $("btn-init").disabled = false;
-    $("btn-init").textContent = "Cast vessel from corpus";
+    state.casting = false;
     renderModelPills();
   }
 });
@@ -716,6 +981,13 @@ async function applyBrain(raw) {
       bestLoss: norm.bestLoss ?? Infinity,
       baseLr: norm.baseLr,
       streamFormat: norm.streamFormat || 1, // the brain's learned layout, never guessed
+      tokensProcessed: norm.tokensProcessed || 0,
+      lossTokensProcessed: norm.lossTokensProcessed || 0,
+      sequencesSampled: norm.sequencesSampled || 0,
+      trainSeconds: norm.trainSeconds || 0,
+      bestValLoss: norm.bestValLoss,
+      trainingData: norm.trainingData,
+      lastRun: norm.lastRun,
     });
   } catch (e) {
     model.dispose();
@@ -733,6 +1005,20 @@ async function applyBrain(raw) {
   const stats = await state.store.stats();
   state.trainer.refreshDocs(stats.docs || []);
   syncVesselSliders(cfg, norm.tokenizer?.type || "legacy");
+  if (norm.trainingData) {
+    if ($("t-balance")) $("t-balance").value = norm.trainingData.balanceMode;
+    if ($("t-boundaries")) {
+      $("t-boundaries").value = norm.trainingData.docBoundaryMask && norm.trainingData.maskBoundaryLoss ? "respect" : "legacy";
+    }
+    if ($("t-lessonloss")) $("t-lessonloss").value = norm.trainingData.maskLessonPrompts ? "response" : "both";
+    if ($("t-sampler")) $("t-sampler").value = norm.trainingData.samplerMode;
+    if ($("t-clip")) $("t-clip").value = norm.trainingData.gradClip;
+  }
+  if (norm.lastRun) {
+    if ($("t-lr") && norm.lastRun.baseLr != null) $("t-lr").value = norm.lastRun.baseLr;
+    if ($("t-batch")) $("t-batch").value = norm.lastRun.batchSize;
+    if ($("t-val")) $("t-val").value = norm.lastRun.validationEvery;
+  }
   markVesselApplied();
   state.losses = [];
   state.vals = [];
@@ -859,7 +1145,7 @@ $("ckpt-import").addEventListener("change", async (e) => {
 // ---------- fire ----------
 
 async function startFire(stepsOverride = null, { jump = true, source = "manual" } = {}) {
-  if (state.firing) return;
+  if (state.firing || state.startingFire || state.casting || state.generating) return;
   if (!state.trainer.ready) {
     notifyWarn("Cast the vessel first", "Go to the Vessel tab → Cast vessel from corpus.");
     return;
@@ -879,125 +1165,175 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
     notifyError("Bad learning rate", e.message);
     return;
   }
-  // balancing changes stream composition, so it must be set BEFORE the
-  // corpus refresh below (boundary/clip flags apply per-batch instead);
-  // lesson-loss masking is also baked into the stream, same reason
-  state.trainer.balanceMode = $("t-balance")?.value === "sqrt" ? "sqrt" : "off";
-  state.trainer.maskLessonPrompts = $("t-lessonloss")?.value === "response";
-  const stats = await state.store.stats();
-  state.trainer.refreshDocs(stats.docs || []);
-  const clipRaw = Number($("t-clip")?.value);
-  state.trainer.gradClip = Number.isFinite(clipRaw) && clipRaw > 0 ? clipRaw : 0;
-  state.trainer.samplerMode = $("t-sampler")?.value === "epoch" ? "epoch" : "random";
-  const respectBounds = $("t-boundaries")?.value !== "legacy";
-  state.trainer.docBoundaryMask = respectBounds;
-  state.trainer.maskBoundaryLoss = respectBounds;
-  const valEvery = Math.max(0, Math.floor(+$("t-val")?.value) || 0);
-  state.stopTrain = false;
-  state.firing = true;
-  $("btn-douse").disabled = false;
-  if (jump) document.querySelector('[data-tab="fire"]').click();
-  const every = +$("t-every").value;
-  const until = state.trainer.step + steps;
-  state.trainer.setSchedule(until);
-  logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat}${state.trainer.maskLessonPrompts ? " · lesson loss: response-only" : ""} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
-  const st0 = state.trainer.status();
-  logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} tokens trained so far`);
-  const srcParts = Object.entries(st0.source_tokens || {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
-    .map(([k, v]) => `${k} ${v}${st0.source_boosts?.[k] > 1 ? ` (×${st0.source_boosts[k]} boost)` : ""}`);
-  if (srcParts.length) logEl($("train-log"), `stream by source: ${srcParts.join(" · ")}${st0.balance_mode === "sqrt" ? " · balancing on" : ""}`);
+
+  // Reserve synchronously before the first IndexedDB await. A second tap
+  // can no longer start a competing training loop while the first reads.
+  state.startingFire = true;
   renderModelPills();
+  let releaseBackground = null;
   let outcome = "completed";
   try {
-    while (!state.stopTrain && state.trainer.step < until) {
-      const m = await state.trainer.trainStep(batch);
-      state.losses.push(m.loss);
-      if (state.losses.length > 400) {
-        state.losses.shift();
-        state.vals = state.vals.map((v) => ({ ...v, at: v.at - 1 })).filter((v) => v.at >= 1);
-      }
-      if (valEvery && m.step % valEvery === 0) {
-        try {
-          const v = await state.trainer.validate();
-          if (v) {
-            state.vals.push({ at: state.losses.length, loss: v.loss });
-            logEl($("train-log"), `step ${m.step}  val loss ${v.loss.toFixed(4)}  ppl ${v.ppl.toFixed(1)}  (${v.windows} held-out windows)`);
+    // These options change the streams/objective, so apply them before
+    // rebuilding the deterministic train/validation split.
+    state.trainer.balanceMode = $("t-balance")?.value === "sqrt" ? "sqrt" : "off";
+    state.trainer.maskLessonPrompts = $("t-lessonloss")?.value === "response";
+    const respectBounds = $("t-boundaries")?.value !== "legacy";
+    state.trainer.docBoundaryMask = respectBounds;
+    state.trainer.maskBoundaryLoss = respectBounds;
+    const clipRaw = Number($("t-clip")?.value);
+    state.trainer.gradClip = Number.isFinite(clipRaw) && clipRaw > 0 ? clipRaw : 0;
+    state.trainer.samplerMode = $("t-sampler")?.value === "epoch" ? "epoch" : "random";
+    const valEvery = Math.max(0, Math.floor(+$("t-val")?.value) || 0);
+    const stats = await state.store.stats();
+    if (!stats.documents) throw new Error("No training corpus is attached. Add fuel in the Fuel tab before firing this brain.");
+    state.trainer.refreshDocs(stats.docs || []);
+
+    state.stopTrain = false;
+    const startStep = state.trainer.step;
+    state.trainer.lastRun = {
+      startedAt: new Date().toISOString(),
+      endedAt: null,
+      startStep,
+      requestedSteps: steps,
+      completedSteps: 0,
+      batchSize: batch,
+      baseLr: state.trainer.baseLr,
+      gradientClip: state.trainer.gradClip,
+      sampler: state.trainer.samplerMode,
+      boundaries: respectBounds ? "respect" : "legacy-packed",
+      balanceMode: state.trainer.balanceMode,
+      lessonLoss: state.trainer.maskLessonPrompts ? "response" : "prompt+response",
+      validationEvery: valEvery,
+      outcome: "running",
+    };
+    state.firing = true;
+    state.startingFire = false;
+    releaseBackground = await beginBackgroundWork("Training");
+    $("btn-douse").disabled = false;
+    if (jump) document.querySelector('[data-tab="fire"]').click();
+    const every = +$("t-every").value;
+    const until = state.trainer.step + steps;
+    state.trainer.setSchedule(until);
+    logEl($("train-log"), `fire ${steps} steps · batch ${batch}${batch !== batchWanted ? ` (capped from ${batchWanted} on this device)` : ""} · lr ${state.trainer.baseLr} (warmup+cosine over this run) · clip ${state.trainer.gradClip || "off"} · ${state.trainer.samplerMode} sampler · boundaries ${respectBounds ? "respected" : "legacy-packed"} · stream v${state.trainer.streamFormat}${state.trainer.maskLessonPrompts ? " · lesson loss: response-only" : ""} · ${tf.getBackend()}${source !== "manual" ? ` · ${source}` : ""}`);
+    const st0 = state.trainer.status();
+    logEl($("train-log"), `corpus ${st0.corpus_tokens} train tokens${st0.val_tokens ? ` · ${st0.val_tokens} held out (validation every ${valEvery || "off"})` : " · no validation split (need 5+ ordinary docs)"} · ${st0.tokens_processed} input tokens processed so far`);
+    const srcParts = Object.entries(st0.source_tokens || {}).sort((a, b) => b[1] - a[1]).slice(0, 6)
+      .map(([k, v]) => `${k} ${v}${st0.source_boosts?.[k] > 1 ? ` (×${st0.source_boosts[k]} boost)` : ""}`);
+    if (srcParts.length) logEl($("train-log"), `stream by source: ${srcParts.join(" · ")}${st0.balance_mode === "sqrt" ? " · balancing on" : ""}`);
+    renderModelPills();
+
+    try {
+      while (!state.stopTrain && state.trainer.step < until) {
+        const m = await state.trainer.trainStep(batch);
+        if (state.trainer.lastRun) state.trainer.lastRun.completedSteps = Math.max(0, m.step - startStep);
+        state.losses.push(m.loss);
+        if (state.losses.length > 400) {
+          state.losses.shift();
+          state.vals = state.vals.map((v) => ({ ...v, at: v.at - 1 })).filter((v) => v.at >= 1);
+        }
+        if (valEvery && m.step % valEvery === 0) {
+          try {
+            const v = await state.trainer.validate();
+            if (v) {
+              state.vals.push({ at: state.losses.length, loss: v.loss });
+              logEl($("train-log"), `step ${m.step}  val loss ${v.loss.toFixed(4)}  best val ${v.bestLoss.toFixed(4)}  ppl ${v.ppl.toFixed(1)}  (${v.windows} held-out windows)`);
+            }
+          } catch (err) {
+            logEl($("train-log"), `! validation failed: ${err.message}`);
           }
-        } catch (err) {
-          logEl($("train-log"), `! validation failed: ${err.message}`);
         }
-      }
-      drawChart();
-      const valTxt = state.vals.length ? ` · val ${state.vals[state.vals.length - 1].loss.toFixed(3)}` : "";
-      $("heat-meta").textContent =
-        `step ${m.step}/${until} · loss ${m.loss.toFixed(3)}${valTxt} · ema ${m.ema.toFixed(3)} · best ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · |grad| ${m.grad_norm != null ? m.grad_norm.toFixed(2) : "—"}${m.clipped ? " (clipped)" : ""} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)} · ${fmtChars(m.tokens_processed)} tok trained`;
-      $("pill-speed").textContent = `train ${fmtTps(m.train_tps)}`;
-      $("pill-fire").textContent = `firing ${m.step}/${until}`;
-      $("pill-model").textContent = `${(state.trainer.model.nParams() / 1e6).toFixed(2)}M · ${tf.getBackend()} · step ${m.step}`;
-      if (m.step % 5 === 0) logEl($("train-log"), `step ${m.step}  loss ${m.loss.toFixed(4)}  ema ${m.ema.toFixed(4)}  ${fmtTps(m.train_tps)}`);
-      if (m.step % 50 === 0) {
-        try {
-          // one rolling autosave (weights only) — never a pile of full
-          // corpus+weights copies eating the phone's storage.
-          const brain = await packBrain("autosave", { includeCorpus: false });
-          await storeCkpt("autosave", brain);
-          logEl($("train-log"), `auto-saved (rolling) at step ${m.step}`);
-          refresh().catch(() => {});
-        } catch (err) {
-          logEl($("train-log"), `! autosave failed: ${err.message}`);
+        drawChart();
+        const stNow = state.trainer.status();
+        const valTxt = stNow.val_loss != null
+          ? ` · val ${stNow.val_loss.toFixed(3)} · best val ${stNow.best_val_loss.toFixed(3)}`
+          : "";
+        $("heat-meta").textContent =
+          `step ${m.step}/${until} · loss ${m.loss.toFixed(3)}${valTxt} · ema ${m.ema.toFixed(3)} · best train ${m.best_loss.toFixed(3)} · lr ${m.lr.toExponential(1)} · |grad| ${m.grad_norm != null ? m.grad_norm.toFixed(2) : "—"}${m.clipped ? " (clipped)" : ""} · ${m.ms.toFixed(0)}ms · train ${fmtTps(m.train_tps)} · ${fmtChars(m.tokens_processed)} input tok / ${fmtChars(m.loss_tokens_processed)} loss targets`;
+        $("pill-speed").textContent = `train ${fmtTps(m.train_tps)}`;
+        $("pill-fire").textContent = `firing ${m.step}/${until}`;
+        $("pill-model").textContent = `${(state.trainer.model.nParams() / 1e6).toFixed(2)}M · ${tf.getBackend()} · step ${m.step}`;
+        renderVesselActual(stNow);
+        if (m.step % 5 === 0) logEl($("train-log"), `step ${m.step}  loss ${m.loss.toFixed(4)}  ema ${m.ema.toFixed(4)}  ${fmtTps(m.train_tps)}`);
+        if (m.step % 50 === 0) {
+          try {
+            // one rolling autosave (weights only) — never a pile of full
+            // corpus+weights copies eating the phone's storage.
+            const brain = await packBrain("autosave", { includeCorpus: false });
+            await storeCkpt("autosave", brain);
+            logEl($("train-log"), `auto-saved (rolling) at step ${m.step}`);
+            refresh().catch(() => {});
+          } catch (err) {
+            logEl($("train-log"), `! autosave failed: ${err.message}`);
+          }
         }
-      }
-      if (every && m.step % every === 0) {
-        try {
-          // Fixed seed + fixed settings: samples across steps and across
-          // runs are comparable evidence, not lucky draws.
-          const sample = await state.trainer.generate($("t-prompt").value, {
-            maxNew: 40,
-            temperature: 0.9,
-            topK: 40,
-            topP: 0.95,
-            repetition: 1.15,
-            seed: 1234,
-          });
-          const box = document.createElement("div");
-          box.className = "sample";
-          const s = document.createElement("span");
-          s.className = "step";
-          s.textContent = `step ${m.step} · gen ${fmtTps(sample.tokensPerSec)}`;
-          const t = document.createElement("div");
-          t.textContent = sample.text || "(silence)";
-          box.append(s, t);
-          $("samples").prepend(box);
-          while ($("samples").children.length > 8) $("samples").lastChild.remove();
-        } catch (err) {
-          logEl($("train-log"), `! sample failed: ${err.message}`);
+        if (every && m.step % every === 0) {
+          try {
+            // Fixed seed + fixed settings: samples across steps and across
+            // runs are comparable evidence, not lucky draws.
+            const sample = await state.trainer.generate($("t-prompt").value, {
+              maxNew: 40,
+              temperature: 0.9,
+              topK: 40,
+              topP: 0.95,
+              repetition: 1.15,
+              seed: 1234,
+            });
+            const box = document.createElement("div");
+            box.className = "sample";
+            const s = document.createElement("span");
+            s.className = "step";
+            s.textContent = `step ${m.step} · gen ${fmtTps(sample.tokensPerSec)}`;
+            const t = document.createElement("div");
+            t.textContent = sample.text || "(silence)";
+            box.append(s, t);
+            $("samples").prepend(box);
+            while ($("samples").children.length > 8) $("samples").lastChild.remove();
+          } catch (err) {
+            logEl($("train-log"), `! sample failed: ${err.message}`);
+          }
         }
+        await tf.nextFrame();
       }
-      await tf.nextFrame();
+      if (state.stopTrain) outcome = "doused";
+      if (state.trainer.lastRun) {
+        state.trainer.lastRun.completedSteps = Math.max(0, state.trainer.step - startStep);
+        state.trainer.lastRun.outcome = outcome;
+        state.trainer.lastRun.endedAt = new Date().toISOString();
+      }
+      logEl($("train-log"), `${outcome} at step ${state.trainer.step}`);
+    } catch (e) {
+      outcome = "failed";
+      if (state.trainer.lastRun) {
+        state.trainer.lastRun.completedSteps = Math.max(0, state.trainer.step - startStep);
+        state.trainer.lastRun.outcome = "failed";
+        state.trainer.lastRun.endedAt = new Date().toISOString();
+      }
+      logEl($("train-log"), `! ${e.message}`);
+      notifyError("Training stopped", `${e.message} Weights from completed steps are kept — lower the learning rate or batch and Fire again.`);
     }
-    if (state.stopTrain) outcome = "doused";
-    logEl($("train-log"), `${outcome} at step ${state.trainer.step}`);
-  } catch (e) {
-    outcome = "failed";
-    logEl($("train-log"), `! ${e.message}`);
-    notifyError("Training stopped", `${e.message} Weights from completed steps are kept — lower the learning rate or batch and Fire again.`);
   } finally {
     state.firing = false;
+    state.startingFire = false;
     $("btn-douse").disabled = true;
+    try {
+      await releaseBackground?.();
+    } catch {
+      /* release must never strand the controls */
+    }
     renderModelPills();
   }
+
   if (outcome === "completed") {
     const st = state.trainer.status();
     notifySuccess(
       `Firing complete — step ${st.step}`,
-      `Best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}${st.val_loss != null ? ` · val ${st.val_loss.toFixed(3)} (ppl ${st.val_ppl.toFixed(0)})` : ""} · ${fmtChars(st.tokens_processed)} tokens trained · train ${fmtTps(st.train_tps)}. Save or export the brain to keep it.`
+      `Best train loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}${st.val_loss != null ? ` · latest val ${st.val_loss.toFixed(3)} · best val ${st.best_val_loss.toFixed(3)} (ppl ${st.val_ppl.toFixed(0)})` : " · validation not measured in this run"} · ${fmtChars(st.tokens_processed)} input tokens processed (${fmtChars(st.loss_tokens_processed)} loss targets) · train time ${st.train_seconds.toFixed(1)}s · ${fmtTps(st.train_tps)}. Save or export the brain to keep it.`
     );
-    osNotify("Ember: firing complete", `Step ${st.step} · best loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}`);
+    osNotify("Ember: firing complete", `Step ${st.step} · best train loss ${st.best_loss != null ? st.best_loss.toFixed(3) : "—"}`);
   } else if (outcome === "doused") {
     notifyInfo(`Doused at step ${state.trainer.step}`, "Progress so far is kept in the vessel. Save a checkpoint to persist it.");
   }
 }
-
 $("btn-fire").addEventListener("click", () =>
   startFire(null, { jump: true }).catch((e) => notifyError("Training stopped", e.message))
 );
@@ -1023,8 +1359,9 @@ $("btn-fire-reset")?.addEventListener("click", () => {
 // ---------- voice ----------
 
 $("btn-gen").addEventListener("click", async () => {
-  if (state.firing) {
-    notifyWarn("Still firing", "Wait for training to finish, or Douse it, then generate.");
+  if (state.generating) return;
+  if (state.firing || state.startingFire || state.casting) {
+    notifyWarn("Another operation is running", "Wait for casting or training to finish, then generate.");
     return;
   }
   if (!state.trainer.ready) {
@@ -1499,7 +1836,11 @@ async function boot() {
     $("budget").value = 12;
   }
   paramEstimate();
-  await refresh();
+  const bootStats = await refresh();
+  for (const doc of bootStats.docs || []) {
+    const key = String(doc.url || doc.title || "").toLowerCase();
+    if (key) forager.seen.add(key);
+  }
   // Surface the rolling autosave (written every 50 firing steps) so a
   // reload doesn't strand the user at "vessel unformed" with no hint
   // that a trained brain is waiting. Probe-only: we validate and tell,
@@ -1521,6 +1862,20 @@ async function boot() {
   await loadGhSettings();
   if ($("gh-pull-start")?.checked) {
     pullGithubBrain().catch((e) => notifyWarn("GitHub auto-pull failed", e.message));
+  }
+  try {
+    const savedForager = await state.store.getKv("forager:autosave");
+    if (savedForager?.running && savedForager.options && typeof savedForager.options === "object") {
+      notifyInfo(
+        "Resuming forager autosave",
+        `Found an unfinished session (${fmtInt(savedForager.documentsAccepted || 0)} documents accepted). Saved corpus entries are already on this device.`
+      );
+      startForaging({ resumeSnapshot: savedForager }).catch((error) =>
+        notifyError("Could not resume foraging", error.message)
+      );
+    }
+  } catch (error) {
+    notifyWarn("Forager autosave could not be read", error.message);
   }
 }
 

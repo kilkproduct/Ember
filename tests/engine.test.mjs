@@ -123,12 +123,28 @@ test("brain v2: serialize -> JSON -> validate -> restore reproduces identical lo
   const norm = validateBrain(JSON.parse(json)); // must not throw
   assert.equal(norm.version, 2);
   assert.equal(norm.step, 5);
+  assert.equal(norm.tokensProcessed, trainer.tokensProcessed);
+  assert.equal(norm.lossTokensProcessed, trainer.lossTokensProcessed);
+  assert.equal(norm.trainingData.trainDocuments, trainer.documentCounts.train);
 
   const restored = new DeviceTrainer();
   const tok = Tokenizer.fromJSON({ idToToken: norm.vocab });
   const model = new EmberNet({ ...norm.cfg, vocabSize: tok.vocabSize });
   model.setWeights(norm.weights);
-  restored.adopt(model, tok, { step: norm.step, bestLoss: norm.bestLoss, baseLr: norm.baseLr });
+  restored.adopt(model, tok, {
+    step: norm.step,
+    bestLoss: norm.bestLoss,
+    baseLr: norm.baseLr,
+    tokensProcessed: norm.tokensProcessed,
+    lossTokensProcessed: norm.lossTokensProcessed,
+    sequencesSampled: norm.sequencesSampled,
+    trainSeconds: norm.trainSeconds,
+    bestValLoss: norm.bestValLoss,
+    trainingData: norm.trainingData,
+    lastRun: norm.lastRun,
+  });
+  assert.equal(restored.status().tokens_processed, trainer.tokensProcessed);
+  assert.equal(restored.status().loss_tokens_processed, trainer.lossTokensProcessed);
 
   const idx = tf.tensor2d([[2, 5, 6, 7, 8]], [1, 5], "int32");
   const a = await trainer.model.forward(idx).data();

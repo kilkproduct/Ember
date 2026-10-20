@@ -88,10 +88,53 @@ export function estimateTrainBytes(cfg) {
   return estimateParams(cfg) * 16;
 }
 
+/** Architecture bounds supported by the brain format and this engine. */
+export function validateModelConfig(config) {
+  const cfg = {
+    nLayer: Number(config?.nLayer),
+    nHead: Number(config?.nHead),
+    nEmbd: Number(config?.nEmbd),
+    blockSize: Number(config?.blockSize),
+    vocabSize: Number(config?.vocabSize),
+    dropout: Number(config?.dropout ?? 0),
+    ffnMult: Number(config?.ffnMult ?? 4),
+  };
+  const ranges = [
+    ["layers", cfg.nLayer, 1, 32],
+    ["heads", cfg.nHead, 1, 32],
+    ["embedding size", cfg.nEmbd, 8, 2048],
+    ["context", cfg.blockSize, 8, 4096],
+    ["vocabulary cap", cfg.vocabSize, 5, 200000],
+  ];
+  for (const [label, value, min, max] of ranges) {
+    if (!Number.isInteger(value) || value < min || value > max) {
+      throw new Error(`${label} must be an integer from ${min} to ${max}.`);
+    }
+  }
+  if (!Number.isFinite(cfg.dropout) || cfg.dropout < 0 || cfg.dropout > 0.9) {
+    throw new Error("Dropout must be between 0 and 0.9.");
+  }
+  if (!Number.isFinite(cfg.ffnMult) || cfg.ffnMult < 0.5 || cfg.ffnMult > 8) {
+    throw new Error("FFN width must be between 0.5× and 8× embedding size.");
+  }
+  if (cfg.nEmbd % cfg.nHead !== 0) {
+    throw new Error(`Heads (${cfg.nHead}) must divide the embedding size (${cfg.nEmbd}).`);
+  }
+  return cfg;
+}
+
 export async function initBackend() {
   if (typeof tf === "undefined") throw new Error("TensorFlow.js failed to load.");
-  await tf.ready();
   const tried = [];
+  // Set WebGL packing before backend initialization, then prefer the
+  // device's accelerated tensor backend. CPU remains a reliable fallback.
+  try {
+    tf.env().set("WEBGL_PACK", true);
+    tf.env().set("WEBGL_DELETE_TEXTURE_THRESHOLD", 0);
+  } catch {
+    /* flags unavailable in older TensorFlow.js builds */
+  }
+  await tf.ready();
   for (const name of ["webgl", "cpu"]) {
     try {
       const ok = await tf.setBackend(name);
@@ -105,20 +148,14 @@ export async function initBackend() {
       tried.push(`${name}:fail`);
     }
   }
-  try {
-    tf.env().set("WEBGL_PACK", true);
-    tf.env().set("WEBGL_DELETE_TEXTURE_THRESHOLD", 0);
-  } catch {
-    /* older tfjs */
-  }
   return { backend: tf.getBackend(), tried };
 }
 
 export class EmberNet {
   constructor(cfg) {
-    this.cfg = cfg;
+    this.cfg = validateModelConfig(cfg);
+    cfg = this.cfg;
     const { vocabSize, blockSize, nLayer, nEmbd } = cfg;
-    if (nEmbd % cfg.nHead !== 0) throw new Error("heads must divide embedding");
     this.wte = vrand([vocabSize, nEmbd]);
     this.wpe = vrand([blockSize, nEmbd]);
     this.blocks = [];
@@ -499,11 +536,17 @@ export class DeviceTrainer {
     this.samplerMode = "random"; // "random" | "epoch"
     this._epochQueue = [];
     this.passesCompleted = 0;
-    this.tokensProcessed = 0; // tokens that actually went through training batches
+    this.tokensProcessed = 0; // input tokens processed, including masked contexts
+    this.lossTokensProcessed = 0; // prediction targets actually included in the loss
     this.sequencesSampled = 0;
     this.trainSeconds = 0;
+    this.bestValLoss = null;
+    this.lastRun = null;
     this.lastValLoss = null;
     this.lastValPpl = null;
+    this.validationSignature = null;
+    this.documentCounts = { total: 0, train: 0, validation: 0 };
+    this.trainingDataSnapshot = null;
     this.valFraction = 0.1;
     // document-boundary handling (Phase B/C): streamFormat 1 = legacy
     // <doc>-prefixed concatenation; 2 = structured records with headers
@@ -576,14 +619,15 @@ export class DeviceTrainer {
    */
   async initDocs(docs, cfg, lr = 3e-4, { valFraction = 0.1, tokenizerType = "legacy", streamFormat = 1 } = {}) {
     this.setLr(lr);
+    const shape = validateModelConfig(cfg);
     const clean = normalizeDocs(docs);
     if (!clean.length) throw new Error("No documents to cast from. Add fuel first.");
     const tokenizer = createTokenizer(tokenizerType);
     const trainTexts = clean.map((d) => d.text);
     // new format-2 brains learn the structural markers as stable pieces
     if (streamFormat === 2) trainTexts.push(STREAM_MARKER_PRIMER);
-    tokenizer.train(trainTexts, cfg.vocabSize);
-    const fullCfg = { ...cfg, vocabSize: tokenizer.vocabSize };
+    tokenizer.train(trainTexts, shape.vocabSize);
+    const fullCfg = { ...shape, vocabSize: tokenizer.vocabSize };
     const model = new EmberNet(fullCfg); // build first; swap only on success
     this._disposeCurrent();
     this.tokenizer = tokenizer;
@@ -598,6 +642,7 @@ export class DeviceTrainer {
     this.scheduleStart = 0;
     this.scheduleUntil = 0;
     this._resetTrainingStats();
+    this.trainingDataSnapshot = null;
     this.valFraction = valFraction;
     this.streamFormat = streamFormat === 2 ? 2 : 1;
     this.setDocs(clean);
@@ -605,11 +650,15 @@ export class DeviceTrainer {
 
   _resetTrainingStats() {
     this.tokensProcessed = 0;
+    this.lossTokensProcessed = 0;
     this.sequencesSampled = 0;
     this.trainSeconds = 0;
     this.passesCompleted = 0;
     this._epochQueue = [];
     this.lastGradNorm = null;
+    this.bestValLoss = null;
+    this.lastRun = null;
+    this.validationSignature = null;
     this.lastValLoss = null;
     this.lastValPpl = null;
   }
@@ -620,7 +669,19 @@ export class DeviceTrainer {
    * only performs the swap, so a bad import can never destroy the
    * working brain.
    */
-  adopt(model, tokenizer, { step = 0, bestLoss = Infinity, baseLr = null, streamFormat = 1 } = {}) {
+  adopt(model, tokenizer, {
+    step = 0,
+    bestLoss = Infinity,
+    baseLr = null,
+    streamFormat = 1,
+    tokensProcessed = 0,
+    lossTokensProcessed = 0,
+    sequencesSampled = 0,
+    trainSeconds = 0,
+    bestValLoss = null,
+    trainingData = null,
+    lastRun = null,
+  } = {}) {
     if (baseLr != null) this.setLr(baseLr);
     this._disposeCurrent();
     this.model = model;
@@ -635,6 +696,26 @@ export class DeviceTrainer {
     this.scheduleStart = this.step;
     this.scheduleUntil = this.step;
     this._resetTrainingStats();
+    this.tokensProcessed = Number.isSafeInteger(tokensProcessed) && tokensProcessed >= 0 ? tokensProcessed : 0;
+    this.lossTokensProcessed = Number.isSafeInteger(lossTokensProcessed) && lossTokensProcessed >= 0 ? lossTokensProcessed : 0;
+    this.sequencesSampled = Number.isSafeInteger(sequencesSampled) && sequencesSampled >= 0 ? sequencesSampled : 0;
+    this.trainSeconds = Number.isFinite(trainSeconds) && trainSeconds >= 0 ? trainSeconds : 0;
+    this.bestValLoss = Number.isFinite(bestValLoss) ? bestValLoss : null;
+    this.lastRun = lastRun && typeof lastRun === "object" ? { ...lastRun } : null;
+    this.documentCounts = { total: 0, train: 0, validation: 0 };
+    this.trainingDataSnapshot = trainingData && typeof trainingData === "object" ? trainingData : null;
+    this.balanceMode = trainingData?.balanceMode === "sqrt" ? "sqrt" : "off";
+    this.docBoundaryMask = trainingData?.docBoundaryMask !== false;
+    this.maskBoundaryLoss = trainingData?.maskBoundaryLoss !== false;
+    this.maskLessonPrompts = trainingData?.maskLessonPrompts === true;
+    this.samplerMode = trainingData?.samplerMode === "epoch" ? "epoch" : "random";
+    this.gradClip = Number.isFinite(trainingData?.gradClip) && trainingData.gradClip >= 0 ? trainingData.gradClip : 1;
+    this.valFraction = Number.isFinite(trainingData?.valFraction) && trainingData.valFraction >= 0 && trainingData.valFraction <= 0.5
+      ? trainingData.valFraction
+      : 0.1;
+    this.validationSignature = typeof trainingData?.validationSignature === "string"
+      ? trainingData.validationSignature
+      : null;
     this.streamFormat = streamFormat === 2 ? 2 : 1;
     this.targetOk = null;
     this.valTokens = null; // caller re-supplies the corpus via refreshDocs
@@ -802,6 +883,7 @@ export class DeviceTrainer {
   setDocs(docs) {
     const clean = normalizeDocs(docs);
     const { train, val } = splitDocs(clean, this.valFraction);
+    this.documentCounts = { total: clean.length, train: train.length, validation: val.length };
     // Phase E balancing: boost minority sources by integer weight copies
     // (the stream builders already honor weight). Factor per source =
     // clamp(round(sqrt(medianChars / sourceChars)), 1, 4) — gentler than
@@ -840,6 +922,37 @@ export class DeviceTrainer {
       this.valTokens = null;
       this.valTargetOk = null;
       this.valSourceTokens = {};
+    }
+    if (clean.length) {
+      const signatureRows = val
+        .map((d) => [d.hash, d.text.length, d.weight, d.kind, d.meta?.threadId || ""])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+      const signatureBody = JSON.stringify({
+        streamFormat: this.streamFormat,
+        docBoundaryMask: this.docBoundaryMask,
+        maskBoundaryLoss: this.maskBoundaryLoss,
+        maskLessonPrompts: this.maskLessonPrompts,
+        rows: signatureRows,
+      });
+      const validationSignature = `${this.streamFormat}-${fnv1a(signatureBody).toString(16).padStart(8, "0")}`;
+      if (this.validationSignature !== validationSignature) this.bestValLoss = null;
+      this.validationSignature = validationSignature;
+      this.trainingDataSnapshot = {
+        trainDocuments: train.length,
+        validationDocuments: val.length,
+        trainStreamTokens: this.tokens.length,
+        validationStreamTokens: this.valTokens?.length || 0,
+        sourceTokens: { ...this.sourceTokens },
+        sourceBoosts: { ...this.sourceBoosts },
+        balanceMode: this.balanceMode,
+        docBoundaryMask: this.docBoundaryMask,
+        maskBoundaryLoss: this.maskBoundaryLoss,
+        maskLessonPrompts: this.maskLessonPrompts,
+        samplerMode: this.samplerMode,
+        gradClip: this.gradClip,
+        valFraction: this.valFraction,
+        validationSignature,
+      };
     }
     if (this.valTokens && this.valTokens.length < (this.cfg?.blockSize || 64) + 1) {
       this.valTokens = null; // too small for even one validation window
@@ -946,15 +1059,21 @@ export class DeviceTrainer {
     const x = starts.map((i) => toks.slice(i, i + block));
     const y = starts.map((i) => toks.slice(i + 1, i + 1 + block));
     let wt = null;
+    let trainableTargets = starts.length * block;
     if (this.maskBoundaryLoss && targetOk) {
       const w = [];
       let anyMasked = false;
+      let targetCount = 0;
       for (const i of starts) {
         const row = targetOk.slice(i + 1, i + 1 + block);
         if (!anyMasked && row.includes(0)) anyMasked = true;
+        targetCount += row.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
         w.push(row);
       }
-      if (anyMasked) wt = tf.tensor2d(w, [starts.length, block], "float32");
+      if (anyMasked) {
+        wt = tf.tensor2d(w, [starts.length, block], "float32");
+        trainableTargets = targetCount;
+      }
     }
     const mt = this.docBoundaryMask ? this._boundaryMask(x) : null;
     return {
@@ -962,6 +1081,7 @@ export class DeviceTrainer {
       yt: tf.tensor2d(y, [starts.length, block], "int32"),
       wt,
       mt,
+      trainableTargets,
     };
   }
 
@@ -1004,7 +1124,7 @@ export class DeviceTrainer {
     if (!this.model) throw new Error("Cast the vessel first.");
     const lr = this._lr();
     const t0 = performance.now();
-    const { xt, yt, wt, mt } = this._batch(batchSize);
+    const { xt, yt, wt, mt, trainableTargets } = this._batch(batchSize);
     let lossT;
     let grads;
     try {
@@ -1067,6 +1187,7 @@ export class DeviceTrainer {
     this.lastTrainTps = (batchSize * this.cfg.blockSize) / (ms / 1000);
     this.lastGradNorm = gradNorm;
     this.tokensProcessed += batchSize * this.cfg.blockSize;
+    this.lossTokensProcessed += trainableTargets;
     this.sequencesSampled += batchSize;
     this.trainSeconds += ms / 1000;
     return {
@@ -1081,6 +1202,7 @@ export class DeviceTrainer {
       grad_norm: gradNorm,
       clipped,
       tokens_processed: this.tokensProcessed,
+      loss_tokens_processed: this.lossTokensProcessed,
       corpus_tokens: this.tokens ? this.tokens.length : 0,
       tokens: this.tokens.length, // legacy field: corpus stream length
     };
@@ -1129,7 +1251,8 @@ export class DeviceTrainer {
     const loss = lossSum / windows;
     this.lastValLoss = loss;
     this.lastValPpl = Math.exp(loss);
-    return { loss, ppl: this.lastValPpl, windows };
+    this.bestValLoss = this.bestValLoss == null ? loss : Math.min(this.bestValLoss, loss);
+    return { loss, ppl: this.lastValPpl, bestLoss: this.bestValLoss, windows };
   }
 
   /** True when every parameter is finite (one fused abs-sum tripwire). */
@@ -1220,6 +1343,7 @@ export class DeviceTrainer {
       ready: this.ready,
       step: this.step,
       best_loss: this.bestLoss === Infinity ? null : this.bestLoss,
+      best_val_loss: this.bestValLoss,
       ema: this.emaLoss,
       n_params: this.model ? this.model.nParams() : 0,
       vocab_size: this.tokenizer.vocabSize,
@@ -1230,9 +1354,14 @@ export class DeviceTrainer {
       tokens: this.tokens ? this.tokens.length : 0,
       corpus_tokens: this.tokens ? this.tokens.length : 0,
       val_tokens: this.valTokens ? this.valTokens.length : 0,
+      documents: this.documentCounts.total,
+      train_documents: this.documentCounts.train,
+      validation_documents: this.documentCounts.validation,
       tokens_processed: this.tokensProcessed,
+      loss_tokens_processed: this.lossTokensProcessed,
       sequences_sampled: this.sequencesSampled,
       train_seconds: this.trainSeconds,
+      last_run: this.lastRun ? { ...this.lastRun } : null,
       val_loss: this.lastValLoss,
       val_ppl: this.lastValPpl,
       grad_norm: this.lastGradNorm,
@@ -1243,6 +1372,7 @@ export class DeviceTrainer {
       doc_boundary_mask: this.docBoundaryMask,
       mask_boundary_loss: this.maskBoundaryLoss,
       source_tokens: { ...this.sourceTokens },
+      training_data: this.trainingDataSnapshot ? { ...this.trainingDataSnapshot } : null,
       balance_mode: this.balanceMode,
       source_boosts: { ...this.sourceBoosts },
       mask_lesson_prompts: this.maskLessonPrompts,
