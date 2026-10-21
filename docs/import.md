@@ -199,7 +199,20 @@ Verified by the Node test suite (`tests/importer.test.mjs`,
 | `truncated.parquet`, `numbers_only.parquet` | refused with a specific reason |
 | `traversal.zip` | 2 safe entries imported, traversal refused |
 | `bomb.zip` | no usable text, honest warning |
-| 40 000-row synthetic JSONL | pause at ~5 000 documents then resume to exactly 40 000 |
+| 40 000-row / 9.2 MB synthetic JSONL | pause at 5 056 documents, resume to exactly 40 000 (`merged: 1` — one record re-read and merged, nothing lost) |
 
 APK builds are produced by the `Build APK` workflow. This document does not
 claim device-level timing, and no 100 GB import has been run.
+
+Measured scope, stated plainly:
+
+- Largest file actually imported through the pipeline: 9.2 MB / 40 000
+  records (JSONL), plus the fixture set above. Peak memory was not profiled,
+  so the streaming design is a design property here, not a measurement.
+- The vendored Parquet reader and the xz/bzip2 decoders run under Node in the
+  tests. They are bundled into the APK, but they have not been exercised
+  inside an Android WebView on a physical device.
+- Format detection, extraction, dedupe and resume were tested through the
+  native bridge with the staged-file protocol mocked in Node, not with a real
+  SAF picker.
+- No URL download support is included: import is local-file only.
