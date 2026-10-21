@@ -655,6 +655,34 @@ data class ImportProgress(
         }
 }
 
+/**
+ * An import recorded in the durable manifest. Kept so a paused (or
+ * interrupted) import can be found again after the app restarts.
+ */
+data class PendingImport(
+    val token: String,
+    val name: String,
+    val status: String,
+    val format: String,
+    val documents: Int,
+    val updatedAt: Long,
+    val resumable: Boolean,
+) {
+    val canResume: Boolean get() = resumable && status in setOf("paused", "partial", "failed")
+
+    companion object {
+        fun fromJson(json: JSONObject) = PendingImport(
+            token = json.stringOr("id"),
+            name = json.stringOr("name", "file"),
+            status = json.stringOr("status", "unknown"),
+            format = json.stringOr("dataFormat"),
+            documents = json.objectOrNull("counts")?.intOr("documents") ?: json.intOr("documents"),
+            updatedAt = json.longOr("updatedAt"),
+            resumable = json.boolOr("resumable", true),
+        )
+    }
+}
+
 /** The result of running an import (not of inspecting a file). */
 data class DatasetImportResult(
     val outcome: String,

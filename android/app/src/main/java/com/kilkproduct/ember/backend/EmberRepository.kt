@@ -108,6 +108,7 @@ data class UiState(
     val importPaused: Boolean = false,
     val importPausing: Boolean = false,
     val importResult: DatasetImportResult? = null,
+    val pendingImports: List<PendingImport> = emptyList(),
     val pendingExport: PendingExport? = null,
     val exportBusy: Boolean = false,
     val exportError: String? = null,
@@ -240,6 +241,7 @@ class EmberRepository private constructor(
                 // empty list next to a non-zero corpus count.
                 loadCorpus(reset = true)
                 _state.update { it.copy(initializing = false, initialized = true, backendError = null) }
+                refreshPendingImports()
                 _state.value.status.autosave?.let { autosave ->
                     if (autosave.error == null) {
                         addNotice(
@@ -1076,6 +1078,65 @@ class EmberRepository private constructor(
         }
     }
 
+    /**
+     * Refresh the list of imports recorded in the manifest.
+     *
+     * A paused or interrupted import keeps its staged file and its plan, so
+     * it can be resumed even after Ember was closed.
+     */
+    fun refreshPendingImports() {
+        scope.launch {
+            try {
+                val json = engine.call("file.imports", JSONObject(), timeoutMs = 30_000)
+                val rows = json.arrayOrEmpty("imports").objects().map(PendingImport::fromJson)
+                _state.update { it.copy(pendingImports = rows.filter { row -> row.canResume }) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // The imports list is a convenience; a failure is not an error.
+            }
+        }
+    }
+
+    /** Continue a paused import found in the manifest. */
+    fun resumePendingImport(row: PendingImport) {
+        if (gate.isBusy(Ops.IMPORT_COMMIT)) return
+        _state.update {
+            it.copy(
+                importPreview = FilePreview(
+                    token = row.token,
+                    kind = "dataset",
+                    name = row.name,
+                    mime = "",
+                    bytes = 0,
+                    fields = emptyList(),
+                    documents = emptyList(),
+                    warnings = emptyList(),
+                    message = "",
+                    format = row.format,
+                    resumable = row.resumable,
+                ),
+                importError = null,
+                importPaused = true,
+                importResult = null,
+            )
+        }
+        runDatasetImport(resume = true)
+    }
+
+    /** Forget a paused import and delete its staged copy. */
+    fun discardPendingImport(row: PendingImport) {
+        scope.launch {
+            try {
+                engine.call("file.discard", JSONObject().put("token", row.token), timeoutMs = 30_000)
+            } catch (_: Throwable) {
+                // The staged copy may already be gone.
+            }
+            engine.releaseImport(row.token)
+            refreshPendingImports()
+        }
+    }
+
     /** Release a staged file once its import reached a final state. */
     private fun finishImport(token: String) {
         currentImportToken = null
@@ -1092,6 +1153,7 @@ class EmberRepository private constructor(
         }
         refreshStatus()
         loadCorpus(reset = true)
+        refreshPendingImports()
     }
 
     private fun importBrainFile(preview: FilePreview) {

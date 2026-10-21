@@ -464,9 +464,10 @@ test("file.inspect detects a real dataset and file.commit stores its documents",
     assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
 
     const imports = await call("file.imports");
-    assert.equal(imports.imports.length, 1);
-    assert.equal(imports.imports[0].status, "completed");
-    assert.equal(imports.imports[0].dataFormat, "csv");
+    const row = imports.imports.find((item) => item.id === "tok-csv");
+    assert.ok(row, "the finished import appears in the manifest list");
+    assert.equal(row.status, "completed");
+    assert.equal(row.dataFormat, "csv");
   } finally {
     restore();
   }
@@ -569,6 +570,43 @@ test("an unreadable staged file fails with an actionable message", async () => {
       () => call("file.inspect", { token: "missing-file", name: "gone.csv" }),
       /no longer available/i
     );
+  } finally {
+    restore();
+  }
+});
+
+test("a paused import can be resumed after the runtime forgets its job", async () => {
+  const rows = Array.from({ length: 2500 }, (_, i) =>
+    JSON.stringify({ text: `restart record ${i} with enough prose to look like a real dataset row` })
+  );
+  const body = new TextEncoder().encode(rows.join("\n"));
+  const restore = serveFixtures({ "tok-restart": body });
+  try {
+    await call("corpus.clear");
+    await call("file.inspect", { token: "tok-restart", name: "restart.jsonl" });
+    const cursor = eventCursor();
+    const running = call("file.commit", { token: "tok-restart" });
+    await waitForEvent("import.progress", cursor, 30_000);
+    await call("file.pause", { token: "tok-restart" });
+    const paused = await running;
+    assert.equal(paused.outcome, "paused");
+
+    const imports = await call("file.imports");
+    const pausedRow = imports.imports.find((item) => item.id === "tok-restart");
+    assert.ok(pausedRow, "the paused import appears in the manifest list");
+    assert.equal(pausedRow.status, "paused");
+    assert.ok(pausedRow.resumeRecords > 0);
+
+    // Simulate a process restart: the bridge forgets every in-memory job and
+    // preview, exactly as it would after Android kills the WebView. The
+    // manifest and the staged file are all that is left.
+    backend.__testing.state.importJobs.clear();
+    backend.__testing.state.pendingFiles.clear();
+    const resumed = await call("file.resume", { token: "tok-restart" });
+    assert.equal(resumed.outcome, "completed");
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 2500);
+    const after = await call("file.imports");
+    assert.equal(after.imports.find((item) => item.id === "tok-restart").status, "completed");
   } finally {
     restore();
   }

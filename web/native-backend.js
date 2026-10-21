@@ -1209,6 +1209,13 @@ async function discardDataset(params = {}) {
   state.importJobs.delete(token);
   state.pendingFiles.delete(token);
   state.importCancel.delete(token);
+  // Discarding is final for this file: drop its manifest so it is not offered
+  // for resume again. Documents already committed stay in the corpus.
+  try {
+    await state.store?.deleteManifest(token);
+  } catch {
+    /* the manifest may not exist */
+  }
   return { discarded: true };
 }
 
