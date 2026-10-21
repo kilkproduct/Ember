@@ -149,6 +149,23 @@ Free space is checked before staging. Nothing is written to the corpus until
 the commit batches run, and each batch is a single transaction, so a crash
 leaves a corpus that matches the manifest's counts.
 
+## Background behaviour
+
+The import runs inside Ember's JavaScript runtime, on the same app-scoped
+WebView the trainer uses. There is no foreground service for it, so Android
+is free to throttle or kill the process when Ember is in the background. In
+practice:
+
+- a short import finishes while Ember stays in the foreground;
+- if the process is killed mid-import, the documents committed so far stay,
+  the manifest says `running`, and the staged file can be resumed from the
+  Fuel screen (the checkpoint is only advanced when a batch is committed);
+- nothing is promised about Android's background execution limits. Ember does
+  not request an exemption it does not need.
+
+No permission is required to import a local file: the Storage Access
+Framework grants access to the one document the user picked.
+
 ## Training preparation
 
 Imports reuse the existing tokenizer, vocabulary and corpus pipeline. The
