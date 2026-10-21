@@ -118,6 +118,9 @@ does its job":
 * **Tabs keep their place.** Each tab's scroll position and local fields live
   in a `SaveableStateHolder` keyed by tab, and switching tabs is a 140 ms
   crossfade. Rotation restores the selected tab and any open sheet.
+* **Training is stoppable from anywhere.** While a run is active, the header
+  progress bar carries a **Douse** button, so the user does not have to find
+  the Fire tab to stop a long run. Foraging keeps its stop control on Fuel.
 * **One message at a time.** Notices replace the visible snackbar instead of
   queueing behind it; warnings and errors get an **Events** action that opens
   the full history, and errors stay on screen longer. The header error banner

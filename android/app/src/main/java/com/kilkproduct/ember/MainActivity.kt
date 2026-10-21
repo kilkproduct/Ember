@@ -104,6 +104,7 @@ import com.kilkproduct.ember.ui.sheets.NoticesSheet
 import com.kilkproduct.ember.ui.sheets.SettingsSheet
 import com.kilkproduct.ember.ui.sheets.StatusSheet
 import com.kilkproduct.ember.ui.sheets.TeacherDraftSheet
+import com.kilkproduct.ember.ui.theme.EmberError
 import com.kilkproduct.ember.ui.theme.EmberOrange
 import com.kilkproduct.ember.ui.theme.EmberSuccess
 import com.kilkproduct.ember.ui.theme.EmberTeal
@@ -300,6 +301,7 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                     onOpenNotices = { sheetName = SheetId.NOTICES.name },
                     onOpenSettings = { sheetName = SheetId.SETTINGS.name },
                     onRetryEngine = { vm.repo.retryInitialization() },
+                    onStopTraining = { vm.repo.stopTraining() },
                 )
                 val booting = !ui.initialized && ui.backendError == null
                 val tabState = rememberSaveableStateHolder()
@@ -551,6 +553,7 @@ private fun EmberHeader(
     onOpenNotices: () -> Unit,
     onOpenSettings: () -> Unit,
     onRetryEngine: () -> Unit,
+    onStopTraining: () -> Unit,
 ) {
     val model = ui.status.model
     val training = ui.status.training
@@ -652,16 +655,39 @@ private fun EmberHeader(
                 val until = ui.progress?.until ?: training.until
                 val step = ui.progress?.step ?: model.step
                 val fraction = if (until > start) ((step - start).toFloat() / (until - start)).coerceIn(0f, 1f) else 0f
-                Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 2.dp)) {
+                // Training can run for minutes while the user is on another
+                // tab, so the stop control follows the progress bar.
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 8.dp, top = 2.dp, bottom = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
                     androidx.compose.material3.LinearProgressIndicator(
                         progress = { fraction },
                         modifier = Modifier
-                            .fillMaxWidth()
+                            .weight(1f)
                             .height(3.dp)
                             .clip(CircleShape),
                         color = EmberOrange,
                         trackColor = MaterialTheme.colorScheme.surfaceVariant,
                     )
+                    Spacer(Modifier.width(10.dp))
+                    TextButton(
+                        onClick = onStopTraining,
+                        enabled = !training.stopRequested,
+                        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text(
+                            text = if (training.stopRequested) "Stopping…" else "Douse",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (training.stopRequested) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                EmberError
+                            },
+                        )
+                    }
                 }
             }
         }

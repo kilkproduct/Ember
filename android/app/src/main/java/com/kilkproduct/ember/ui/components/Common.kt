@@ -329,7 +329,8 @@ fun NumberStepper(
                 }
             },
         )
-        val hint = helper ?: "$min–$max"
+        // 0.0–1.0 reads like code; 0–1 reads like a form.
+        val hint = helper ?: "${formatNumber(min, decimals)}–${formatNumber(max, decimals)}"
         Text(
             text = hint,
             style = MaterialTheme.typography.labelSmall,
