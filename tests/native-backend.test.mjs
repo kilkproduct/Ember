@@ -611,3 +611,40 @@ test("a paused import can be resumed after the runtime forgets its job", async (
     restore();
   }
 });
+
+test("a staged file served with byte ranges imports without buffering it", async () => {
+  // This is the WebView path in the APK: EmberEngine answers Range requests
+  // with 206, so the importer seeks (Parquet footers, archive directories)
+  // instead of pulling the whole file into JavaScript memory.
+  const body = fixtureBody("articles_snappy.parquet");
+  const original = globalThis.fetch;
+  let rangedReads = 0;
+  globalThis.fetch = async (url, init = {}) => {
+    const header = init?.headers?.Range;
+    if (!header) return new Response(body, { status: 200 });
+    const [startText, endText] = String(header).replace("bytes=", "").split("-");
+    const start = Number(startText);
+    const end = endText ? Number(endText) : body.length - 1;
+    rangedReads += 1;
+    return new Response(body.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${body.length}` },
+    });
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", {
+      token: "tok-range",
+      name: "articles_snappy.parquet",
+      size: body.length,
+    });
+    assert.equal(inspected.format, "parquet");
+    assert.ok(rangedReads > 0, "the importer used range requests");
+    const committed = await call("file.commit", { token: "tok-range" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.ok(rangedReads > 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

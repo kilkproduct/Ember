@@ -898,11 +898,33 @@ function stagedRangeReader(url) {
   };
 }
 
+/**
+ * Ask the runtime how large a staged file is, using a one-byte range.
+ *
+ * The native layer reports `size` when the file is picked; after a restart the
+ * only thing left is the staged URL, and this keeps random access available
+ * without downloading the file first.
+ */
+async function stagedFileSize(url) {
+  try {
+    const response = await fetch(url, { cache: "no-store", headers: { Range: "bytes=0-0" } });
+    if (response.status !== 206) {
+      await response.body?.cancel?.();
+      return null;
+    }
+    const total = /\/\s*(\d+)\s*$/.exec(response.headers.get("content-range") || "");
+    await response.arrayBuffer();
+    return total ? Number(total[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function pendingFileSource(token, hints = {}) {
   const cached = state.pendingFiles.get(token);
   if (cached?.source) return cached.source;
   const url = `/__ember_file__/${encodeURIComponent(token)}`;
-  const size = Number(hints.size) > 0 ? Number(hints.size) : null;
+  const size = Number(hints.size) > 0 ? Number(hints.size) : await stagedFileSize(url);
   const name = hints.name || state.pendingFiles.get(token)?.name || "file";
   if (size) {
     // Preferred path: random access without copying the file into JS memory.
@@ -976,7 +998,7 @@ async function inspectDataset(params = {}) {
   requireStore();
   const token = String(params.token || "");
   if (!token) throw new Error("No file was selected.");
-  const source = await pendingFileSource(token, { name: params.name, mime: params.mime });
+  const source = await pendingFileSource(token, { name: params.name, mime: params.mime, size: params.size });
   if (Number.isFinite(source.size) && source.size > MAX_IMPORT_BYTES) {
     throw new Error(
       `That file is ${(source.size / 1048576).toFixed(0)} MB; this build can stage up to ${MAX_IMPORT_BYTES / 1048576} MB per import.`,
