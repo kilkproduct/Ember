@@ -61,7 +61,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         web = new WebView(this);
         setContentView(web);
         ensureNotificationChannel();
@@ -243,6 +242,45 @@ public class MainActivity extends Activity {
                             emitSaveResult("error");
                         }
                     });
+        }
+
+        @JavascriptInterface
+        public void setKeepAwake(boolean enabled) {
+            runOnUiThread(() -> {
+                if (web == null || isFinishing()) return;
+                if (enabled) {
+                    getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                } else {
+                    getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                }
+            });
+        }
+
+        @JavascriptInterface
+        public boolean startBackgroundWork(String label) {
+            Intent intent = new Intent(MainActivity.this, EmberWorkService.class)
+                    .setAction(EmberWorkService.ACTION_START)
+                    .putExtra(EmberWorkService.EXTRA_LABEL, label == null ? "Working" : label);
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(intent);
+                } else {
+                    startService(intent);
+                }
+                return true;
+            } catch (RuntimeException e) {
+                // Background-start restrictions or a missing wake-lock
+                // capability must not make the web task itself fail.
+                return false;
+            }
+        }
+
+        @JavascriptInterface
+        public void stopBackgroundWork() {
+            try {
+                stopService(new Intent(MainActivity.this, EmberWorkService.class));
+            } catch (RuntimeException ignored) {
+            }
         }
 
         @JavascriptInterface

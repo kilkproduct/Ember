@@ -203,6 +203,74 @@ function checkStreamFormat(raw) {
   );
 }
 
+function nonnegativeCount(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function checkTrainingData(raw) {
+  const d = raw?.training_state?.training_data;
+  if (!d || typeof d !== "object") return null;
+  const counts = (obj) => {
+    if (!obj || typeof obj !== "object" || Array.isArray(obj)) return {};
+    return Object.fromEntries(
+      Object.entries(obj)
+        .filter(([key, value]) => typeof key === "string" && Number.isSafeInteger(value) && value >= 0)
+        .slice(0, 200)
+    );
+  };
+  return {
+    trainDocuments: nonnegativeCount(d.train_documents),
+    validationDocuments: nonnegativeCount(d.validation_documents),
+    trainStreamTokens: nonnegativeCount(d.train_stream_tokens),
+    validationStreamTokens: nonnegativeCount(d.validation_stream_tokens),
+    sourceTokens: counts(d.source_tokens),
+    sourceBoosts: counts(d.source_boosts),
+    balanceMode: d.balance_mode === "sqrt" ? "sqrt" : "off",
+    docBoundaryMask: d.doc_boundary_mask !== false,
+    maskBoundaryLoss: d.mask_boundary_loss !== false,
+    maskLessonPrompts: d.mask_lesson_prompts === true,
+    samplerMode: d.sampler === "epoch" ? "epoch" : "random",
+    gradClip: Number.isFinite(d.grad_clip) && d.grad_clip >= 0 && d.grad_clip <= 1e6 ? d.grad_clip : 1,
+    valFraction: Number.isFinite(d.val_fraction) && d.val_fraction >= 0 && d.val_fraction <= 0.5 ? d.val_fraction : 0.1,
+    validationSignature: typeof d.validation_signature === "string" && /^[12]-[a-f0-9]{8}$/i.test(d.validation_signature)
+      ? d.validation_signature
+      : null,
+  };
+}
+
+function checkLastRun(raw) {
+  const r = raw?.training_state?.last_run;
+  if (!r || typeof r !== "object") return null;
+  const startedAt = typeof r.started_at === "string" && Number.isFinite(Date.parse(r.started_at))
+    ? new Date(r.started_at).toISOString()
+    : null;
+  if (!startedAt) return null;
+  const sampler = r.sampler === "epoch" ? "epoch" : "random";
+  const boundaries = r.boundaries === "legacy-packed" ? "legacy-packed" : "respect";
+  const balanceMode = r.balance_mode === "sqrt" ? "sqrt" : "off";
+  const lessonLoss = r.lesson_loss === "response" ? "response" : "prompt+response";
+  const outcome = ["running", "completed", "doused", "failed"].includes(r.outcome) ? r.outcome : "completed";
+  const endedAt = typeof r.ended_at === "string" && Number.isFinite(Date.parse(r.ended_at))
+    ? new Date(r.ended_at).toISOString()
+    : null;
+  return {
+    startedAt,
+    endedAt,
+    startStep: nonnegativeCount(r.start_step),
+    requestedSteps: Math.max(1, Math.min(5000, nonnegativeCount(r.requested_steps) || 1)),
+    completedSteps: nonnegativeCount(r.completed_steps),
+    batchSize: Math.max(1, Math.min(128, nonnegativeCount(r.batch_size) || 1)),
+    baseLr: Number.isFinite(r.base_lr) && r.base_lr > 0 && r.base_lr <= 0.1 ? r.base_lr : null,
+    gradientClip: Number.isFinite(r.gradient_clip) && r.gradient_clip >= 0 && r.gradient_clip <= 1e6 ? r.gradient_clip : 0,
+    sampler,
+    boundaries,
+    balanceMode,
+    lessonLoss,
+    validationEvery: nonnegativeCount(r.validation_every),
+    outcome,
+  };
+}
+
 /**
  * Validate a parsed brain file (v1, v2 or v3) and normalize it to:
  * { version, name, cfg, vocab, weights, step, bestLoss, baseLr,
@@ -276,6 +344,17 @@ export function validateBrain(raw) {
         raw.training_state.base_lr <= 0.1
           ? raw.training_state.base_lr
           : null,
+      tokensProcessed: nonnegativeCount(raw.training_state?.tokens_processed),
+      lossTokensProcessed: nonnegativeCount(raw.training_state?.loss_tokens_processed),
+      sequencesSampled: nonnegativeCount(raw.training_state?.sequences_sampled),
+      trainSeconds: Number.isFinite(raw.training_state?.train_seconds) && raw.training_state.train_seconds >= 0
+        ? raw.training_state.train_seconds
+        : 0,
+      bestValLoss: Number.isFinite(raw.training_state?.best_val_loss) && raw.training_state.best_val_loss >= 0
+        ? raw.training_state.best_val_loss
+        : null,
+      lastRun: checkLastRun(raw),
+      trainingData: checkTrainingData(raw),
       streamFormat: checkStreamFormat(raw),
       corpus: checkCorpus(raw.corpus),
     };
@@ -314,6 +393,13 @@ export function validateBrain(raw) {
       step: Number(raw.step) || 0,
       bestLoss: Number.isFinite(raw.bestLoss) ? raw.bestLoss : null,
       baseLr: null,
+      tokensProcessed: 0,
+      lossTokensProcessed: 0,
+      sequencesSampled: 0,
+      trainSeconds: 0,
+      bestValLoss: null,
+      lastRun: null,
+      trainingData: null,
       streamFormat: 1, // v1 brains predate stream formats
       corpus: checkCorpus(raw.corpus),
     };
@@ -332,6 +418,15 @@ export async function serializeBrain(trainer, { name = "brain", corpusDocs = nul
   if (!trainer?.model || !trainer?.cfg) throw new Error("Nothing to export. Cast and fire a vessel first.");
   const weights = await trainer.model.getNamedWeights();
   const isBpe = trainer.tokenizer?.type === BPE_TYPE;
+  const savedData = trainer.trainingDataSnapshot || {
+    trainDocuments: trainer.documentCounts?.train,
+    validationDocuments: trainer.documentCounts?.validation,
+    trainStreamTokens: trainer.tokens?.length,
+    validationStreamTokens: trainer.valTokens?.length,
+    sourceTokens: trainer.sourceTokens,
+    sourceBoosts: trainer.sourceBoosts,
+    balanceMode: trainer.balanceMode,
+  };
   const brain = {
     format: BRAIN_FORMAT,
     format_version: isBpe ? BRAIN_VERSION_BPE : BRAIN_VERSION,
@@ -350,11 +445,53 @@ export async function serializeBrain(trainer, { name = "brain", corpusDocs = nul
       blockSize: trainer.cfg.blockSize,
       vocabSize: trainer.tokenizer.vocabSize,
       dropout: trainer.cfg.dropout || 0,
+      ...(trainer.cfg.ffnMult && trainer.cfg.ffnMult !== 4 ? { ffnMult: trainer.cfg.ffnMult } : {}),
     },
     training_state: {
       step: trainer.step,
       best_loss: Number.isFinite(trainer.bestLoss) ? trainer.bestLoss : null,
+      best_val_loss: Number.isFinite(trainer.bestValLoss) ? trainer.bestValLoss : null,
       base_lr: trainer.baseLr,
+      tokens_processed: nonnegativeCount(trainer.tokensProcessed),
+      loss_tokens_processed: nonnegativeCount(trainer.lossTokensProcessed),
+      sequences_sampled: nonnegativeCount(trainer.sequencesSampled),
+      train_seconds: Number.isFinite(trainer.trainSeconds) ? trainer.trainSeconds : 0,
+      last_run: trainer.lastRun ? {
+        started_at: trainer.lastRun.startedAt || null,
+        ended_at: trainer.lastRun.endedAt || null,
+        start_step: nonnegativeCount(trainer.lastRun.startStep),
+        requested_steps: nonnegativeCount(trainer.lastRun.requestedSteps),
+        completed_steps: nonnegativeCount(trainer.lastRun.completedSteps),
+        batch_size: nonnegativeCount(trainer.lastRun.batchSize),
+        base_lr: Number.isFinite(trainer.lastRun.baseLr) ? trainer.lastRun.baseLr : null,
+        gradient_clip: Number.isFinite(trainer.lastRun.gradientClip) ? trainer.lastRun.gradientClip : 0,
+        sampler: trainer.lastRun.sampler === "epoch" ? "epoch" : "random",
+        boundaries: trainer.lastRun.boundaries === "legacy-packed" ? "legacy-packed" : "respect",
+        balance_mode: trainer.lastRun.balanceMode === "sqrt" ? "sqrt" : "off",
+        lesson_loss: trainer.lastRun.lessonLoss === "response" ? "response" : "prompt+response",
+        validation_every: nonnegativeCount(trainer.lastRun.validationEvery),
+        outcome: ["running", "completed", "doused", "failed"].includes(trainer.lastRun.outcome)
+          ? trainer.lastRun.outcome
+          : "completed",
+      } : null,
+      training_data: {
+        train_documents: nonnegativeCount(savedData.trainDocuments),
+        validation_documents: nonnegativeCount(savedData.validationDocuments),
+        train_stream_tokens: nonnegativeCount(savedData.trainStreamTokens),
+        validation_stream_tokens: nonnegativeCount(savedData.validationStreamTokens),
+        source_tokens: { ...(savedData.sourceTokens || {}) },
+        source_boosts: { ...(savedData.sourceBoosts || {}) },
+        balance_mode: savedData.balanceMode === "sqrt" ? "sqrt" : "off",
+        doc_boundary_mask: savedData.docBoundaryMask !== false,
+        mask_boundary_loss: savedData.maskBoundaryLoss !== false,
+        mask_lesson_prompts: savedData.maskLessonPrompts === true,
+        sampler: savedData.samplerMode === "epoch" ? "epoch" : "random",
+        grad_clip: Number.isFinite(savedData.gradClip) && savedData.gradClip >= 0 ? savedData.gradClip : 1,
+        val_fraction: Number.isFinite(savedData.valFraction) && savedData.valFraction >= 0 && savedData.valFraction <= 0.5
+          ? savedData.valFraction
+          : 0.1,
+        validation_signature: typeof savedData.validationSignature === "string" ? savedData.validationSignature : null,
+      },
       // additive: old readers ignore it; absent on old brains = format 1
       stream_format: trainer.streamFormat || 1,
     },

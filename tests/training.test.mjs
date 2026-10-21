@@ -96,8 +96,10 @@ test("counters report tokens actually processed, not corpus size", async () => {
   assert.equal(st.step, 5);
   assert.equal(st.tokens_processed, 5 * 3 * CFG.blockSize);
   assert.equal(st.sequences_sampled, 15);
+  assert.ok(st.loss_tokens_processed > 0 && st.loss_tokens_processed <= st.tokens_processed);
   assert.ok(st.train_seconds > 0);
   assert.ok(st.corpus_tokens > 0 && st.corpus_tokens !== st.tokens_processed);
+  assert.ok(st.train_documents > 0);
   assert.equal(st.val_tokens, 0); // valFraction 0 in this test
 });
 
@@ -150,9 +152,11 @@ test("validate() is independent: weights and step are untouched, result is stabl
   const v2 = await trainer.validate();
   assert.ok(v1 && Number.isFinite(v1.loss) && v1.ppl > 1);
   assert.equal(v1.loss, v2.loss, "fixed windows + eval mode => identical validation loss");
+  assert.equal(v1.bestLoss, v1.loss);
+  assert.equal(trainer.status().val_loss, v1.loss);
+  assert.equal(trainer.status().best_val_loss, v1.loss);
   assert.equal(trainer.step, stepBefore);
   assert.deepEqual(await wteCopy(trainer), wteBefore, "validation must not change weights");
-  assert.equal(trainer.status().val_loss, v1.loss);
 });
 
 test("epoch sampler serves every non-overlapping window exactly once per pass", async () => {

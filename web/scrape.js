@@ -12,7 +12,17 @@ const STOP = new Set(`a an the of to in on for and or is are was were be been be
   this that those these it its as at by from with without into about over after
   before between than then so if but not no yes you we they he she i my your our
   their what which who how when where why can could should would will just also
-  more most some any all each other into than too very`.split(/\s+/));
+  more most some any all each other into than too very from wikipedia commons
+  category reference references external links see also retrieved archived source
+  sources edit page pages article articles post posts comment comments
+  subreddit reddit stack exchange question answer answers updated overview intro
+  introduction content information data examples example based using used use
+  including include known often many several called related different common
+  home login logout register menu navigation search skip cookie cookies consent
+  privacy terms advertisement advertisements sponsored share toolbar sidebar
+  system systems people person world made make makes new first one two three
+  also may can could would should must might much many time years year part parts
+  work works called commonly used known generally`.split(/\s+/));
 
 export const WIKI_FAMILY = [
   { id: "simple", host: "simple.wikipedia.org", label: "Simple Wikipedia" },
@@ -44,45 +54,210 @@ function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-function keywords(text, n = 6) {
-  const counts = new Map();
-  for (const raw of (text || "").toLowerCase().match(/[a-z][a-z'-]{3,}/g) || []) {
-    if (STOP.has(raw)) continue;
-    counts.set(raw, (counts.get(raw) || 0) + 1);
-  }
-  return [...counts.entries()]
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, n)
-    .map(([w]) => w);
-}
+const BLOCK_TAGS = new Set([
+  "address", "article", "blockquote", "br", "dd", "div", "dl", "dt", "figcaption",
+  "figure", "h1", "h2", "h3", "h4", "h5", "h6", "hr", "li", "main", "ol", "p",
+  "pre", "section", "table", "td", "th", "tr", "ul",
+]);
+const REMOVE_TAGS = new Set([
+  "head", "script", "style", "noscript", "template", "svg", "canvas", "iframe", "object", "embed",
+  "nav", "header", "footer", "aside", "button", "input", "textarea", "select", "option",
+  "form", "dialog", "menu",
+]);
+const UI_CLASS = /cookie|consent|site[-_ ]?(?:nav|header|footer)|sidebar|share[-_ ]?(?:bar|toolbar)|social[-_ ]?share|advert(?:isement)?|promo[-_ ]?banner|navigation|menu|toolbar|breadcrumb|pagination|popup|modal|\bads?\b/i;
 
-export function stripHtml(s) {
-  const noBlocks = String(s || "")
-    // script/style/noscript CONTENTS are not prose — drop them wholesale
-    // (previously only the tags went, leaving CSS/JS as "training text")
-    .replace(/<(script|style|noscript)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/(p|div|li|h[1-6]|tr|blockquote)>/gi, "\n\n")
-    .replace(/<[^>]+>/g, " ");
-  return decodeEntities(noBlocks)
+function normalizedScrapedText(value) {
+  return String(value || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u200b-\u200f\u202a-\u202e\ufeff]/g, "")
     .replace(/\[deleted\]|\[removed\]/gi, "")
     .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .replace(/[ \t]{2,}/g, " ")
     .trim();
 }
 
-function slugSub(s) {
-  return String(s || "")
+/**
+ * Extract readable prose, not page chrome. API sources already return
+ * article/body fields; some of those fields still contain HTML. When a
+ * browser DOM parser is available, remove hidden/navigation/form/share
+ * controls and walk only the remaining text nodes. The conservative
+ * fallback handles the same high-risk tags for tests and older runtimes.
+ */
+export function stripHtml(value) {
+  const input = String(value || "");
+  const Parser = globalThis.DOMParser;
+  if (Parser && /<\/?[a-z][\s/>]/i.test(input)) {
+    try {
+      const parsed = new Parser().parseFromString(input, "text/html");
+      const root = parsed.body || parsed.documentElement;
+      const parts = [];
+      const walk = (node) => {
+        if (node.nodeType === 3) {
+          parts.push(node.nodeValue || "");
+          return;
+        }
+        if (node.nodeType !== 1) return;
+        const tag = node.tagName.toLowerCase();
+        const role = (node.getAttribute("role") || "").toLowerCase();
+        const className = typeof node.className === "string" ? node.className : "";
+        const id = node.id || "";
+        const style = node.getAttribute("style") || "";
+        if (
+          REMOVE_TAGS.has(tag) || node.hasAttribute("hidden") || node.hasAttribute("inert") ||
+          node.getAttribute("aria-hidden") === "true" ||
+          /(?:display\s*:\s*none|visibility\s*:\s*hidden)/i.test(style) ||
+          ["navigation", "search", "banner", "contentinfo", "complementary"].includes(role) ||
+          UI_CLASS.test(`${className} ${id}`)
+        ) return;
+        if (BLOCK_TAGS.has(tag)) parts.push("\n");
+        for (const child of node.childNodes) walk(child);
+        if (BLOCK_TAGS.has(tag)) parts.push("\n");
+      };
+      walk(root);
+      return normalizedScrapedText(parts.join(""));
+    } catch {
+      // Malformed or unusually large HTML: use the non-DOM path below.
+    }
+  }
+
+  // Decode first so entity-encoded script/nav markup is not left behind;
+  // remove it again after decoding to cover double-encoded API responses.
+  let text = decodeEntities(input)
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(head|script|style|noscript|template|svg|canvas|iframe|object|embed|nav|header|footer|aside|button|textarea|select|option|form|dialog|menu)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<\s*(br|hr)\b[^>]*>/gi, "\n")
+    .replace(/<\s*\/(p|div|li|h[1-6]|tr|blockquote|article|section|pre)\s*>/gi, "\n\n")
+    .replace(/<\s*\/?\s*[^>]+>/g, " ");
+  text = decodeEntities(text)
+    .replace(/<(head|script|style|noscript|template|svg|canvas|iframe|object|embed|nav|header|footer|aside|button|textarea|select|option|form|dialog|menu)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, " ")
+    .replace(/<\/?(?:head|script|style|noscript|template|svg|canvas|iframe|object|embed|nav|header|footer|aside|button|textarea|select|option|form|dialog|menu)\b[^>]*>/gi, " ");
+  return normalizedScrapedText(text);
+}
+
+function cleanTopic(label) {
+  return String(label || "")
+    .replace(/\s*[-–—|]\s*(?:wikipedia|reddit|stack exchange|hacker news|open library)\s*$/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/^[\s:|–—-]+|[\s:|–—-]+$/g, "")
+    .trim()
+    .slice(0, 80);
+}
+
+/**
+ * Suggest useful follow-on topics from document titles and repeated
+ * content phrases. This intentionally prefers real multiword phrases
+ * over treating every frequent token as a new seed.
+ */
+export function extractRelatedTopics(title, text, limit = 6) {
+  const candidates = [];
+  const titleTopic = cleanTopic(title);
+  if (titleTopic && titleTopic.length >= 3 && /[\p{L}\p{N}]/u.test(titleTopic)) {
+    candidates.push(titleTopic);
+  }
+  const tokens = String(text || "")
+    .slice(0, 12000)
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "")
-    .slice(0, 40);
+    .match(/[\p{L}\p{N}][\p{L}\p{N}'’_-]*/gu) || [];
+  const singles = new Map();
+  const phrases = new Map();
+  for (let i = 0; i < tokens.length; i++) {
+    const word = tokens[i].replace(/^[-_]+|[-_]+$/g, "");
+    if (word.length >= 4 && !STOP.has(word) && !/^\d+$/.test(word)) {
+      singles.set(word, (singles.get(word) || 0) + 1);
+    }
+    if (i + 1 < tokens.length) {
+      const next = tokens[i + 1].replace(/^[-_]+|[-_]+$/g, "");
+      if (word.length >= 3 && next.length >= 3 && !STOP.has(word) && !STOP.has(next)) {
+        const phrase = `${word} ${next}`;
+        phrases.set(phrase, (phrases.get(phrase) || 0) + 1);
+      }
+    }
+  }
+  const ranked = (map, minimum) => [...map.entries()]
+    .filter(([, count]) => count >= minimum)
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([phrase]) => phrase);
+  candidates.push(...ranked(phrases, 2), ...ranked(singles, 3));
+  const out = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    const topic = cleanTopic(candidate);
+    const key = topic.toLocaleLowerCase();
+    if (!topic || seen.has(key) || STOP.has(key) || topic.length > 70) continue;
+    seen.add(key);
+    out.push(topic);
+    if (out.length >= Math.max(1, limit)) break;
+  }
+  return out;
+}
+
+/** Search prefixes only; every returned subreddit name comes from the API. */
+export function subredditSearchPrefixes(topic, limit = 3) {
+  const words = String(topic || "").toLowerCase().match(/[a-z0-9_]+/g) || [];
+  const seen = new Set();
+  const out = [];
+  for (const word of words) {
+    if (word.length < 3 || STOP.has(word) || seen.has(word)) continue;
+    seen.add(word);
+    out.push(word.slice(0, 24));
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+export function normalizeSubredditRows(rows) {
+  const seen = new Set();
+  const names = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const raw = typeof row === "string"
+      ? row
+      : row?.name || row?.display_name || row?.display_name_prefixed || row?.subreddit;
+    const name = String(raw || "").trim().replace(/^r\//i, "");
+    if (!/^[a-z0-9_]{2,21}$/i.test(name)) continue;
+    const key = name.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    names.push(name);
+  }
+  return names;
 }
 
 async function getJson(url, label) {
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok) throw new Error(`${label} ${res.status}`);
-  return res.json();
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 25000) : null;
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "application/json" },
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (!res.ok) throw new Error(`${label} ${res.status}`);
+    return await res.json();
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(`${label} request timed out after 25 seconds`);
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+async function getText(url, label) {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timeout = controller ? setTimeout(() => controller.abort(), 25000) : null;
+  try {
+    const res = await fetch(url, {
+      headers: { Accept: "text/plain, text/html;q=0.9, */*;q=0.1" },
+      ...(controller ? { signal: controller.signal } : {}),
+    });
+    if (!res.ok) throw new Error(`${label} ${res.status}`);
+    return await res.text();
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error(`${label} request timed out after 25 seconds`);
+    throw error;
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 async function wikiSearchExtracts(host, query, limit = 8) {
@@ -173,13 +348,26 @@ async function arcticComments(subreddit) {
 async function arcticFindSubs(prefix) {
   const url =
     `https://arctic-shift.photon-reddit.com/api/subreddits/search?subreddit_prefix=${encodeURIComponent(prefix)}` +
-    `&limit=8&sort=desc&sort_type=subscribers`;
+    `&limit=12&sort=desc&sort_type=subscribers`;
   const data = await getJson(url, "arctic-sub");
-  const rows = data.data || data || [];
-  return rows
-    .map((r) => r.name || r.display_name || r.subreddit)
-    .filter(Boolean)
-    .map((s) => String(s).replace(/^r\//, ""));
+  const rows = Array.isArray(data) ? data : data.data || data.subreddits || [];
+  return normalizeSubredditRows(rows);
+}
+
+async function findSubredditsForTopic(topic) {
+  const prefixes = subredditSearchPrefixes(topic);
+  const found = [];
+  for (const prefix of prefixes) {
+    try {
+      // Prefix queries discover existing subreddit names; Ember never
+      // manufactures a slug from a topic and then pretends it is real.
+      found.push(...await arcticFindSubs(prefix));
+      await sleep(120);
+    } catch (error) {
+      if (!found.length) throw error;
+    }
+  }
+  return [...new Map(found.map((name) => [name.toLowerCase(), name])).values()].slice(0, 8);
 }
 
 /**
@@ -300,19 +488,18 @@ async function gutenbergBooks(query) {
 }
 
 async function gutenbergText(book) {
-  const res = await fetch(book.textUrl);
-  if (!res.ok) throw new Error(`ebook ${res.status}`);
-  let raw = await res.text();
+  let raw = await getText(book.textUrl, "ebook");
   const start = raw.search(/\*\*\*\s*START OF (THIS|THE) PROJECT GUTENBERG/i);
   const end = raw.search(/\*\*\*\s*END OF (THIS|THE) PROJECT GUTENBERG/i);
-  if (start >= 0) raw = raw.slice(raw.indexOf("\n", start) + 1);
-  if (end > 0) raw = raw.slice(0, end);
-  raw = raw.replace(/\r/g, "").trim();
-  if (raw.length > 28000) raw = raw.slice(2000, 30000);
+  const bodyStart = start >= 0 ? Math.max(0, raw.indexOf("\n", start) + 1) : 0;
+  const bodyEnd = end >= bodyStart ? end : raw.length;
+  raw = raw.slice(bodyStart, bodyEnd).replace(/\r/g, "").trim();
+  // Keep an honest contiguous excerpt: don't jump past the opening text.
+  if (raw.length > 28000) raw = raw.slice(0, 28000);
   if (raw.length < 400) return null;
   return {
     title: book.title,
-    text: raw,
+    text: stripHtml(raw),
     url: book.textUrl,
     source: "gutenberg",
     kind: "page",
@@ -343,20 +530,24 @@ async function hnStories(query) {
 
 async function openLibrary(query) {
   const data = await getJson(
-    `https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&limit=8`,
+    `https://openlibrary.org/search.json?q=${encodeURIComponent(query)}&limit=8&fields=key,title,first_sentence`,
     "ol"
   );
   const docs = [];
   for (const d of data.docs || []) {
     const title = d.title || "book";
-    const author = (d.author_name || []).slice(0, 3).join(", ");
-    const subj = (d.subject || []).slice(0, 12).join(", ");
-    const text = [title, author, d.first_sentence?.[0] || d.first_sentence, subj]
-      .filter(Boolean)
-      .join("\n");
-    if (text.length < 60) continue;
+    const sentence = Array.isArray(d.first_sentence)
+      ? d.first_sentence.filter((s) => typeof s === "string").join(" ")
+      : typeof d.first_sentence === "string"
+        ? d.first_sentence
+        : "";
+    // Search metadata (author names, subject tags, catalog fields) is not
+    // book prose. Keep only a genuine text excerpt, and skip records with
+    // no first sentence rather than training on catalogue/UI labels.
+    const text = stripHtml(sentence);
+    if (text.length < 80) continue;
     docs.push({
-      title: `Open Library: ${title}`,
+      title,
       text,
       url: d.key ? `https://openlibrary.org${d.key}` : "",
       source: "openlibrary",
@@ -400,7 +591,7 @@ export function createForager({ onLog, onDoc, shouldStop }) {
       const ok = await emit(doc);
       if (ok) {
         gathered += 1;
-        extraTopics.push(...keywords(doc.text, 3));
+        extraTopics.push(...extractRelatedTopics(doc.title, doc.text, 5));
         onLog(`+ [${doc.source}] ${doc.title}  (${doc.text.length} chars)`);
       }
       return ok;
@@ -438,23 +629,22 @@ export function createForager({ onLog, onDoc, shouldStop }) {
 
     async function crawlReddit(topic) {
       if (shouldStop() || gathered >= budget) return;
-      const explicit = String(opts.subreddits || "")
-        .split(/[,;\s]+/)
-        .map((s) => s.replace(/^r\//i, "").trim())
-        .filter(Boolean);
-      const guessed = slugSub(topic);
+      const explicit = normalizeSubredditRows(
+        String(opts.subreddits || "").split(/[,;\s]+/).filter(Boolean)
+      );
       let subs = [...explicit];
-      if (guessed) subs.push(guessed);
       try {
-        onLog(`reddit find subs  “${topic}”`);
-        const found = await arcticFindSubs(guessed || topic.slice(0, 12));
-        await sleep(200);
+        onLog(`reddit search existing subs  “${topic}”`);
+        const found = await findSubredditsForTopic(topic);
         subs.push(...found);
       } catch (e) {
-        onLog(`! sub search: ${e.message}`);
+        onLog(`! subreddit search unavailable: ${e.message}`);
       }
-      subs = [...new Set(subs.map((s) => s.toLowerCase()))].slice(0, 8);
+      subs = [...new Map(subs.map((name) => [name.toLowerCase(), name])).values()].slice(0, 8);
       extraSubs.push(...subs);
+      if (!subs.length && opts.redditArctic) {
+        onLog(`reddit archive  no matching real subreddits found for “${topic}”`);
+      }
 
       if (opts.redditPullpush) {
         onLog(`reddit pullpush  “${topic}”`);

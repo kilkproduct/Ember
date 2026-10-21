@@ -48,6 +48,63 @@ test("a minimal valid v2 brain passes validation", () => {
   assert.equal(norm.cfg.vocabSize, 6);
 });
 
+test("training metrics, data summary, and last firing config round-trip safely", () => {
+  const brain = tinyValidV2();
+  brain.training_state = {
+    step: 14,
+    best_loss: 2.1,
+    best_val_loss: 1.8,
+    base_lr: 0.0003,
+    tokens_processed: 1792,
+    loss_tokens_processed: 1700,
+    sequences_sampled: 28,
+    train_seconds: 12.5,
+    training_data: {
+      train_documents: 8,
+      validation_documents: 2,
+      train_stream_tokens: 340,
+      validation_stream_tokens: 90,
+      source_tokens: { manual: 250, wikipedia: 90 },
+      source_boosts: { manual: 1 },
+      balance_mode: "sqrt",
+      doc_boundary_mask: true,
+      mask_boundary_loss: true,
+      mask_lesson_prompts: true,
+      sampler: "epoch",
+      grad_clip: 0.75,
+      val_fraction: 0.2,
+      validation_signature: "2-a1b2c3d4",
+    },
+    last_run: {
+      started_at: "2026-10-19T10:00:00.000Z",
+      ended_at: "2026-10-19T10:01:00.000Z",
+      start_step: 4,
+      requested_steps: 10,
+      completed_steps: 10,
+      batch_size: 2,
+      base_lr: 0.0003,
+      gradient_clip: 0.75,
+      sampler: "epoch",
+      boundaries: "respect",
+      balance_mode: "sqrt",
+      lesson_loss: "response",
+      validation_every: 5,
+      outcome: "completed",
+    },
+  };
+  const norm = validateBrain(brain);
+  assert.equal(norm.bestValLoss, 1.8);
+  assert.equal(norm.tokensProcessed, 1792);
+  assert.equal(norm.lossTokensProcessed, 1700);
+  assert.equal(norm.trainingData.trainDocuments, 8);
+  assert.equal(norm.trainingData.sourceTokens.wikipedia, 90);
+  assert.equal(norm.trainingData.maskLessonPrompts, true);
+  assert.equal(norm.trainingData.validationSignature, "2-a1b2c3d4");
+  assert.equal(norm.lastRun.completedSteps, 10);
+  assert.equal(norm.lastRun.lessonLoss, "response");
+  assert.equal(norm.lastRun.outcome, "completed");
+});
+
 test("non-brain JSON is rejected", () => {
   assert.throws(() => validateBrain({ hello: "world" }), /Not an Ember brain/);
   assert.throws(() => validateBrain(null), /not a JSON brain object/);

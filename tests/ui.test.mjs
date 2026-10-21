@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { JSDOM } from "jsdom";
 
 const html = readFileSync(new URL("../web/index.html", import.meta.url), "utf8");
+const css = readFileSync(new URL("../web/styles.css", import.meta.url), "utf8");
 const dom = new JSDOM(html, { url: "http://localhost/" });
 globalThis.window = dom.window;
 globalThis.document = dom.window.document;
@@ -15,6 +16,16 @@ const notify = await import("../web/notify.js");
 const help = await import("../web/help.js");
 const brain = await import("../web/brain.js");
 const doc = globalThis.document;
+
+test("all controls are explicit buttons and Android text-selection handles are disabled", () => {
+  help.initHelp();
+  const buttons = [...doc.querySelectorAll("button")];
+  assert.ok(buttons.length > 20);
+  assert.ok(buttons.every((button) => button.type === "button"), "no control should act as an accidental form submit");
+  assert.match(css, /-webkit-user-select:\s*none/);
+  assert.match(css, /user-select:\s*none/);
+  assert.match(css, /touch-action:\s*manipulation/);
+});
 
 test("notifications stack, dedupe, badge, and record history", () => {
   notify.initNotify();

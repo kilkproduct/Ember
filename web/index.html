@@ -59,11 +59,11 @@
   </header>
 
   <nav class="tabs" role="tablist">
-    <button class="tab on" data-tab="fuel" role="tab">Fuel</button>
-    <button class="tab" data-tab="teachers" role="tab">Teachers</button>
-    <button class="tab" data-tab="vessel" role="tab">Vessel</button>
-    <button class="tab" data-tab="fire" role="tab">Fire</button>
-    <button class="tab" data-tab="voice" role="tab">Voice</button>
+    <button type="button" class="tab on" data-tab="fuel" role="tab">Fuel</button>
+    <button type="button" class="tab" data-tab="teachers" role="tab">Teachers</button>
+    <button type="button" class="tab" data-tab="vessel" role="tab">Vessel</button>
+    <button type="button" class="tab" data-tab="fire" role="tab">Fire</button>
+    <button type="button" class="tab" data-tab="voice" role="tab">Voice</button>
   </nav>
 
   <main>
@@ -73,13 +73,19 @@
         <article class="card">
           <header class="card-h">
             <h2>Auto-forager</h2>
-            <p>Your browser walks public APIs on a loop: the whole Wikipedia family, Reddit archives, Stack Exchange, Gutenberg, HN, Open Library. No keys. No content filter. Autopilot keeps discovering related topics and subreddits until you stop it.</p>
+            <p>The forager walks public APIs and keeps article prose rather than page chrome. It discovers related topics and real subreddit names from a public directory search; it does not invent subreddit slugs. Pages are written to this device as they arrive, the session autosaves every 60 seconds, and an interrupted session resumes when Ember is reopened.</p>
           </header>
           <label>Seed topics
-            <input id="seeds" type="text" value="small language models, singapore, cooking, folklore, history" />
+            <input id="seeds" type="text" value="Singapore history, urban gardening, cooking science, public transport, open-source software" />
           </label>
-          <label>Subreddits <span class="opt">(optional — otherwise guessed from topics)</span>
-            <input id="subreddits" type="text" placeholder="MachineLearning, singapore, cooking, AskHistorians, worldnews" />
+          <div class="seed-suggestions" aria-label="Seed topic suggestions">
+            <button type="button" class="chip" data-seed-topic="marine biology">Marine biology</button>
+            <button type="button" class="chip" data-seed-topic="renewable energy">Renewable energy</button>
+            <button type="button" class="chip" data-seed-topic="folklore">Folklore</button>
+            <button type="button" class="chip" data-seed-topic="home cooking">Home cooking</button>
+          </div>
+          <label>Subreddits <span class="opt">(optional — real names are also discovered from API results)</span>
+            <input id="subreddits" type="text" placeholder="e.g. singapore, gardening, askcooks, selfhosted" />
           </label>
           <div class="row">
             <label>Wikipedia
@@ -112,9 +118,10 @@
             <label class="chk"><input id="src-autofire" type="checkbox" /> Auto-fire locally after each forage pass</label>
           </div>
           <div class="actions">
-            <button id="btn-forage" class="btn ember">Start foraging</button>
-            <button id="btn-forage-stop" class="btn ghost" disabled>Stop</button>
+            <button type="button" id="btn-forage" class="btn ember">Start foraging</button>
+            <button type="button" id="btn-forage-stop" class="btn ghost" disabled>Stop</button>
           </div>
+          <p class="hint">The APK can keep a foreground service and CPU wake lock while minimized. Mobile browsers may throttle background JavaScript, and no app can continue its live loop after Android force-stops the process; Ember saves each fetched document and resumes the saved session on the next launch.</p>
           <pre id="forage-log" class="log" aria-live="polite"></pre>
         </article>
 
@@ -130,16 +137,16 @@
             <textarea id="hand-text" rows="8" placeholder="Paste a chapter, a diary, a style you want Ember to steal…"></textarea>
           </label>
           <div class="actions">
-            <button id="btn-add-text" class="btn">Add to corpus</button>
+            <button type="button" id="btn-add-text" class="btn">Add to corpus</button>
             <label class="btn ghost file">
               Load file
               <input id="file-input" type="file" accept=".txt,.md,.json" hidden />
             </label>
-            <button id="btn-alice" class="btn ghost">Load public-domain starter</button>
-            <button id="btn-topic-pack" class="btn ghost">Load topic-training pack</button>
-            <button id="btn-translation-pack" class="btn ghost">Load translation lessons</button>
-            <button id="btn-research-pack" class="btn ghost">Load research/QA lessons</button>
-            <button id="btn-skills-pack" class="btn ghost">Load general-skills lessons</button>
+            <button type="button" id="btn-alice" class="btn ghost">Load public-domain starter</button>
+            <button type="button" id="btn-topic-pack" class="btn ghost">Load topic-training pack</button>
+            <button type="button" id="btn-translation-pack" class="btn ghost">Load translation lessons</button>
+            <button type="button" id="btn-research-pack" class="btn ghost">Load research/QA lessons</button>
+            <button type="button" id="btn-skills-pack" class="btn ghost">Load general-skills lessons</button>
           </div>
         </article>
       </div>
@@ -150,7 +157,7 @@
             <h2>Corpus</h2>
             <p id="corpus-meta">Nothing in the kiln yet.</p>
           </div>
-          <button id="btn-clear" class="btn ghost danger">Clear all</button>
+          <button type="button" id="btn-clear" class="btn ghost danger">Clear all</button>
         </header>
         <p id="corpus-health" class="hint"></p>
         <div class="actions" id="dedup-row" hidden>
@@ -181,9 +188,9 @@
           <label class="chk" style="margin-top:1.6rem"><input id="teach-notify" type="checkbox" checked /> Notify when a teacher is empty</label>
         </div>
         <div class="actions">
-          <button id="btn-teach-run" class="btn ember">Auto-teach (use enabled teachers)</button>
-          <button id="btn-teach-stop" class="btn ghost" disabled>Stop teachers</button>
-          <button id="btn-notify-perm" class="btn ghost">Allow notifications</button>
+          <button type="button" id="btn-teach-run" class="btn ember">Auto-teach (use enabled teachers)</button>
+          <button type="button" id="btn-teach-stop" class="btn ghost" disabled>Stop teachers</button>
+          <button type="button" id="btn-notify-perm" class="btn ghost">Allow notifications</button>
         </div>
         <p class="hint">Keys never leave this device. Many providers block browser CORS — if a teacher errors, that is usually CORS or a missing free key, not Ember training.</p>
         <pre id="teach-log" class="log" aria-live="polite"></pre>
@@ -200,10 +207,10 @@
             <p>A tiny GPT that trains in this browser — phone or laptop. Phone size stays under ~0.3M params so Safari/Chrome won’t melt. Bigger vessels are for desktop only.</p>
           </header>
           <div class="presets">
-            <button class="chip on" data-preset="phone">Phone · default</button>
-            <button class="chip" data-preset="tiny">Tiny</button>
-            <button class="chip" data-preset="small">Small</button>
-            <button class="chip" data-preset="medium">Medium · desktop</button>
+            <button type="button" class="chip on" data-preset="phone">Phone · default</button>
+            <button type="button" class="chip" data-preset="tiny">Tiny</button>
+            <button type="button" class="chip" data-preset="small">Small</button>
+            <button type="button" class="chip" data-preset="medium">Medium · desktop</button>
           </div>
           <div class="sliders">
             <label>Layers <b id="v-layer-n">2</b>
@@ -239,10 +246,11 @@
               <option value="legacy">Legacy word pieces — original</option>
             </select>
           </label>
-          <p class="est" id="param-est">≈ 0.2M parameters</p>
+          <p class="est" id="param-est">Selected configuration estimate appears here.</p>
+          <p id="vessel-actual" class="model-summary" aria-live="polite">No active brain yet. Parameter count is determined by the selected architecture and the tokenizer's actual vocabulary; it does not grow with training steps.</p>
           <p id="vessel-dirty" class="dirty-note" hidden>● Shape changed — Cast to apply. Recasting wipes the current brain, so export it first if you want to keep it.</p>
           <div class="actions">
-            <button id="btn-init" class="btn ember">Cast vessel from corpus</button>
+            <button type="button" id="btn-init" class="btn ember">Cast vessel from corpus</button>
           </div>
           <p class="hint">Weights, tokenizer, and corpus live in IndexedDB on this phone. Add to Home Screen to keep it. Forage first, then cast. Keep the screen awake while firing.</p>
         </article>
@@ -255,11 +263,11 @@
             <label>Name
               <input id="ckpt-name" type="text" placeholder="first-fire" />
             </label>
-            <button id="btn-save" class="btn">Save here</button>
+            <button type="button" id="btn-save" class="btn">Save here</button>
           </div>
           <label class="chk"><input id="export-corpus" type="checkbox" checked /> Include corpus in export</label>
           <div class="actions">
-            <button id="btn-export" class="btn ember">Export brain (.json)</button>
+            <button type="button" id="btn-export" class="btn ember">Export brain (.json)</button>
             <label class="btn ghost file">
               Import brain
               <input id="ckpt-import" type="file" accept="application/json,.json" hidden />
@@ -281,8 +289,8 @@
           </label>
           <label class="chk"><input id="gh-pull-start" type="checkbox" /> Pull on start if SHA changed</label>
           <div class="actions">
-            <button id="btn-gh-pull" class="btn">Pull brain</button>
-            <button id="btn-gh-push" class="btn ghost">Push brain</button>
+            <button type="button" id="btn-gh-pull" class="btn">Pull brain</button>
+            <button type="button" id="btn-gh-push" class="btn ghost">Push brain</button>
           </div>
         </article>
       </div>
@@ -348,8 +356,8 @@
             </label>
           </div>
           <div class="actions">
-            <button id="btn-fire" class="btn ember">Fire</button>
-            <button id="btn-douse" class="btn ghost" disabled>Douse</button>
+            <button type="button" id="btn-fire" class="btn ember">Fire</button>
+            <button type="button" id="btn-douse" class="btn ghost" disabled>Douse</button>
             <button id="btn-fire-reset" class="btn ghost" type="button">Reset defaults</button>
           </div>
         </article>
@@ -432,7 +440,7 @@
             </label>
           </div>
           <div class="actions">
-            <button id="btn-gen" class="btn ember">Generate</button>
+            <button type="button" id="btn-gen" class="btn ember">Generate</button>
             <button id="btn-gen-reset" class="btn ghost" type="button">Reset defaults</button>
           </div>
           <div id="gen-out" class="output"></div>
@@ -452,8 +460,8 @@
             <input id="teach-weight" type="number" min="1" max="30" value="8" />
           </label>
           <div class="actions">
-            <button id="btn-teach" class="btn">Commit lesson</button>
-            <button id="btn-teach-from-gen" class="btn ghost">Use last generation as a draft</button>
+            <button type="button" id="btn-teach" class="btn">Commit lesson</button>
+            <button type="button" id="btn-teach-from-gen" class="btn ghost">Use last generation as a draft</button>
           </div>
         </article>
       </div>

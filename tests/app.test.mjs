@@ -36,6 +36,17 @@ test("app.js imported and wired without throwing", () => {
   assert.match(doc.getElementById("param-est").textContent, /parameters/);
 });
 
+test("forager seed suggestions add real topics without replacing the user's seeds", () => {
+  const input = doc.getElementById("seeds");
+  const before = input.value;
+  doc.querySelector('[data-seed-topic="marine biology"]').click();
+  assert.ok(input.value.includes(before));
+  assert.ok(input.value.includes("marine biology"));
+  doc.querySelector('[data-seed-topic="marine biology"]').click();
+  assert.equal((input.value.match(/marine biology/gi) || []).length, 1);
+  assert.ok(doc.getElementById("vessel-actual"));
+});
+
 test("boot failure is surfaced to the user, not swallowed", () => {
   const pill = doc.getElementById("pill-fire").textContent;
   const notes = [...doc.querySelectorAll("#notify-stack .note.error")];
