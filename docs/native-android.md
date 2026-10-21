@@ -126,16 +126,25 @@ Verified in this workspace:
   parameters, real training with progress and validation, duplicate-run
   rejection and Douse, seeded generation, chunked brain export and lossless
   re-import, invalid-brain rejection, checkpoints, teachers.
-* Full `npm test` run: 109 tests, 108 passed on the recorded run. The one
-  failure was the pre-existing stochastic `translation pathway` training test
-  (`tests/skills.test.mjs`), which also passed on a separate full run with no
-  code change — it trains a randomly initialised tiny model and is flaky on
-  CPU. Nothing in `engine.js`/`tokenizer.js` was modified by this migration.
+* Full `npm test` run: 109 tests, 108 passed. The one failure is the
+  `translation pathway` test (`tests/skills.test.mjs`), a stochastic training
+  check on a randomly initialised tiny model. It also fails on a pristine
+  checkout of the base commit (`na.`), and here the wrong answer differs
+  between runs (`na.`, `duerme.`), so it predates this work; no engine or
+  tokenizer file was modified, and the test was not tuned to hide it.
 * `python3 tests/test_python_side.py` → `python-side tests: OK`.
+* **CI build.** `.github/workflows/apk.yml` compiled the app
+  (`gradle assembleDebug`, AGP 8.5.2 / Gradle 8.7 / Kotlin 2.0.21 / JDK 17) and
+  uploaded `Ember-debug.apk` (~10.5 MB) as the `Ember-debug` artifact. The
+  workflow also unpacks the APK and fails if `assets/www/native-backend.html`,
+  `engine.js`, `vendor/tf.min.js` or `classes.dex` are missing, or if
+  `index.html`/`app.js`/`styles.css` reappear — so the shipped APK is the
+  native app with the engine runtime and no web interface.
+* The first CI run caught a real compile error (`Notification.CATEGORY_ERR`);
+  it is fixed (`CATEGORY_ERROR`) and the rebuild is green.
 
-Not verified here: this environment has no JDK/Android SDK and no access to
-Google Maven or Maven Central, so the APK was **not compiled** and the Compose
-UI was **not run on an emulator or device**. Kotlin sources were syntax-checked
-with a standalone Kotlin compiler (all files parse; no syntax errors), but
-Compose/AndroidX types could not be resolved locally, so API-level compile
-errors remain possible. The CI workflow is the first real build.
+Not verified here: this environment has no Android SDK/emulator and cannot
+download the artifact (Google Maven and the GitHub artifact host are blocked),
+so the APK was **not installed or launched on a device or emulator**. Startup,
+navigation, training, import/export and rotation behaviour still need that
+check. The native screens have compiled but have not been rendered anywhere.
