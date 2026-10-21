@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
@@ -8,24 +9,30 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
+        android:name=".EmberApplication"
         android:label="Ember"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="true"
         android:hardwareAccelerated="true"
-        android:usesCleartextTraffic="true">
+        android:supportsRtl="true">
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|keyboardHidden|screenSize"
-            android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.Ember">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Keeps the process/CPU awake for an explicitly started training or
+             foraging run while the activity is backgrounded. It cannot
+             resurrect JavaScript after Android kills the process. -->
         <service
-            android:name=".EmberWorkService"
+            android:name=".service.EmberWorkService"
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="dataSync" />

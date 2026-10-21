@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ember engine runtime</title>
+  <!--
+    This page is never shown. The native Compose app creates an app-scoped,
+    invisible WebView and loads this document solely to run the unchanged
+    TensorFlow.js training engine and its IndexedDB storage. It deliberately
+    contains no Ember UI, no navigation, and no interactive controls.
+  -->
+</head>
+<body>
+  <script src="vendor/tf.min.js"></script>
+  <script type="module" src="native-backend.js"></script>
+</body>
+</html>

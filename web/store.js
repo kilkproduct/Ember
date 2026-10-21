@@ -163,6 +163,16 @@ export class Store {
     return idb(this.db, "kv", "readonly", (st) => st.get(key));
   }
 
+  /** Read one document without materializing the whole corpus. */
+  getDoc(id) {
+    return idb(this.db, "docs", "readonly", (st) => st.get(id));
+  }
+
+  /** Remove a key/value entry (checkpoints, GitHub settings). */
+  async deleteKv(key) {
+    await idb(this.db, "kv", "readwrite", (st) => st.delete(key));
+  }
+
   async listCkpts() {
     const keys = await idb(this.db, "kv", "readonly", (st) => st.getAllKeys());
     const names = (keys || []).filter((k) => String(k).startsWith("ckpt:"));

@@ -1,6 +1,6 @@
 # Ember — Small Language Foundry
 
-A **small language model you train yourself**, including **on a phone**. Ember is a tiny GPT that runs entirely in the browser (TensorFlow.js / WebGL). You forage public web text, dump it in the kiln, cast a vessel, and fire it by hand. Weights stay in IndexedDB on that device.
+A **small language model you train yourself**, including **on a phone**. Ember is a tiny GPT that runs entirely on your device (TensorFlow.js / WebGL). The Android app is a native Kotlin + Jetpack Compose interface; the unchanged JavaScript engine runs behind it in an invisible runtime WebView. You forage public web text, dump it in the kiln, cast a vessel, and fire it by hand. Weights stay in IndexedDB on that device.
 
 ## What it is
 
@@ -17,14 +17,18 @@ This is not a chat product with a hidden API. The weights are yours. A 1M-parame
 
 ### Android APK (no PC, no website)
 
-The app is a **self-contained APK**. It is not hosted. GitHub only *compiles* it; you install the file on the phone.
+The app is a **self-contained native APK** (Kotlin + Jetpack Compose). It is not hosted. GitHub only *compiles* it; you install the file on the phone.
 
 1. Phone browser, logged into GitHub → this repo → **Actions** → **Build APK** → **Run workflow**.
 2. Wait until the green check appears.
-3. Open that run → **Artifacts** → **Ember** → download the zip → unzip → tap `app-debug.apk`.
+3. Open that run → **Artifacts** → **Ember-debug** → download the zip → unzip → tap `Ember-debug.apk`.
 4. Allow **Install unknown apps** for Chrome/Files if Android asks.
 
-After that, open **Ember** like any app. Termux is not required. Forage still needs internet; training does not.
+The screens are native Compose. The unchanged TensorFlow.js engine runs in an
+invisible, app-scoped WebView on the same asset origin as the old APK, so an
+update keeps the existing corpus and checkpoints. `index.html`/`app.js` are not
+packaged in the APK; the browser build below still ships from `web/` via Pages.
+Architecture and limits: [`docs/native-android.md`](docs/native-android.md).
 
 ### No PC (phone only, without APK)
 
@@ -87,7 +91,7 @@ First generate is slower (shader compile). Batch 2 × context 64 = 128 training 
 - Heads must divide embedding size (the presets already do).
 - Do not switch apps mid-fire on iOS; Safari may throttle background tabs.
 - Every setting has an **ⓘ button** next to it explaining what it does, what happens when you raise/lower it, and when the change takes effect.
-- **Notifications**: the 🔔 (top right) keeps a history of training/export/import results and errors. OS notifications go through the service worker (the only path that works on Android); if they're unavailable, in-app notifications still work.
+- **Notifications**: the bell (top right) keeps a history of training/export/import results and errors. In the native APK, training/teacher notifications are posted by Android after the user grants the permission; in the browser build they go through the service worker.
 - **Brain export**: *Export brain (.json)* writes the real learned weights + vocabulary (versioned format, see [`docs/brain-format.md`](docs/brain-format.md)). Imports are fully validated before anything is replaced, so a bad file can't destroy a working brain. Legacy `ember-brain-v1` files still import.
 - **Topic-aware training** (see [`docs/architecture-experiments.md`](docs/architecture-experiments.md)): documents train as structured records with real endings (`<eos>`), attention and loss cannot cross document boundaries (Fire → *Doc boundaries*), Reddit fuel keeps its subreddit/thread structure (one document per comment), and small sources can be gently boosted (Fire → *Source balance*). The *topic-training pack* (Fuel tab) adds short example documents for staying on topic and changing subject only on cue. New vessels use stream format 2 automatically; imported brains keep the layout they were trained with.
 - **All-purpose skills** (see [`docs/capabilities.md`](docs/capabilities.md)): lesson packs teach translation (EN↔ES + FR/DE/MS/ZH), passage-grounded research QA, and writing skills (summarize/rewrite/keywords/grammar). Voice → *Task* asks in the trained format, including *Answer from my documents*, which retrieves passages from your own corpus on-device. Fire → *Lesson loss: Response only* focuses training on answers. Honest scope: at phone scale these are learnable formats, not datacenter fluency — the guide explains volumes and limits.
