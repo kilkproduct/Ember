@@ -933,9 +933,9 @@ async function pendingFileSource(token, hints = {}) {
   // The filename comes from the native picker (the staged URL only carries a
   // token). It is used for display and as a weak hint — never as the sole
   // format signal.
-  const name = hints.name || known.name || blob.name || "file";
-  const source = await sourceFromBlob(blob, { name, mime: hints.mime || known.mime || blob.type || "" });
-  const entry = { ...known, name, source, bytes: source.size };
+  const blobName = hints.name || known.name || blob.name || "file";
+  const source = await sourceFromBlob(blob, { name: blobName, mime: hints.mime || known.mime || blob.type || "" });
+  const entry = { ...known, name: blobName, source, bytes: source.size };
   state.pendingFiles.set(token, entry);
   return source;
 }
