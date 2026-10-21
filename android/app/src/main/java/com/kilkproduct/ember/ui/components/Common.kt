@@ -453,7 +453,13 @@ fun LoadingRow(text: String, modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun EmptyState(title: String, body: String, modifier: Modifier = Modifier) {
+fun EmptyState(
+    title: String,
+    body: String,
+    modifier: Modifier = Modifier,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Column(
         modifier = modifier
             .fillMaxWidth()
@@ -471,11 +477,21 @@ fun EmptyState(title: String, body: String, modifier: Modifier = Modifier) {
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
         )
+        if (actionLabel != null && onAction != null) {
+            Spacer(Modifier.height(6.dp))
+            TextButton(onClick = onAction) { Text(actionLabel) }
+        }
     }
 }
 
 @Composable
-fun ErrorBanner(message: String, modifier: Modifier = Modifier, onDismiss: (() -> Unit)? = null) {
+fun ErrorBanner(
+    message: String,
+    modifier: Modifier = Modifier,
+    onDismiss: (() -> Unit)? = null,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.small,
@@ -495,6 +511,11 @@ fun ErrorBanner(message: String, modifier: Modifier = Modifier, onDismiss: (() -
                 color = MaterialTheme.colorScheme.onErrorContainer,
                 modifier = Modifier.weight(1f),
             )
+            if (actionLabel != null && onAction != null) {
+                TextButton(onClick = onAction) {
+                    Text(actionLabel, style = MaterialTheme.typography.labelMedium)
+                }
+            }
             if (onDismiss != null) {
                 IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
                     Icon(Icons.Filled.Close, contentDescription = "Dismiss", modifier = Modifier.size(16.dp))
@@ -505,7 +526,13 @@ fun ErrorBanner(message: String, modifier: Modifier = Modifier, onDismiss: (() -
 }
 
 @Composable
-fun InfoBanner(message: String, modifier: Modifier = Modifier, tone: Color = EmberTeal) {
+fun InfoBanner(
+    message: String,
+    modifier: Modifier = Modifier,
+    tone: Color = EmberTeal,
+    actionLabel: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.small,
@@ -519,7 +546,13 @@ fun InfoBanner(message: String, modifier: Modifier = Modifier, tone: Color = Emb
                 text = message,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.weight(1f),
             )
+            if (actionLabel != null && onAction != null) {
+                TextButton(onClick = onAction) {
+                    Text(actionLabel, style = MaterialTheme.typography.labelMedium, color = tone)
+                }
+            }
         }
     }
 }

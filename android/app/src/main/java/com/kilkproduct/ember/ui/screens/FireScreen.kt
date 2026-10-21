@@ -25,6 +25,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.kilkproduct.ember.MainViewModel
 import com.kilkproduct.ember.backend.Formats
@@ -46,10 +47,17 @@ import com.kilkproduct.ember.ui.theme.EmberMuted
 import com.kilkproduct.ember.ui.theme.EmberSuccess
 import com.kilkproduct.ember.ui.theme.EmberTeal
 import com.kilkproduct.ember.ui.theme.EmberWarning
+import com.kilkproduct.ember.util.Clipboard
 import java.util.Locale
 
 @Composable
-fun FireScreen(ui: UiState, vm: MainViewModel) {
+fun FireScreen(
+    ui: UiState,
+    vm: MainViewModel,
+    onOpenVessel: () -> Unit = {},
+    onOpenVoice: () -> Unit = {},
+) {
+    val context = LocalContext.current
     val form = vm.trainForm
     val training = ui.status.training
     val busyStart = Ops.TRAIN_START in ui.busy
@@ -74,8 +82,10 @@ fun FireScreen(ui: UiState, vm: MainViewModel) {
         if (!ui.modelReady) {
             item(key = "nocast") {
                 InfoBanner(
-                    "No vessel is cast. Go to Vessel → Cast vessel before firing.",
+                    message = "No vessel is cast yet. Casting builds the tensors Fire trains.",
                     tone = EmberWarning,
+                    actionLabel = "Open Vessel",
+                    onAction = onOpenVessel,
                 )
             }
         }
@@ -331,6 +341,15 @@ fun FireScreen(ui: UiState, vm: MainViewModel) {
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                // Close the loop: a finished run usually wants either a
+                // sample of the new voice or a saved copy of the weights.
+                if (!running && training.outcome != null) {
+                    Spacer(Modifier.height(6.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onOpenVoice) { Text("Speak with it") }
+                        OutlinedButton(onClick = onOpenVessel) { Text("Save the brain") }
+                    }
+                }
             }
         }
 
@@ -395,8 +414,22 @@ fun FireScreen(ui: UiState, vm: MainViewModel) {
                 title = "Kiln log",
                 trailing = {
                     if (ui.trainLog.isNotEmpty()) {
-                        IconButton(onClick = { vm.repo.clearTrainLog() }) {
-                            Icon(Icons.Filled.Clear, contentDescription = "Clear training log")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    val text = ui.trainLog.joinToString("\n") { "${Formats.timeOnly(it.at)}  ${it.line}" }
+                                    if (Clipboard.copy(context, "Ember training log", text)) {
+                                        vm.repo.addNotice(
+                                            com.kilkproduct.ember.backend.NoticeLevel.SUCCESS,
+                                            "Training log copied",
+                                            "${ui.trainLog.size} lines on the clipboard.",
+                                        )
+                                    }
+                                },
+                            ) { Text("Copy", style = MaterialTheme.typography.labelMedium) }
+                            IconButton(onClick = { vm.repo.clearTrainLog() }) {
+                                Icon(Icons.Filled.Clear, contentDescription = "Clear training log")
+                            }
                         }
                     }
                 },

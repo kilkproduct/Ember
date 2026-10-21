@@ -1,5 +1,6 @@
 package com.kilkproduct.ember.ui.screens
 
+import android.content.Intent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -24,10 +25,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.kilkproduct.ember.MainViewModel
 import com.kilkproduct.ember.backend.Formats
+import com.kilkproduct.ember.backend.NoticeLevel
 import com.kilkproduct.ember.backend.Ops
 import com.kilkproduct.ember.backend.UiState
 import com.kilkproduct.ember.ui.components.ChoiceRow
@@ -41,11 +44,13 @@ import com.kilkproduct.ember.ui.components.SectionHeading
 import com.kilkproduct.ember.ui.theme.EmberOrange
 import com.kilkproduct.ember.ui.theme.EmberTeal
 import com.kilkproduct.ember.ui.theme.EmberWarning
+import com.kilkproduct.ember.util.Clipboard
 import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun VoiceScreen(ui: UiState, vm: MainViewModel) {
+    val context = LocalContext.current
     val form = vm.voiceForm
     val generating = ui.generating || Ops.GENERATE in ui.busy
     val last = ui.lastGeneration
@@ -264,7 +269,39 @@ fun VoiceScreen(ui: UiState, vm: MainViewModel) {
                             }
                         }
                     }
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(2.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(
+                            onClick = {
+                                if (Clipboard.copy(context, "Ember answer", last.text)) {
+                                    vm.repo.addNotice(
+                                        NoticeLevel.SUCCESS,
+                                        "Answer copied",
+                                        "${last.text.length} characters on the clipboard.",
+                                    )
+                                }
+                            },
+                            enabled = last.text.isNotBlank(),
+                        ) { Text("Copy") }
+                        TextButton(
+                            onClick = {
+                                try {
+                                    val send = Intent(Intent.ACTION_SEND)
+                                        .setType("text/plain")
+                                        .putExtra(Intent.EXTRA_TEXT, last.text)
+                                    context.startActivity(Intent.createChooser(send, "Share this answer"))
+                                } catch (t: Throwable) {
+                                    vm.repo.addNotice(
+                                        NoticeLevel.ERROR,
+                                        "Could not share",
+                                        t.message ?: "No app accepted the text.",
+                                    )
+                                }
+                            },
+                            enabled = last.text.isNotBlank(),
+                        ) { Text("Share") }
+                    }
+                    Spacer(Modifier.height(2.dp))
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(
                             text = "${Formats.integer(last.newTokens.toLong())} tokens · " +

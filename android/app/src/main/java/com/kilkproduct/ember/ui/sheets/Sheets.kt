@@ -39,6 +39,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.kilkproduct.ember.backend.CheckpointInfo
@@ -57,6 +58,7 @@ import com.kilkproduct.ember.ui.components.ToggleRow
 import com.kilkproduct.ember.ui.theme.EmberError
 import com.kilkproduct.ember.ui.theme.EmberTeal
 import com.kilkproduct.ember.ui.theme.EmberWarning
+import com.kilkproduct.ember.util.Clipboard
 
 @Composable
 fun SheetFrame(
@@ -118,7 +120,9 @@ fun StatusSheet(
     onExportCheckpoint: (String) -> Unit,
     onClearLog: () -> Unit,
 ) {
+    val context = LocalContext.current
     val model = ui.status.model
+    var copiedLog by remember { mutableStateOf(false) }
     var checkpointName by rememberSaveable { mutableStateOf("step-${model.step}") }
     var deleteTarget by remember { mutableStateOf<CheckpointInfo?>(null) }
     val busy = Ops.CKPT_SAVE in ui.busy || Ops.CKPT_LOAD in ui.busy ||
@@ -247,7 +251,18 @@ fun StatusSheet(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             Spacer(Modifier.height(6.dp))
-            TextButton(onClick = onClearLog) { Text("Clear training log") }
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TextButton(
+                    onClick = {
+                        val text = ui.trainLog.joinToString("\n") { "${Formats.timeOnly(it.at)}  ${it.line}" }
+                        copiedLog = Clipboard.copy(context, "Ember training log", text)
+                    },
+                    enabled = ui.trainLog.isNotEmpty(),
+                ) { Text(if (copiedLog) "Copied" else "Copy training log") }
+                TextButton(onClick = onClearLog, enabled = ui.trainLog.isNotEmpty()) {
+                    Text("Clear training log")
+                }
+            }
         }
     }
 

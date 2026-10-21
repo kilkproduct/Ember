@@ -13,8 +13,14 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,6 +35,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Build
@@ -38,6 +45,7 @@ import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -45,10 +53,13 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Snackbar
+import androidx.compose.material3.SnackbarDuration
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SnackbarResult
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -56,6 +67,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -63,6 +75,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -75,7 +88,6 @@ import com.kilkproduct.ember.backend.Ops
 import com.kilkproduct.ember.ui.components.EmberCard
 import com.kilkproduct.ember.ui.components.EmptyState
 import com.kilkproduct.ember.ui.components.ErrorBanner
-import com.kilkproduct.ember.ui.components.LoadingRow
 import com.kilkproduct.ember.ui.components.StatusPill
 import com.kilkproduct.ember.ui.screens.FireScreen
 import com.kilkproduct.ember.ui.screens.FuelScreen
@@ -152,12 +164,24 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
 
     LaunchedEffect(Unit) {
         vm.repo.messages.collect { notice ->
+            // Only one snackbar at a time: a burst of notices (import progress,
+            // status refreshes) should not queue for a minute behind the UI.
+            snackbarHost.currentSnackbarData?.dismiss()
             val text = if (notice.body.isBlank()) notice.title else "${notice.title} — ${notice.body}"
-            snackbarHost.showSnackbar(
+            val serious = notice.level == NoticeLevel.ERROR || notice.level == NoticeLevel.WARNING
+            val result = snackbarHost.showSnackbar(
                 message = text,
+                actionLabel = if (serious) "Events" else null,
                 withDismissAction = true,
-                duration = androidx.compose.material3.SnackbarDuration.Short,
+                duration = if (notice.level == NoticeLevel.ERROR) {
+                    SnackbarDuration.Long
+                } else {
+                    SnackbarDuration.Short
+                },
             )
+            if (result == SnackbarResult.ActionPerformed) {
+                sheetName = SheetId.NOTICES.name
+            }
         }
     }
 
@@ -275,37 +299,67 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                     onOpenStatus = { sheetName = SheetId.STATUS.name },
                     onOpenNotices = { sheetName = SheetId.NOTICES.name },
                     onOpenSettings = { sheetName = SheetId.SETTINGS.name },
+                    onRetryEngine = { vm.repo.retryInitialization() },
                 )
-                Box(modifier = Modifier.fillMaxSize()) {
-                    when (Tab.valueOf(tab)) {
-                        Tab.FUEL -> FuelScreen(
-                            ui = ui,
-                            vm = vm,
-                            onPickFile = {
-                                importLauncher.launch(
-                                    arrayOf(
-                                        "application/json",
-                                        "application/x-ndjson",
-                                        "text/plain",
-                                        "text/markdown",
-                                        "application/octet-stream",
-                                    )
-                                )
-                            },
-                            onOpenAddText = { sheetName = SheetId.ADD_TEXT.name },
-                            onOpenAddPack = { sheetName = SheetId.ADD_PACK.name },
-                        )
-                        Tab.TEACHERS -> TeachersScreen(ui = ui, vm = vm)
-                        Tab.VESSEL -> VesselScreen(
-                            ui = ui,
-                            vm = vm,
-                            onPickBrain = { importLauncher.launch(arrayOf("application/json")) },
-                            onOpenExport = { sheetName = SheetId.EXPORT.name },
-                            onOpenStatus = { sheetName = SheetId.STATUS.name },
-                            onOpenGithub = { sheetName = SheetId.GITHUB.name },
-                        )
-                        Tab.FIRE -> FireScreen(ui = ui, vm = vm)
-                        Tab.VOICE -> VoiceScreen(ui = ui, vm = vm)
+                val booting = !ui.initialized && ui.backendError == null
+                val tabState = rememberSaveableStateHolder()
+                // Phones stay edge-to-edge; on a tablet or a folded-open
+                // device the single column stops stretching to 1200dp.
+                Box(
+                    modifier = Modifier.fillMaxSize(),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    Box(modifier = Modifier.widthIn(max = 720.dp).fillMaxSize()) {
+                        AnimatedContent(
+                            targetState = Tab.valueOf(tab),
+                            transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(90)) },
+                            label = "tab",
+                        ) { current ->
+                            // Keeps each tab's scroll position and local field
+                            // state when the user switches away and back.
+                            tabState.SaveableStateProvider(current.name) {
+                                if (booting) {
+                                    EngineBootPane(onRetry = { vm.repo.retryInitialization() })
+                                } else {
+                                    when (current) {
+                                        Tab.FUEL -> FuelScreen(
+                                            ui = ui,
+                                            vm = vm,
+                                            onPickFile = {
+                                                importLauncher.launch(
+                                                    arrayOf(
+                                                        "application/json",
+                                                        "application/x-ndjson",
+                                                        "text/plain",
+                                                        "text/markdown",
+                                                        "application/octet-stream",
+                                                    )
+                                                )
+                                            },
+                                            onOpenAddText = { sheetName = SheetId.ADD_TEXT.name },
+                                            onOpenAddPack = { sheetName = SheetId.ADD_PACK.name },
+                                        )
+                                        Tab.TEACHERS -> TeachersScreen(ui = ui, vm = vm)
+                                        Tab.VESSEL -> VesselScreen(
+                                            ui = ui,
+                                            vm = vm,
+                                            onPickBrain = { importLauncher.launch(arrayOf("application/json")) },
+                                            onOpenExport = { sheetName = SheetId.EXPORT.name },
+                                            onOpenStatus = { sheetName = SheetId.STATUS.name },
+                                            onOpenGithub = { sheetName = SheetId.GITHUB.name },
+                                            onGoToFuel = { tab = Tab.FUEL.name },
+                                        )
+                                        Tab.FIRE -> FireScreen(
+                                            ui = ui,
+                                            vm = vm,
+                                            onOpenVessel = { tab = Tab.VESSEL.name },
+                                            onOpenVoice = { tab = Tab.VOICE.name },
+                                        )
+                                        Tab.VOICE -> VoiceScreen(ui = ui, vm = vm)
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -405,9 +459,7 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
         )
     }
 
-    if (ui.initializing && !ui.initialized && ui.backendError == null) {
-        StartupOverlay()
-    } else if (ui.backendError != null && !ui.initialized) {
+    if (ui.backendError != null && !ui.initialized) {
         EngineFailureScreen(
             message = ui.backendError!!,
             onRetry = { vm.repo.retryInitialization() },
@@ -449,39 +501,42 @@ private fun EngineFailureScreen(message: String, onRetry: () -> Unit, onOpenSett
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 androidx.compose.material3.Button(onClick = onRetry) { Text("Restart engine") }
-                androidx.compose.material3.TextButton(onClick = onOpenSettings) { Text("Settings") }
+                TextButton(onClick = onOpenSettings) { Text("Settings") }
             }
         }
     }
 }
 
 @Composable
-private fun StartupOverlay() {
-    Surface(
-        modifier = Modifier.fillMaxSize(),
-        color = MaterialTheme.colorScheme.background,
+private fun EngineBootPane(onRetry: () -> Unit) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 32.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(28.dp),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                text = "Ember",
-                style = MaterialTheme.typography.displaySmall,
-                color = EmberOrange,
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = "Waking the local training engine…",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(18.dp))
-            LoadingRow("Loading TensorFlow.js and your saved corpus")
-        }
+        CircularProgressIndicator(
+            modifier = Modifier.size(22.dp),
+            strokeWidth = 2.dp,
+            color = EmberOrange,
+        )
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = "Waking the local engine",
+            style = MaterialTheme.typography.titleMedium,
+            color = MaterialTheme.colorScheme.onSurface,
+        )
+        Spacer(Modifier.height(6.dp))
+        Text(
+            text = "TensorFlow.js and your saved corpus load from this device. " +
+                "The first start after an update can take a few seconds.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(Modifier.height(14.dp))
+        TextButton(onClick = onRetry) { Text("Taking too long? Restart the engine") }
     }
 }
 
@@ -491,6 +546,7 @@ private fun EmberHeader(
     onOpenStatus: () -> Unit,
     onOpenNotices: () -> Unit,
     onOpenSettings: () -> Unit,
+    onRetryEngine: () -> Unit,
 ) {
     val model = ui.status.model
     val training = ui.status.training
@@ -521,18 +577,35 @@ private fun EmberHeader(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+                // The pills double as the entry point to Status & checkpoints,
+                // so diagnostics are one tap away from anywhere in the app.
                 if (ui.status.foraging.running) {
-                    StatusPill(text = "foraging", tone = EmberTeal)
+                    StatusPill(
+                        text = "foraging",
+                        tone = EmberTeal,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable(onClick = onOpenStatus),
+                    )
                     Spacer(Modifier.width(6.dp))
                 }
                 if (training.running || training.starting) {
                     StatusPill(
                         text = if (training.stopRequested) "stopping" else "training",
                         tone = EmberWarning,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable(onClick = onOpenStatus),
                     )
                     Spacer(Modifier.width(6.dp))
                 } else if (model.ready) {
-                    StatusPill(text = "ready", tone = EmberSuccess)
+                    StatusPill(
+                        text = "ready",
+                        tone = EmberSuccess,
+                        modifier = Modifier
+                            .clip(CircleShape)
+                            .clickable(onClick = onOpenStatus),
+                    )
                     Spacer(Modifier.width(6.dp))
                 }
                 IconButton(onClick = onOpenNotices) {
@@ -564,7 +637,11 @@ private fun EmberHeader(
 
             if (ui.backendError != null) {
                 Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    ErrorBanner(ui.backendError!!)
+                    ErrorBanner(
+                        message = ui.backendError!!,
+                        actionLabel = "Restart",
+                        onAction = onRetryEngine,
+                    )
                 }
             } else if (training.running || training.starting) {
                 val start = ui.progress?.startStep ?: model.lastRun?.startStep ?: 0L
@@ -581,10 +658,6 @@ private fun EmberHeader(
                         color = EmberOrange,
                         trackColor = MaterialTheme.colorScheme.surfaceVariant,
                     )
-                }
-            } else if (!ui.initialized && ui.backendError == null) {
-                Box(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
-                    LoadingRow("Starting the JavaScript engine")
                 }
             }
         }

@@ -35,11 +35,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import com.kilkproduct.ember.MainViewModel
 import com.kilkproduct.ember.backend.Formats
+import com.kilkproduct.ember.backend.NoticeLevel
 import com.kilkproduct.ember.backend.Ops
 import com.kilkproduct.ember.backend.TeacherInfo
 import com.kilkproduct.ember.backend.UiState
@@ -53,6 +55,7 @@ import com.kilkproduct.ember.ui.components.LogPane
 import com.kilkproduct.ember.ui.components.NumberStepper
 import com.kilkproduct.ember.ui.components.SectionHeading
 import com.kilkproduct.ember.ui.components.StatTile
+import com.kilkproduct.ember.util.Clipboard
 import com.kilkproduct.ember.ui.components.StatusPill
 import com.kilkproduct.ember.ui.components.ToggleRow
 import com.kilkproduct.ember.ui.theme.EmberError
@@ -73,6 +76,7 @@ private val WINDOWS = listOf(
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun TeachersScreen(ui: UiState, vm: MainViewModel) {
+    val context = LocalContext.current
     val busyRun = Ops.TEACHERS_RUN in ui.busy
     val busyStop = Ops.TEACHERS_STOP in ui.busy
     var defaultWindow by rememberSaveable { mutableStateOf("daily") }
@@ -192,8 +196,22 @@ fun TeachersScreen(ui: UiState, vm: MainViewModel) {
                 title = "Teacher log",
                 trailing = {
                     if (ui.teacherLog.isNotEmpty()) {
-                        IconButton(onClick = { vm.repo.clearTeacherLog() }) {
-                            Icon(Icons.Filled.Clear, contentDescription = "Clear teacher log")
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    val text = ui.teacherLog.joinToString("\n") { "${Formats.timeOnly(it.at)}  ${it.line}" }
+                                    if (Clipboard.copy(context, "Ember teacher log", text)) {
+                                        vm.repo.addNotice(
+                                            NoticeLevel.SUCCESS,
+                                            "Teacher log copied",
+                                            "${ui.teacherLog.size} lines on the clipboard.",
+                                        )
+                                    }
+                                },
+                            ) { Text("Copy", style = MaterialTheme.typography.labelMedium) }
+                            IconButton(onClick = { vm.repo.clearTeacherLog() }) {
+                                Icon(Icons.Filled.Clear, contentDescription = "Clear teacher log")
+                            }
                         }
                     }
                 },

@@ -105,6 +105,45 @@ and no data reset is involved.
 | Voice | prompt, sampling presets and every sampler field, seed, subreddit, tasks, language, ending rule, generation output, teach-by-hand lessons |
 | Sheets | status/diagnostics/checkpoints, settings, GitHub vault, event history, import preview and progress, document inspection, add text, training packs, brain export, teacher draft review |
 
+## Experience details
+
+These are the interaction rules the Compose layer follows, beyond "each control
+does its job":
+
+* **Startup is not a modal.** The header, the navigation bar, Status and
+  Settings are usable while TensorFlow.js boots. Only the tab area shows a
+  short "waking the local engine" pane, with a restart link. A full-screen
+  overlay is reserved for an engine that actually failed, where nothing else
+  can work.
+* **Tabs keep their place.** Each tab's scroll position and local fields live
+  in a `SaveableStateHolder` keyed by tab, and switching tabs is a 140 ms
+  crossfade. Rotation restores the selected tab and any open sheet.
+* **One message at a time.** Notices replace the visible snackbar instead of
+  queueing behind it; warnings and errors get an **Events** action that opens
+  the full history, and errors stay on screen longer. The header error banner
+  carries a **Restart** action instead of pointing at a dialog.
+* **Text can leave the app.** Generated answers have **Copy** and **Share**;
+  training, forage, and teacher logs have **Copy** next to their clear button;
+  Status offers "Copy training log". All of it goes through the system
+  clipboard, and each copy reports success as a notice.
+* **Destructive actions ask first.** Clearing the corpus, removing a document
+  (from the list and from the document sheet), deleting a checkpoint, and
+  clearing temporary files all confirm, and each dialog says what is *not*
+  affected.
+* **First run has a path.** With no fuel and no brain, Fuel leads with a
+  three-step card (add fuel → cast → fire) wired to the real add-text, pack,
+  and file pickers. Empty states elsewhere link to Vessel, Fuel, or Voice
+  instead of only describing the gap.
+* **Comfort on a phone and beyond.** Body text is 14 sp (was 13 sp) and the
+  smallest labels are 11 sp (was 10.5 sp), the keyboard pushes content up
+  instead of covering it,
+  and the single column is capped at 720 dp so it does not stretch across a
+  tablet or an unfolded device. Status pills in the header open Status, so
+  diagnostics are one tap away from every screen.
+* **Branding is native.** A vector adaptive launcher icon (API 26+) and an
+  Android 12+ splash that matches the app background replace the letterboxed
+  legacy bitmap and the default white flash.
+
 ## Build
 
 ```
@@ -143,8 +182,15 @@ Verified in this workspace:
 * The first CI run caught a real compile error (`Notification.CATEGORY_ERR`);
   it is fixed (`CATEGORY_ERROR`) and the rebuild is green.
 
+The experience pass above (non-blocking startup, tab state, snackbar rules,
+copy/share, confirmations, first-run card, type scale, adaptive icon, splash)
+is covered by the same CI compile.
+
 Not verified here: this environment has no Android SDK/emulator and cannot
 download the artifact (Google Maven and the GitHub artifact host are blocked),
 so the APK was **not installed or launched on a device or emulator**. Startup,
 navigation, training, import/export and rotation behaviour still need that
-check. The native screens have compiled but have not been rendered anywhere.
+check. The native screens have compiled but have not been rendered anywhere,
+and the visual details of this pass (spacing after the type bump, splash,
+adaptive icon) were not seen on a screen - they were written from the layout
+code and compile-checked.

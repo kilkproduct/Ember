@@ -49,6 +49,7 @@ fun VesselScreen(
     onOpenExport: () -> Unit,
     onOpenStatus: () -> Unit,
     onOpenGithub: () -> Unit,
+    onGoToFuel: () -> Unit = {},
 ) {
     val form = vm.vesselForm
     val casting = ui.status.casting || Ops.CAST in ui.busy
@@ -114,8 +115,14 @@ fun VesselScreen(
                     KeyValueRow("Train stream", "${Formats.integer(model.corpusTokens)} tokens")
                     KeyValueRow("Best loss", Formats.loss(model.bestLoss))
                     KeyValueRow("Best validation", Formats.loss(model.bestValLoss))
+                } else if (corpusEmpty) {
+                    InfoBanner(
+                        message = "No brain yet. Add fuel, then cast a vessel to build the tensors.",
+                        actionLabel = "Add fuel",
+                        onAction = onGoToFuel,
+                    )
                 } else {
-                    InfoBanner("Cast a vessel after adding fuel. Casting builds the TensorFlow.js model tensors.")
+                    InfoBanner("Cast a vessel: this builds the TensorFlow.js model tensors from your corpus.")
                 }
             }
         }
@@ -282,7 +289,12 @@ fun VesselScreen(
                 }
                 if (corpusEmpty) {
                     Spacer(Modifier.height(8.dp))
-                    InfoBanner("The corpus is empty. Add fuel before casting.", tone = EmberWarning)
+                    InfoBanner(
+                        message = "The corpus is empty. Add fuel before casting.",
+                        tone = EmberWarning,
+                        actionLabel = "Add fuel",
+                        onAction = onGoToFuel,
+                    )
                 }
                 Spacer(Modifier.height(12.dp))
                 Button(

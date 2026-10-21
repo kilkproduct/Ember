@@ -1,6 +1,7 @@
 package com.kilkproduct.ember.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -27,6 +28,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -38,9 +40,12 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.kilkproduct.ember.MainViewModel
+import com.kilkproduct.ember.backend.DocumentRow
 import com.kilkproduct.ember.backend.Formats
+import com.kilkproduct.ember.backend.NoticeLevel
 import com.kilkproduct.ember.backend.Ops
 import com.kilkproduct.ember.backend.UiState
 import com.kilkproduct.ember.ui.components.DocumentRowView
@@ -57,6 +62,7 @@ import com.kilkproduct.ember.ui.components.StatTile
 import com.kilkproduct.ember.ui.components.ToggleRow
 import com.kilkproduct.ember.ui.theme.EmberOrange
 import com.kilkproduct.ember.ui.theme.EmberTeal
+import com.kilkproduct.ember.util.Clipboard
 import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalLayoutApi::class)
@@ -68,11 +74,14 @@ fun FuelScreen(
     onOpenAddText: () -> Unit,
     onOpenAddPack: () -> Unit,
 ) {
+    val context = LocalContext.current
     val form = vm.fuelForm
     val busyStart = Ops.FORAGE_START in ui.busy
     val busyStop = Ops.FORAGE_STOP in ui.busy
     var showClearConfirm by remember { mutableStateOf(false) }
+    var deleteTarget by remember { mutableStateOf<DocumentRow?>(null) }
     var query by rememberSaveable { mutableStateOf(ui.corpusQuery) }
+    val firstRun = ui.initialized && !ui.modelReady && ui.status.corpus.documents == 0 && !ui.corpusLoading
 
     LaunchedEffect(query) {
         if (query != ui.corpusQuery) {
@@ -86,6 +95,25 @@ fun FuelScreen(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        if (firstRun) {
+            item(key = "start-here") {
+                EmberCard(
+                    title = "Start here",
+                    subtitle = "Three steps turn public text into a brain that speaks on this phone.",
+                ) {
+                    FuelStep("1", "Add fuel", "A training pack, your own text, or a dataset file.")
+                    FuelStep("2", "Cast a vessel", "Vessel tab: pick a shape and build the tensors.")
+                    FuelStep("3", "Fire", "Fire tab: train for a while, then talk to it in Voice.")
+                    Spacer(Modifier.height(10.dp))
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = onOpenAddPack) { Text("Add a pack") }
+                        OutlinedButton(onClick = onOpenAddText) { Text("Paste text") }
+                        OutlinedButton(onClick = onPickFile) { Text("Import a file") }
+                    }
+                }
+            }
+        }
+
         item(key = "forage") {
             EmberCard(
                 title = "Forage",
@@ -363,7 +391,7 @@ fun FuelScreen(
                 meta = "${row.source} · ${Formats.chars(row.chars)} chars · weight ${row.weight}",
                 excerpt = row.excerpt,
                 onOpen = { vm.repo.openDocument(row.id) },
-                onDelete = { vm.repo.removeDocument(row.id, row.title) },
+                onDelete = { deleteTarget = row },
                 deleteEnabled = Ops.CORPUS_REMOVE !in ui.busy,
             )
         }
@@ -385,12 +413,26 @@ fun FuelScreen(
                 title = "Forage log",
                 trailing = {
                     if (ui.forageLog.isNotEmpty()) {
-                        IconButton(onClick = { vm.repo.clearForageLog() }) {
-                            Icon(
-                                Icons.Filled.Clear,
-                                contentDescription = "Clear forage log",
-                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(
+                                onClick = {
+                                    val text = ui.forageLog.joinToString("\n") { "${Formats.timeOnly(it.at)}  ${it.line}" }
+                                    if (Clipboard.copy(context, "Ember forage log", text)) {
+                                        vm.repo.addNotice(
+                                            NoticeLevel.SUCCESS,
+                                            "Forage log copied",
+                                            "${ui.forageLog.size} lines on the clipboard.",
+                                        )
+                                    }
+                                },
+                            ) { Text("Copy", style = MaterialTheme.typography.labelMedium) }
+                            IconButton(onClick = { vm.repo.clearForageLog() }) {
+                                Icon(
+                                    Icons.Filled.Clear,
+                                    contentDescription = "Clear forage log",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 },
@@ -402,6 +444,28 @@ fun FuelScreen(
                 )
             }
         }
+    }
+
+    deleteTarget?.let { target ->
+        AlertDialog(
+            onDismissRequest = { deleteTarget = null },
+            title = { Text("Remove this document?") },
+            text = {
+                Text(
+                    "“${target.title}” leaves the corpus on this device. Learned weights are not changed " +
+                        "until the next Cast or Fire."
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        deleteTarget = null
+                        vm.repo.removeDocument(target.id, target.title)
+                    },
+                ) { Text("Remove", color = MaterialTheme.colorScheme.error) }
+            },
+            dismissButton = { TextButton(onClick = { deleteTarget = null }) { Text("Keep") } },
+        )
     }
 
     if (showClearConfirm) {
@@ -443,4 +507,41 @@ private fun SourceChip(label: String, selected: Boolean, enabled: Boolean, onTog
         label = { Text(label, style = MaterialTheme.typography.labelMedium) },
         leadingIcon = leading,
     )
+}
+
+@Composable
+private fun FuelStep(number: String, title: String, body: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 4.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Surface(
+            shape = androidx.compose.foundation.shape.CircleShape,
+            color = EmberOrange.copy(alpha = 0.16f),
+            modifier = Modifier.size(24.dp),
+        ) {
+            Box(contentAlignment = Alignment.Center) {
+                Text(
+                    text = number,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = EmberOrange,
+                )
+            }
+        }
+        Spacer(Modifier.width(10.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+            Text(
+                text = body,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
 }

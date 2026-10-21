@@ -98,13 +98,13 @@ private val EmberTypography = Typography(
     ),
     bodyMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 13.sp,
-        lineHeight = 19.sp,
+        fontSize = 14.sp,
+        lineHeight = 20.sp,
     ),
     bodySmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
-        fontSize = 11.5.sp,
-        lineHeight = 16.sp,
+        fontSize = 12.sp,
+        lineHeight = 17.sp,
     ),
     labelLarge = TextStyle(
         fontFamily = FontFamily.SansSerif,
@@ -115,14 +115,14 @@ private val EmberTypography = Typography(
     labelMedium = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
-        fontSize = 11.5.sp,
+        fontSize = 12.sp,
         lineHeight = 16.sp,
     ),
     labelSmall = TextStyle(
         fontFamily = FontFamily.SansSerif,
         fontWeight = FontWeight.Medium,
-        fontSize = 10.5.sp,
-        lineHeight = 14.sp,
+        fontSize = 11.sp,
+        lineHeight = 15.sp,
         letterSpacing = 0.2.sp,
     ),
 )
