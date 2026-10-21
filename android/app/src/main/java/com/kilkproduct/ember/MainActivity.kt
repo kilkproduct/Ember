@@ -355,7 +355,11 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                                             onOpenVessel = { tab = Tab.VESSEL.name },
                                             onOpenVoice = { tab = Tab.VOICE.name },
                                         )
-                                        Tab.VOICE -> VoiceScreen(ui = ui, vm = vm)
+                                        Tab.VOICE -> VoiceScreen(
+                                            ui = ui,
+                                            vm = vm,
+                                            onOpenVessel = { tab = Tab.VESSEL.name },
+                                        )
                                     }
                                 }
                             }

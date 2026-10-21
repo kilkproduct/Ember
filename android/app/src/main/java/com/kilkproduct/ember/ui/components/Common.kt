@@ -54,6 +54,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
@@ -720,10 +722,19 @@ fun LossChart(
     modifier: Modifier = Modifier,
 ) {
     val density = LocalDensity.current
+    // A screen reader gets the trend in words; the canvas is unreadable to it.
+    val chartSummary = if (losses.isEmpty()) {
+        "Loss chart. No steps recorded yet."
+    } else {
+        val best = losses.minOrNull() ?: 0.0
+        "Loss chart. ${losses.size} steps, last ${String.format(Locale.US, "%.3f", losses.last())}, " +
+            "best ${String.format(Locale.US, "%.3f", best)}."
+    }
     Surface(
         modifier = modifier
             .fillMaxWidth()
-            .height(170.dp),
+            .height(170.dp)
+            .semantics { contentDescription = chartSummary },
         shape = MaterialTheme.shapes.medium,
         color = Color.Black.copy(alpha = 0.18f),
     ) {

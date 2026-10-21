@@ -49,7 +49,11 @@ import java.util.Locale
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-fun VoiceScreen(ui: UiState, vm: MainViewModel) {
+fun VoiceScreen(
+    ui: UiState,
+    vm: MainViewModel,
+    onOpenVessel: () -> Unit = {},
+) {
     val context = LocalContext.current
     val form = vm.voiceForm
     val generating = ui.generating || Ops.GENERATE in ui.busy
@@ -65,8 +69,10 @@ fun VoiceScreen(ui: UiState, vm: MainViewModel) {
         if (!ui.modelReady) {
             item(key = "nocast") {
                 InfoBanner(
-                    "Cast a vessel and train or import a brain before speaking.",
+                    message = "No brain yet. Cast a vessel, or import one, before speaking.",
                     tone = EmberWarning,
+                    actionLabel = "Open Vessel",
+                    onAction = onOpenVessel,
                 )
             }
         }

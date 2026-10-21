@@ -140,6 +140,9 @@ does its job":
   and the single column is capped at 720 dp so it does not stretch across a
   tablet or an unfolded device. Status pills in the header open Status, so
   diagnostics are one tap away from every screen.
+* **A little more accessible.** The loss chart publishes a spoken summary
+  (number of steps, last value, best value), progress bars carry their own
+  progress semantics, and icon-only buttons name their action.
 * **Branding is native.** A vector adaptive launcher icon (API 26+) and an
   Android 12+ splash that matches the app background replace the letterboxed
   legacy bitmap and the default white flash.
