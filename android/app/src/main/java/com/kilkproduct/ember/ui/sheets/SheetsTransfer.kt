@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import com.kilkproduct.ember.backend.DocumentDetail
 import com.kilkproduct.ember.backend.FilePreview
 import com.kilkproduct.ember.backend.Formats
+import com.kilkproduct.ember.backend.ImportProgress
 import com.kilkproduct.ember.backend.TeacherDraft
 import com.kilkproduct.ember.backend.UiState
 import com.kilkproduct.ember.ui.components.EmberCard
@@ -61,19 +62,27 @@ fun ImportSheet(
     onDismiss: () -> Unit,
     onCommit: () -> Unit,
     onCancelRun: () -> Unit,
+    onPauseRun: () -> Unit,
+    onResumeRun: () -> Unit,
     onClearError: () -> Unit,
 ) {
     val preview: FilePreview? = ui.importPreview
     val progress = ui.importProgress
+    val paused = ui.importPaused
 
     SheetFrame(
         title = when {
             preview?.isBrain == true -> "Import brain"
+            paused -> "Import paused"
             preview != null -> "Import dataset"
             ui.importBusy -> "Reading file"
             else -> "Import"
         },
-        subtitle = "Nothing is written to the corpus until you confirm this preview.",
+        subtitle = when {
+            paused -> "Stored documents are kept. Resume continues from the last checkpoint."
+            ui.importBusy -> "Ember is working. Keep the app open while it reads."
+            else -> "Nothing is written to the corpus until you confirm this preview."
+        },
         onDismiss = {
             if (ui.importBusy) onCancelRun() else onDismiss()
         },
@@ -82,28 +91,23 @@ fun ImportSheet(
         if (error != null) {
             ErrorBanner(error)
             Spacer(Modifier.height(10.dp))
-            OutlinedButton(onClick = onClearError) { Text("Dismiss and discard this file") }
+            OutlinedButton(onClick = onClearError) { Text("Dismiss") }
             return@SheetFrame
         }
 
         if (ui.importBusy && preview == null) {
-            LoadingRow("Copying the selected file into a private cache and inspecting it…")
+            LoadingRow("Copying the selected file into private storage and inspecting it…")
             return@SheetFrame
         }
 
         if (preview == null) {
             if (progress != null) {
-                val fraction = if (progress.total > 0) progress.percent / 100f else 0f
                 ProgressBlock(
-                    fraction = fraction,
-                    label = if (progress.total > 0) {
-                        "${progress.processed} / ${progress.total} documents"
-                    } else {
-                        "Importing…"
-                    },
-                    detail = if (progress.total > 0) "${progress.percent}% · keep Ember open" else null,
+                    fraction = progress.percent / 100f,
+                    label = progress.stageLabel,
+                    detail = progressLine(progress),
                     onCancel = if (!ui.importCancelling) onCancelRun else null,
-                    cancelLabel = if (ui.importCancelling) "Cancelling…" else "Cancel import",
+                    cancelLabel = if (ui.importCancelling) "Stopping…" else "Stop",
                 )
             } else {
                 LoadingRow("Preparing…")
@@ -111,13 +115,27 @@ fun ImportSheet(
             return@SheetFrame
         }
 
-        EmberCard(title = preview.name, subtitle = "${preview.kind} · ${Formats.bytes(preview.bytes)} · ${preview.mime.ifBlank { "unknown type" }}") {
+        EmberCard(
+            title = preview.name,
+            subtitle = "${preview.formatLine} · ${Formats.bytes(preview.bytes)}" +
+                if (preview.encoding.isNotBlank() && !preview.isBrain) " · ${preview.encoding}" else "",
+        ) {
+            if (preview.documents.isNotEmpty() && !preview.isBrain) {
+                KeyValueRow("Documents sampled", "${preview.documents.size}")
+            }
+            if (preview.archive.isNotEmpty()) {
+                KeyValueRow("Archive entries", "${preview.entries}")
+            }
             preview.fields.forEach { field ->
                 KeyValueRow(field.label, field.value)
             }
             if (preview.message.isNotBlank()) {
                 Spacer(Modifier.height(8.dp))
                 InfoBanner(preview.message)
+            }
+            preview.notes.forEach { note ->
+                Spacer(Modifier.height(6.dp))
+                InfoBanner(note, tone = EmberTeal)
             }
             preview.warnings.forEach { warning ->
                 Spacer(Modifier.height(6.dp))
@@ -127,7 +145,7 @@ fun ImportSheet(
 
         if (preview.documents.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
-            EmberCard(title = "Documents in this file", subtitle = "${preview.documents.size} parsed") {
+            EmberCard(title = "Sample documents", subtitle = "First ${preview.documents.size} parsed") {
                 preview.documents.take(8).forEach { doc ->
                     Column(modifier = Modifier.padding(vertical = 4.dp)) {
                         Text(
@@ -135,7 +153,11 @@ fun ImportSheet(
                             style = MaterialTheme.typography.titleSmall,
                         )
                         Text(
-                            text = "${doc.source} · ${Formats.chars(doc.chars)} chars",
+                            text = buildString {
+                                append(Formats.chars(doc.chars))
+                                append(" chars")
+                                if (!doc.entry.isNullOrBlank()) append(" · ${doc.entry}")
+                            },
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -149,51 +171,90 @@ fun ImportSheet(
                         }
                     }
                 }
-                if (preview.documents.size > 8) {
-                    Text(
-                        text = "…and ${preview.documents.size - 8} more",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
         }
 
+        Spacer(Modifier.height(10.dp))
         if (preview.isBrain) {
-            Spacer(Modifier.height(10.dp))
             InfoBanner(
                 "A brain import replaces the current weights only after validation and a test forward pass. " +
                     "A pre-import checkpoint is written first.",
                 tone = EmberTeal,
             )
         } else {
-            Spacer(Modifier.height(10.dp))
             InfoBanner(
-                "Existing documents are deduplicated by URL and text hash, so importing the same file twice merges weights.",
+                "Text is deduplicated by content hash, so importing the same file twice merges weights instead of " +
+                    "duplicating documents. The import never starts training.",
                 tone = EmberTeal,
             )
         }
 
         Spacer(Modifier.height(14.dp))
-        if (ui.importBusy) {
-            ProgressBlock(
-                fraction = if (progress != null && progress.total > 0) progress.percent / 100f else 0f,
-                label = if (preview.isBrain) "Importing and validating the brain…" else "Writing documents…",
-                detail = if (progress != null && progress.total > 0) {
-                    "${progress.processed} / ${progress.total} processed"
-                } else null,
-                onCancel = if (!preview.isBrain && !ui.importCancelling) onCancelRun else null,
-                cancelLabel = if (ui.importCancelling) "Cancelling…" else "Cancel import",
-            )
-        } else {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = onCommit, enabled = !ui.importBusy) {
-                    Text(if (preview.isBrain) "Replace brain with this file" else "Import documents")
+        when {
+            ui.importBusy -> {
+                ProgressBlock(
+                    fraction = (progress?.percent ?: 0) / 100f,
+                    label = progress?.stageLabel ?: "Importing",
+                    detail = progress?.let { progressLine(it) },
+                    onCancel = if (!preview.isBrain && !ui.importCancelling) onCancelRun else null,
+                    cancelLabel = if (ui.importCancelling) "Stopping…" else "Stop",
+                )
+                if (!preview.isBrain) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onPauseRun, enabled = !ui.importPausing && !ui.importCancelling) {
+                            Text(if (ui.importPausing) "Pausing…" else "Pause")
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = "Pausing stops at the next safe point. Documents already written stay in the corpus.",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
-                OutlinedButton(onClick = onDismiss, enabled = !ui.importBusy) { Text("Cancel") }
+            }
+            paused -> {
+                progress?.let {
+                    ProgressBlock(
+                        fraction = it.percent / 100f,
+                        label = "Paused after ${Formats.integer(it.processed)} documents",
+                        detail = progressLine(it),
+                    )
+                    Spacer(Modifier.height(10.dp))
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onResumeRun) { Text("Resume import") }
+                    OutlinedButton(onClick = onDismiss) { Text("Stop and discard this file") }
+                }
+            }
+            else -> {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onCommit, enabled = !ui.importBusy) {
+                        Text(if (preview.isBrain) "Replace brain with this file" else "Import documents")
+                    }
+                    OutlinedButton(onClick = onDismiss, enabled = !ui.importBusy) { Text("Cancel") }
+                }
             }
         }
     }
+}
+
+/** One honest line describing what the importer is doing right now. */
+private fun progressLine(progress: ImportProgress): String {
+    val parts = mutableListOf<String>()
+    if (progress.processed > 0) parts += "${Formats.integer(progress.processed)} documents"
+    if (progress.records > progress.processed) parts += "${Formats.integer(progress.records)} records"
+    if (progress.merged > 0) parts += "${Formats.integer(progress.merged)} merged"
+    if (progress.skipped > 0) parts += "${Formats.integer(progress.skipped)} skipped"
+    if (progress.failed > 0) parts += "${Formats.integer(progress.failed)} failed"
+    if (progress.sourceBytes > 0) {
+        parts += "${Formats.bytes(progress.bytesRead)} of ${Formats.bytes(progress.sourceBytes)}"
+    } else if (progress.bytesRead > 0) {
+        parts += Formats.bytes(progress.bytesRead)
+    }
+    if (progress.entries > 0) parts += "${Formats.integer(progress.entries)} entries"
+    return parts.joinToString(" · ").ifBlank { "Starting…" }
 }
 
 // ---------------------------------------------------------------------------

@@ -74,6 +74,84 @@ export class MemorySource {
 }
 
 /**
+ * A `Blob` held by the browser runtime (Android WebView path).
+ *
+ * `Blob.slice()` gives cheap random access without copying the whole file
+ * into JavaScript memory: the WebView keeps the file in its own cache and
+ * only the requested window is materialized. `stream()` reads the same blob
+ * through its own reader, so the sequential path never needs a second copy.
+ */
+export class BlobSource {
+  constructor(blob, { name = "file", mime = "" } = {}) {
+    this.blob = blob;
+    this.name = name || blob.name || "file";
+    this.mime = mime || blob.type || "";
+    this.size = typeof blob.size === "number" ? blob.size : null;
+    this.seekable = this.size != null && typeof blob.slice === "function";
+    this.bytesRead = 0;
+  }
+
+  async head(n) {
+    if (!this.seekable) return new Uint8Array(0);
+    return new Uint8Array(await this.slice(0, Math.min(n, this.size)));
+  }
+
+  async slice(start, end) {
+    if (!this.seekable) throw new Error("This source cannot be read at an offset.");
+    const from = Math.max(0, Math.floor(start));
+    const to = Math.min(this.size, Math.floor(end));
+    if (to <= from) return new ArrayBuffer(0);
+    return this.blob.slice(from, to).arrayBuffer();
+  }
+
+  async *stream(start = 0) {
+    if (!this.seekable) return;
+    const part = start > 0 ? this.blob.slice(start) : this.blob;
+    if (typeof part.stream === "function") {
+      const reader = part.stream().getReader();
+      const chunk = 256 * 1024;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (!value?.length) continue;
+          // Re-chunk so a whole-dataset blob is never handed to a parser in
+          // one piece.
+          for (let offset = 0; offset < value.length; offset += chunk) {
+            const slice = value.subarray(offset, Math.min(offset + chunk, value.length));
+            this.bytesRead += slice.length;
+            yield slice;
+          }
+        }
+      } finally {
+        reader.releaseLock?.();
+      }
+      return;
+    }
+    const chunk = 4 * 1024 * 1024;
+    for (let offset = start; offset < this.size; offset += chunk) {
+      const end = Math.min(offset + chunk, this.size);
+      const bytes = new Uint8Array(await this.slice(offset, end));
+      if (!bytes.length) break;
+      this.bytesRead += bytes.length;
+      yield bytes;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  async close() {
+    // A Blob is a handle held by the WebView, not a file descriptor: closing
+    // a read must not invalidate it, or a paused import could not resume.
+    this._lastStream = null;
+  }
+}
+
+/** Wrap a Blob (or File) as a seekable import source. */
+export function sourceFromBlob(blob, { name = "", mime = "" } = {}) {
+  return new BlobSource(blob, { name, mime });
+}
+
+/**
  * A staged file served by the native layer.
  *
  * Two read paths exist because an Android WebView cannot open a `content://`

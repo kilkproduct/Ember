@@ -687,34 +687,14 @@ async function* readEntryStream(ctx) {
  * @param {{source: object, name?: string, limits?: object, control?: object}} input
  */
 
-/**
- * Move a byte offset backwards to the start of its line.
- *
- * Resuming exactly at a saved offset can land in the middle of a record, so
- * the importer re-reads from the beginning of that line. Because the saved
- * offset is the position where the first uncommitted record began, this
- * repeats at most one record and never skips one.
- */
-export async function alignToLineBoundary(source, offset) {
-  if (!offset || offset <= 0) return 0;
-  if (!source?.seekable) return offset;
-  const windowSize = Math.min(offset, 64 * 1024);
-  try {
-    const window = new Uint8Array(await source.slice(offset - windowSize, offset));
-    for (let i = window.length - 1; i >= 0; i--) {
-      if (window[i] === 0x0a) return offset - windowSize + i + 1;
-    }
-  } catch {
-    return offset;
-  }
-  return 0;
-}
-
 export async function planImport({ source, name = "file", limits: limitOverrides, control = createControl() }) {
   const limits = resolveLimits(limitOverrides);
   const accountant = new Accountant(limits);
   const startedAt = Date.now();
   const warnings = [];
+  // Notes that describe a working detection rather than a problem ("a JSON
+  // array is read element by element") are reported as info, not warnings.
+  const info = [];
   const stats = emptyStats();
 
   const head = new Uint8Array(await source.head(Math.min(limits.sampleBytes, source.size || limits.sampleBytes)));
@@ -806,7 +786,8 @@ export async function planImport({ source, name = "file", limits: limitOverrides
       const sniffed = sniffDataFormat(detectedHead, { name });
       dataFormat = sniffed.format;
       encoding = sniffed.encoding;
-      warnings.push(...sniffed.notes);
+      warnings.push(...(sniffed.notes || []));
+      info.push(...(sniffed.info || []));
       if (sniffed.format === "binary") {
         throw new UnsupportedFormatError(
           "That file is binary data, not text or a supported dataset. Ember imports text, JSON, CSV/TSV, XML, " +
@@ -873,6 +854,7 @@ export async function planImport({ source, name = "file", limits: limitOverrides
     parquet: parquetInfo,
     preview: documents,
     warnings: dedupeStrings([...warnings, ...stats.warnings]).slice(0, 24),
+    info: dedupeStrings(info).slice(0, 12),
     stats: {
       malformed: stats.malformed,
       skipped: stats.skipped,
@@ -937,7 +919,8 @@ export function describeExtraction(extraction, dataFormat) {
  * @param {object} [input.limits]
  * @param {object} [input.control]
  * @param {Function} [input.onProgress]
- * @param {number} [input.resumeOffset] byte offset to resume from (line formats)
+ * @param {number} [input.resumeRecords] records already committed by a
+ *   previous run; they are read and skipped, so nothing is lost or repeated
  * @param {object} [input.checkpointer] { save(manifest) }
  */
 export async function runImport({
@@ -947,12 +930,12 @@ export async function runImport({
   limits: limitOverrides,
   control = createControl(),
   onProgress = () => {},
-  resumeOffset = 0,
+  resumeRecords = 0,
   checkpointer = null,
 }) {
   const limits = resolveLimits(limitOverrides);
-  // Bytes before resumeOffset were counted by the previous run.
-  const accountant = new Accountant(limits, { sourceBytes: resumeOffset });
+  // Records before resumeRecords were already committed by the previous run.
+  const accountant = new Accountant(limits);
   const stats = emptyStats();
   stats.warnings.push(...(plan.warnings || []));
   const startedAt = Date.now();
@@ -973,7 +956,13 @@ export async function runImport({
   let currentEntry = null;
   let readerRef = null;
   let sourceReader = null;
-  let baseOffset = 0;
+  // Resume works on records, not byte offsets: a decoder reads ahead of the
+  // record it is parsing, so a byte offset can only ever be an upper bound.
+  // Re-reading the prefix and skipping the records already committed is
+  // exact, and any overlap is merged by content hash.
+  const alreadyImported = Math.max(0, Number(resumeRecords) || 0);
+  let itemsProcessed = 0;
+  let itemsCommitted = 0;
 
   const sourceTotal = Number.isFinite(plan.size) && plan.size > 0 ? plan.size : null;
   const bytesRead = () => Math.max(source.bytesRead || 0, accountant.sourceBytes);
@@ -987,7 +976,12 @@ export async function runImport({
       stage,
       bytesRead: bytes,
       sourceBytes: sourceTotal,
-      percent: sourceTotal ? Math.min(99, Math.round((bytes / sourceTotal) * 100)) : null,
+      percent:
+        stage === "completed"
+          ? 100
+          : sourceTotal
+            ? Math.min(99, Math.round((bytes / sourceTotal) * 100))
+            : null,
       records: accountant.records,
       documents,
       accepted,
@@ -1017,7 +1011,7 @@ export async function runImport({
         ...plan,
         status: "running",
         counts: { documents, accepted, merged, skipped: stats.skipped, failed: stats.malformed + stats.failedEntries },
-        resumeOffset: plan.resumable ? safeOffset : 0,
+        resumeRecords: plan.resumable ? itemsCommitted : 0,
         updatedAt: Date.now(),
       });
     } catch {
@@ -1027,11 +1021,6 @@ export async function runImport({
 
   const batch = [];
   let batchChars = 0;
-  // Offset at which the first record of the current batch was parsed. It is
-  // an upper bound on that record's start, so saving it can only cause
-  // duplicates (merged by content hash) — never a gap.
-  let batchStartBytes = null;
-  let safeOffset = resumeOffset;
 
   async function flushBatch() {
     if (!batch.length) return;
@@ -1044,14 +1033,9 @@ export async function runImport({
     accepted += result.accepted;
     merged += result.merged;
     documents += rows.length;
-    if (batchStartBytes != null) {
-      // The decoder pulls whole chunks, so back off by the largest chunk seen:
-      // the resulting offset is never past the start of the first record the
-      // batch did not include, and duplicates are merged by content hash.
-      const lookAhead = (sourceReader?.maxChunk || 0) + 8;
-      safeOffset = Math.max(resumeOffset > 0 ? baseOffset : 0, batchStartBytes - lookAhead);
-    }
-    batchStartBytes = null;
+    // Only records whose documents are durably committed may be skipped on a
+    // resume; a record still sitting in the batch must be read again.
+    itemsCommitted = itemsProcessed;
     for (const row of rows) accountant.noteDocument(row.text.length);
     await checkpoint();
     stage = previousStage === "opening" ? "reading" : previousStage;
@@ -1060,9 +1044,7 @@ export async function runImport({
 
   try {
     await sink.begin({ plan });
-    const startOffset = resumeOffset > 0 ? await alignToLineBoundary(source, resumeOffset) : 0;
-    baseOffset = startOffset;
-    const opened = await openLayers(source, { limits, accountant, startOffset });
+    const opened = await openLayers(source, { limits, accountant });
     sourceReader = opened.sourceReader;
     readerRef = opened.reader;
     const { chain, container } = opened;
@@ -1084,7 +1066,7 @@ export async function runImport({
 
     stage = "reading";
     const head = await readerRef.peek(limits.sampleBytes);
-    if (!head.length && resumeOffset === 0 && !container) {
+    if (!head.length && alreadyImported === 0 && !container) {
       throw new ImportError("The file is empty after opening its layers.", { code: "empty-file", stage: "reading" });
     }
 
@@ -1118,6 +1100,12 @@ export async function runImport({
       control.check();
       accountant.checkRecordTime();
       currentEntry = item.entry || null;
+      if (itemsProcessed < alreadyImported) {
+        // Already imported by the previous run: read it (the decoder has to
+        // advance) but do not normalise, commit or count it again.
+        itemsProcessed += 1;
+        continue;
+      }
       const doc = item.doc;
       if (!doc || !doc.text) {
         stats.skipped += 1;
@@ -1131,11 +1119,19 @@ export async function runImport({
         continue;
       }
       const parts = splitForCorpus(normalized.text, limits.docChars);
+      // Refuse the whole record rather than committing a batch that pushes
+      // the import past its document cap: a limit must stop cleanly, not
+      // leave the corpus in a state the report cannot describe.
+      if (documents + batch.length + parts.length > limits.maxDocuments) {
+        throw new ImportLimitError({
+          limit: { name: "maxDocuments", max: limits.maxDocuments },
+          value: documents + batch.length + parts.length,
+          stage: "committing documents",
+          hint: "The import stopped before the corpus grew without bound.",
+        });
+      }
       for (let part = 0; part < parts.length; part++) {
         const text = parts[part];
-        if (batch.length === 0) {
-          batchStartBytes = baseOffset + (sourceReader?.bytesConsumed ?? 0);
-        }
         batch.push({
           text,
           title: doc.title || fallbackTitle(plan.name, item.entry),
@@ -1158,6 +1154,7 @@ export async function runImport({
         batchChars += text.length;
         if (batch.length >= limits.batchDocs || batchChars >= limits.batchChars) await flushBatch();
       }
+      itemsProcessed += 1;
       if (Date.now() - lastProgress > 250) progress();
     }
 
@@ -1170,7 +1167,8 @@ export async function runImport({
       documents,
       stats: summarizeStats(stats, accountant, plan),
     });
-    await checkpoint(true);
+    // No checkpoint after the final commit: it would overwrite the completed
+    // manifest with a running one.
     outcome = "completed";
   } catch (error) {
     if (error instanceof ImportCancelled) {
@@ -1193,7 +1191,7 @@ export async function runImport({
         partial: true,
         status: outcome,
         documents,
-        resumeOffset: plan.resumable ? safeOffset : 0,
+        resumeRecords: plan.resumable ? itemsCommitted : 0,
         stats: summarizeStats(stats, accountant, plan),
       });
     } catch (commitError) {
@@ -1207,7 +1205,7 @@ export async function runImport({
           status: outcome,
           error: failure,
           counts: { documents, accepted, merged, skipped: stats.skipped, failed: stats.malformed + stats.failedEntries },
-          resumeOffset: plan.resumable ? safeOffset : 0,
+          resumeRecords: plan.resumable ? itemsCommitted : 0,
           updatedAt: Date.now(),
         });
       } catch {
@@ -1253,17 +1251,17 @@ export async function runImport({
     decompressedBytes: accountant.decompressedBytes,
     elapsedMs: Date.now() - startedAt,
     resumable: plan.resumable,
-    resumeOffset: plan.resumable ? safeOffset : 0,
+    // A completed import has nothing left to resume; a paused or partial one
+    // reports how many records are already committed.
+    resumeRecords: plan.resumable && outcome !== "completed" ? itemsCommitted : 0,
     dataFormat: plan.dataFormat,
     chain: plan.chain,
     extractionSummary: plan.extractionSummary,
   };
-  onProgress({
-    ...summary,
-    stage: outcome,
-    percent: outcome === "completed" ? 100 : null,
-    message: describeStage(outcome, null),
-  });
+  // A final event with the same shape as every other progress event, so the
+  // UI never has to special-case the last one.
+  stage = outcome;
+  progress(true);
   return summary;
 }
 

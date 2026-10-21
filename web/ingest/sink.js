@@ -27,7 +27,7 @@ export function createCorpusSink(store, options = {}) {
   let createdAt = now();
   let documentsBefore = 0;
 
-  function manifestFor({ status, counts, error = null, warnings = [], resumeOffset = 0, stats = null }) {
+  function manifestFor({ status, counts, error = null, warnings = [], resumeRecords = 0, stats = null }) {
     return {
       id: plan.id,
       name: plan.name,
@@ -54,7 +54,7 @@ export function createCorpusSink(store, options = {}) {
       },
       counts: counts || {},
       warnings,
-      resumeOffset,
+      resumeRecords,
       error,
       stats,
       createdAt,
@@ -99,7 +99,7 @@ export function createCorpusSink(store, options = {}) {
           status: checkpoint.status || "running",
           counts: checkpoint.counts || {},
           error: checkpoint.error || null,
-          resumeOffset: checkpoint.resumeOffset || 0,
+          resumeRecords: checkpoint.resumeRecords || 0,
         }),
         plan: { ...(checkpoint.plan || plan) },
       };
@@ -110,7 +110,7 @@ export function createCorpusSink(store, options = {}) {
       return manifest;
     },
 
-    async commit({ plan: planned, partial = false, status = null, documents = null, resumeOffset = 0, stats = null }) {
+    async commit({ plan: planned, partial = false, status = null, documents = null, resumeRecords = 0, stats = null }) {
       const documentsAfter = await store.countDocs();
       const counts = {
         documents: documents ?? stats?.records ?? undefined,
@@ -124,8 +124,8 @@ export function createCorpusSink(store, options = {}) {
         counts,
         warnings: stats?.warnings || [],
         stats,
-        // Keep the offset of a paused/partial import so Resume can continue.
-        resumeOffset: partial ? resumeOffset : 0,
+        // Keep the progress of a paused/partial import so Resume can continue.
+        resumeRecords: partial ? resumeRecords : 0,
       });
       await store.putManifest(manifest);
       options.onChange?.(manifest);
@@ -158,7 +158,6 @@ function stripPlan(plan) {
     resumable = false,
     status = null,
     counts = null,
-    resumeOffset = 0,
     error = null,
     updatedAt = null,
   } = plan;
@@ -176,7 +175,6 @@ function stripPlan(plan) {
     resumable,
     ...(status ? { status } : {}),
     ...(counts ? { counts } : {}),
-    ...(resumeOffset ? { resumeOffset } : {}),
     ...(error ? { error } : {}),
     ...(updatedAt ? { updatedAt } : {}),
   };

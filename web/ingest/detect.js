@@ -160,6 +160,18 @@ export function sniffContainer(head, { isTopLevel = false, totalSize = null, tai
 }
 
 /** True when the sample looks like a binary blob rather than text. */
+/** Share of C0 control characters (excluding tab/newline/vertical-tab). */
+export function controlRatio(text) {
+  if (!text) return 0;
+  let control = 0;
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    if (code === 0) return 1;
+    if (code < 9 || (code > 13 && code < 32)) control += 1;
+  }
+  return control / Math.max(1, text.length);
+}
+
 export function looksBinary(text, bytes) {
   if (!bytes?.length) return false;
   const sample = bytes.subarray(0, Math.min(bytes.length, 4096));
@@ -207,7 +219,10 @@ export function sniffDataFormat(head, { name = "" } = {}) {
   }
   const trimmed = text.replace(/^\ufeff/, "").replace(/^\s+/, "");
 
-  if (looksBinary(trimmed, head)) {
+  // UTF-16 stores ASCII as a NUL-padded pair, so the raw byte test would call
+  // every UTF-16 file binary. Judge the decoded text instead.
+  const utf16 = probe.encoding.startsWith("utf-16");
+  if (utf16 ? controlRatio(trimmed) > 0.05 : looksBinary(trimmed, head)) {
     return { format: "binary", confidence: "likely", notes, encoding: probe.encoding };
   }
   if (!trimmed) {
@@ -268,7 +283,7 @@ export function sniffDataFormat(head, { name = "" } = {}) {
 
 function classifyJson(text, hint) {
   if (text.startsWith("[")) {
-    return { format: "json", confidence: "certain", notes: ["A JSON array is read element by element."] };
+    return { format: "json", confidence: "certain", info: ["A JSON array is read element by element."] };
   }
   const lines = text.split(/\r\n|\n|\r/).filter((line) => line.trim());
   if (lines.length >= 2) {
@@ -309,7 +324,7 @@ function classifyDelimited(text, hint) {
         confidence: stats.lines >= 3 ? "likely" : "guess",
         delimiter: candidate.delimiter,
         delimiterName: candidate.name,
-        notes: [`${stats.fields} ${candidate.name}-separated fields detected on ${stats.lines} sampled lines.`],
+        info: [`${stats.fields} ${candidate.name}-separated fields on ${stats.lines} sampled lines.`],
       };
     }
   }

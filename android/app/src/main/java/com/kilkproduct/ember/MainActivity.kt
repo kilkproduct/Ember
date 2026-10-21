@@ -328,15 +328,9 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                                             ui = ui,
                                             vm = vm,
                                             onPickFile = {
-                                                importLauncher.launch(
-                                                    arrayOf(
-                                                        "application/json",
-                                                        "application/x-ndjson",
-                                                        "text/plain",
-                                                        "text/markdown",
-                                                        "application/octet-stream",
-                                                    )
-                                                )
+                                                // Format is detected from the bytes, so any
+                                                // file can be picked here.
+                                                importLauncher.launch(arrayOf("*/*"))
                                             },
                                             onOpenAddText = { sheetName = SheetId.ADD_TEXT.name },
                                             onOpenAddPack = { sheetName = SheetId.ADD_PACK.name },
@@ -444,6 +438,8 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
             onDismiss = { vm.repo.discardImportPreview() },
             onCommit = { vm.repo.commitImport() },
             onCancelRun = { vm.repo.cancelImport() },
+            onPauseRun = { vm.repo.pauseImport() },
+            onResumeRun = { vm.repo.resumeImport() },
             onClearError = { vm.repo.discardImportPreview() },
         )
     }

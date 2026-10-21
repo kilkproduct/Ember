@@ -7,6 +7,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import fs from "node:fs";
 import { JSDOM } from "jsdom";
 
 const require = createRequire(import.meta.url);
@@ -417,4 +418,158 @@ test("teacher configuration persists and draft acceptance stores a lesson", asyn
 test("unknown methods and unready operations fail with readable errors", async () => {
   await assert.rejects(() => call("nope.nothing"), /Unknown backend method/);
   await call("file.discard", { token: "missing" });
+});
+
+// ---------------------------------------------------------------------------
+// Dataset ingestion through the bridge
+// ---------------------------------------------------------------------------
+// The Kotlin side stages the picked file and serves it under
+// `/__ember_file__/<token>`; these tests serve the same URLs from the commited
+// fixtures so the whole path (inspect -> commit -> manifests) runs for real.
+
+const fixtureDir = new URL("./fixtures/", import.meta.url);
+
+function serveFixtures(bodies = {}) {
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const key = decodeURIComponent(String(url).split("/").pop());
+    const body = bodies[key];
+    if (!body) return new Response("not found", { status: 404 });
+    return new Response(body, { status: 200, headers: { "content-type": "application/octet-stream" } });
+  };
+  return () => {
+    globalThis.fetch = original;
+  };
+}
+
+function fixtureBody(name) {
+  return new Uint8Array(fs.readFileSync(new URL(name, fixtureDir)));
+}
+
+test("file.inspect detects a real dataset and file.commit stores its documents", async () => {
+  const restore = serveFixtures({ "tok-csv": fixtureBody("articles.csv") });
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-csv", name: "articles.csv" });
+    assert.equal(inspected.kind, "dataset");
+    assert.equal(inspected.format, "csv");
+    assert.equal(inspected.documents, 5);
+    assert.match(inspected.message, /CSV/i);
+    assert.ok(inspected.preview.length === 5);
+
+    const committed = await call("file.commit", { token: "tok-csv" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal(committed.counts.accepted, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+
+    const imports = await call("file.imports");
+    assert.equal(imports.imports.length, 1);
+    assert.equal(imports.imports[0].status, "completed");
+    assert.equal(imports.imports[0].dataFormat, "csv");
+  } finally {
+    restore();
+  }
+});
+
+test("file.inspect still recognizes an Ember brain", async () => {
+  // The import path must not steal brain files: a real exported brain is
+  // recognized as a brain, whatever the file is called.
+  await call("corpus.clear");
+  await call("corpus.addText", { title: "seed", text: "the kettle sings when the water boils and the steam curls upward" });
+  await call("vessel.cast", {
+    config: { nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 16, vocabSize: 500, dropout: 0, ffnMult: 2 },
+    lr: 0.003,
+    tokenizer: "byte-bpe",
+  });
+  const exported = await call("brain.exportJson", { includeCorpus: false });
+  const payload = new TextEncoder().encode(exported.json);
+  const restore = serveFixtures({ "tok-brain": payload });
+  try {
+    const inspected = await call("file.inspect", { token: "tok-brain", name: "probe.json" });
+    assert.equal(inspected.kind, "brain");
+    assert.ok(inspected.fields.some((f) => f.label === "Parameters"));
+  } finally {
+    restore();
+  }
+});
+
+test("a compressed and archived dataset imports through the bridge", async () => {
+  const restore = serveFixtures({ "tok-zip": fixtureBody("data.zip") });
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-zip", name: "data.zip" });
+    assert.equal(inspected.format, "zip-archive");
+    const committed = await call("file.commit", { token: "tok-zip" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 9);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 9);
+  } finally {
+    restore();
+  }
+});
+
+test("import progress, pause and resume work over the bridge", async () => {
+  const rows = Array.from({ length: 3000 }, (_, i) =>
+    JSON.stringify({ text: `bridge record ${i} with enough prose to look like a real dataset row` })
+  );
+  const body = new TextEncoder().encode(rows.join("\n"));
+  const restore = serveFixtures({ "tok-big": body });
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-big", name: "big.jsonl" });
+    assert.equal(inspected.format, "jsonl");
+    assert.equal(inspected.resumable, true);
+
+    const cursor = eventCursor();
+    const commitPromise = call("file.commit", { token: "tok-big" });
+    await waitForEvent("import.progress", cursor, 30_000);
+    await call("file.pause", { token: "tok-big" });
+    const paused = await commitPromise;
+    assert.equal(paused.outcome, "paused");
+    const storedAfterPause = paused.counts.documents;
+    assert.ok(storedAfterPause > 0);
+    assert.ok(storedAfterPause < 3000);
+
+    const resumed = await call("file.resume", { token: "tok-big" });
+    assert.equal(resumed.outcome, "completed");
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 3000);
+  } finally {
+    restore();
+  }
+});
+
+test("a cancelled bridge import keeps what it stored and says so", async () => {
+  const rows = Array.from({ length: 3000 }, (_, i) =>
+    JSON.stringify({ text: `cancel record ${i} with enough prose to look like a real dataset row` })
+  );
+  const body = new TextEncoder().encode(rows.join("\n"));
+  const restore = serveFixtures({ "tok-cancel": body });
+  try {
+    await call("corpus.clear");
+    await call("file.inspect", { token: "tok-cancel", name: "cancel.jsonl" });
+    const cursor = eventCursor();
+    const commitPromise = call("file.commit", { token: "tok-cancel" });
+    await waitForEvent("import.progress", cursor, 30_000);
+    await call("file.cancel", { token: "tok-cancel" });
+    const result = await commitPromise;
+    assert.equal(result.outcome, "cancelled");
+    const total = (await call("corpus.list", { limit: 1 })).total;
+    assert.equal(total, result.counts.documents);
+    assert.ok(total < 3000);
+  } finally {
+    restore();
+  }
+});
+
+test("an unreadable staged file fails with an actionable message", async () => {
+  const restore = serveFixtures({});
+  try {
+    await assert.rejects(
+      () => call("file.inspect", { token: "missing-file", name: "gone.csv" }),
+      /no longer available/i
+    );
+  } finally {
+    restore();
+  }
 });
