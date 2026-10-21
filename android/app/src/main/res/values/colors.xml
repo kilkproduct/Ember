@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Launcher background and the Android 12+ splash colour. -->
+    <color name="ember_background">#12100E</color>
+</resources>
