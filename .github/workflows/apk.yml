@@ -35,16 +35,17 @@ jobs:
         run: |
           set -o pipefail
           gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
-      # TEMP: surface build errors as annotations while iterating on this PR.
+      # TEMP: surface build errors as one multi-line annotation while iterating.
       - name: Report build errors
         if: failure()
         run: |
-          grep -E "^(e|w): |^FAILURE|^\* What went wrong" -A2 /tmp/gradle.log | head -80 | while IFS= read -r line; do
-            echo "::error::$line"
-          done
-          tail -30 /tmp/gradle.log | while IFS= read -r line; do
-            echo "::error::$line"
-          done
+          {
+            grep -E "^e: " /tmp/gradle.log | head -40
+            grep -A4 "^\* What went wrong" /tmp/gradle.log | head -12
+          } > /tmp/errors.txt || true
+          if [ ! -s /tmp/errors.txt ]; then tail -25 /tmp/gradle.log > /tmp/errors.txt; fi
+          BODY=$(sed -e 's/%/%25/g' -e 's/\r//g' /tmp/errors.txt | awk '{printf "%s%%0A", $0}')
+          echo "::error::$BODY"
       - name: Name the APK
         run: cp android/app/build/outputs/apk/debug/app-debug.apk Ember-debug.apk
       - uses: actions/upload-artifact@v4

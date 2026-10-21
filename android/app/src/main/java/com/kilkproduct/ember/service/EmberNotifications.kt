@@ -55,14 +55,14 @@ class EmberNotifications(private val context: Context) {
             Notification.Builder(context)
         }
         val notification = builder
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_ember)
             .setContentTitle(title)
             .setContentText(body.take(160))
             .setStyle(Notification.BigTextStyle().bigText(body))
             .setContentIntent(pending)
             .setAutoCancel(true)
             .setCategory(
-                if (level == NoticeLevel.ERROR) Notification.CATEGORY_ERR else Notification.CATEGORY_STATUS
+                if (level == NoticeLevel.ERROR) Notification.CATEGORY_ERROR else Notification.CATEGORY_STATUS
             )
             .build()
         val manager = context.getSystemService(NotificationManager::class.java)

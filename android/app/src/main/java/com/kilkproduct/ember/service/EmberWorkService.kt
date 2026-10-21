@@ -142,7 +142,7 @@ class EmberWorkService : Service() {
             Notification.Builder(this)
         }
         return builder
-            .setSmallIcon(R.mipmap.ic_launcher)
+            .setSmallIcon(R.drawable.ic_stat_ember)
             .setContentTitle("Ember is working")
             .setContentText(label)
             .setStyle(
