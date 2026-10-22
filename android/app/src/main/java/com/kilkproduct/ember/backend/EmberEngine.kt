@@ -91,6 +91,13 @@ class EmberEngine private constructor(private val app: Application) {
         private const val MAX_IMPORT_BYTES = 8L * 1024 * 1024 * 1024
         private const val MIN_FREE_BYTES = 64L * 1024 * 1024
 
+        /**
+         * Largest single range served over the JavaScript bridge. The JS
+         * side chunks bigger reads into 4 MiB calls; this cap only bounds
+         * a single bridge payload if a caller asks for more.
+         */
+        private const val MAX_BRIDGE_RANGE_BYTES = 8 * 1024 * 1024
+
         @Volatile
         private var instance: EmberEngine? = null
 
@@ -570,6 +577,38 @@ class EmberEngine private constructor(private val app: Application) {
     // ---------------------------------------------------------------------
 
     private inner class NativeBridge {
+        /**
+         * Byte length of a staged import file, or -1 if it is gone.
+         *
+         * Part of the bridge read path below: staged files are read over
+         * this synchronous bridge instead of fetch() through the WebView's
+         * request interception, whose handling of Range/available/skip for
+         * intercepted streams has repeatedly corrupted or refused reads
+         * of real files in ways the HTTP layer cannot express. The
+         * /__ember_file__/ handler above remains as a fallback.
+         */
+        @JavascriptInterface
+        fun stagedFileLength(token: String?): Long {
+            val file = token?.let(::importFileFor) ?: return -1L
+            return if (file.exists()) file.length() else -1L
+        }
+
+        /**
+         * Read up to [length] bytes of a staged file at [start], Base64
+         * encoded; "" at EOF, null on any error (unknown token, unreadable
+         * file, bad offset). Synchronous from JS: it runs on the bridge
+         * thread, reads from local flash, and is used for bounded random
+         * access (signatures, Parquet footers/metadata, row groups).
+         */
+        @JavascriptInterface
+        fun readStagedRange(token: String?, start: Long, length: Int): String? {
+            if (length < 0) return null
+            val file = token?.let(::importFileFor) ?: return null
+            val bytes = readFileRange(file, start, minOf(length, MAX_BRIDGE_RANGE_BYTES))
+                ?: return null
+            return Base64.encodeToString(bytes, Base64.NO_WRAP)
+        }
+
         @JavascriptInterface
         fun onResponse(id: String?, ok: Boolean, resultJson: String?, error: String?) {
             val key = id ?: return
@@ -726,6 +765,36 @@ fun importTokenFromPath(path: String): String =
         .substringBefore('#')
         .trimEnd('/')
         .substringAfterLast('/')
+
+/**
+ * Read up to [length] bytes of [file] starting at [start]; fewer at EOF,
+ * empty when [start] is at or past EOF, null on any error or bad input.
+ *
+ * All offsets are Long: staged datasets are routinely past 2 GiB (a
+ * FineWeb shard is ~2.147 GB), where the WebView's int-based
+ * available()/skip() path is one overflow away from corruption. This is
+ * the exact-bytes back end of the bridge range reader. Covered by
+ * `ReadFileRangeTest`, including offsets past 2 GiB on a sparse file.
+ */
+fun readFileRange(file: File, start: Long, length: Int): ByteArray? {
+    if (start < 0 || length < 0) return null
+    if (length == 0 || start >= file.length()) return ByteArray(0)
+    return try {
+        FileInputStream(file).use { input ->
+            input.channel.position(start)
+            val buffer = ByteArray(length)
+            var read = 0
+            while (read < length) {
+                val n = input.read(buffer, read, length - read)
+                if (n < 0) break
+                read += n
+            }
+            if (read == length) buffer else buffer.copyOf(read)
+        }
+    } catch (_: Throwable) {
+        null
+    }
+}
 
 /** Stops reading after [remaining] bytes so a range response never runs long. */
 class BoundedInputStream(

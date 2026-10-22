@@ -784,3 +784,75 @@ test("a staged Parquet with damaged header magic imports via its footer", async 
     restore();
   }
 });
+
+test("staged files import through the native bridge reader without fetch", async () => {
+  // The WebView fetch/interception path returned wrong bytes for a
+  // 2.147 GB FineWeb shard on a real device (header read as mid-file
+  // bytes "65 77 2c 81 ..."). When the bridge offers readStagedRange,
+  // staged bytes must come off disk through it — fetch must not be
+  // touched at all, and the size comes from stagedFileLength (no hint
+  // is passed here).
+  const body = fixtureBody("articles_snappy.parquet");
+  const originalFetch = globalThis.fetch;
+  const bridgedReads = [];
+  globalThis.fetch = async (url, ...args) => {
+    if (String(url).includes("__ember_file__")) {
+      throw new TypeError("fetch must not be used for staged files when the bridge reader exists");
+    }
+    return originalFetch(url, ...args);
+  };
+  globalThis.EmberNative.stagedFileLength = (token) => (token === "tok-bridge" ? body.length : -1);
+  globalThis.EmberNative.readStagedRange = (token, start, length) => {
+    if (token !== "tok-bridge" || start < 0 || length < 0) return null;
+    bridgedReads.push({ start, length });
+    return Buffer.from(body.subarray(start, start + length)).toString("base64");
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-bridge", name: "000_00000.parquet" });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-bridge" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+    assert.ok(bridgedReads.length > 0, "the bridge reader served the file");
+    assert.ok(
+      bridgedReads.some((read) => read.start > 0),
+      "the bridge reader served real seeks (footer/row-group reads)",
+    );
+  } finally {
+    delete globalThis.EmberNative.stagedFileLength;
+    delete globalThis.EmberNative.readStagedRange;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a bridge read failure mid-inspect reports the byte offset", async () => {
+  // The bridge honours the small probe reads near offset 0 but dies on
+  // the real seeks (footer at size-8): the failure must surface with the
+  // byte offset, not as a bare bridge exception.
+  const body = fixtureBody("articles_snappy.parquet");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, ...args) => {
+    if (String(url).includes("__ember_file__")) {
+      throw new TypeError("fetch must not be used for staged files when the bridge reader exists");
+    }
+    return originalFetch(url, ...args);
+  };
+  globalThis.EmberNative.stagedFileLength = (token) => (token === "tok-broken" ? body.length : -1);
+  globalThis.EmberNative.readStagedRange = (token, start, length) => {
+    if (token !== "tok-broken") return null;
+    if (start >= 64) throw new Error("ENOENT simulated");
+    return Buffer.from(body.subarray(start, start + length)).toString("base64");
+  };
+  try {
+    await assert.rejects(
+      call("file.inspect", { token: "tok-broken", name: "000_00000.parquet" }),
+      /Reading the picked file failed at byte \d+: ENOENT simulated/,
+    );
+  } finally {
+    delete globalThis.EmberNative.stagedFileLength;
+    delete globalThis.EmberNative.readStagedRange;
+    globalThis.fetch = originalFetch;
+  }
+});

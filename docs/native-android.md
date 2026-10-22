@@ -67,10 +67,16 @@ and no data reset is involved.
 ## Files (Storage Access Framework)
 
 * Import: `OpenDocument` → content is copied into `cache/imports/<token>` on
-  an IO dispatcher (limit 256 MB) and served to the engine at
-  `/__ember_file__/<token>`. The engine parses and validates it and returns a
-  preview. Nothing is written to the corpus or the live model until the user
-  confirms. Brain files are validated and given a test forward pass before
+  an IO dispatcher (limit 256 MB). The engine reads the staged file through
+  the native bridge (`readStagedRange`/`stagedFileLength`: exact Long-offset
+  reads off disk, base64 over the bridge) — deliberately not through
+  `fetch()` on `/__ember_file__/<token>`, because the WebView's interception
+  of `Range`/`available()`/`skip()` has repeatedly corrupted or refused
+  reads of real files at multi-GB scale (e.g. a 2.147 GB FineWeb shard
+  whose header came back as mid-file bytes). The HTTP handler remains as a
+  fallback for builds without the bridge methods. The engine parses and
+  validates the file and returns a preview. Nothing is written to the
+  corpus or the live model until the user confirms. Brain files are validated and given a test forward pass before
   `adopt()`; a failed import leaves the current brain untouched.
 * Export: the engine streams the brain or checkpoint in 48 KiB base64 chunks
   into `cache/exports/`. Compose then launches `CreateDocument`, the user

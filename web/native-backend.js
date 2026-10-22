@@ -55,7 +55,7 @@ import { TEACHERS, TeacherDesk, WINDOWS } from "./teachers.js";
 import { githubHead, githubPull, githubPush } from "./github.js";
 import { createControl, planImport, runImport } from "./ingest/pipeline.js";
 import { createCorpusSink } from "./ingest/sink.js";
-import { HttpSource, sourceFromBlob } from "./ingest/source.js";
+import { HttpSource, sourceFromBlob, base64ToBytes } from "./ingest/source.js";
 
 // Imported files are staged natively and streamed (range requests) rather
 // than buffered in JavaScript, so this is a sanity cap that matches the
@@ -462,6 +462,17 @@ async function resumeForageIfSaved() {
 }
 
 async function doInit() {
+  // This runtime must never be service-worker controlled: a registration
+  // left on this origin by the old web APK would intercept staged-file
+  // fetches with cache-first semantics. Unregister any that exist.
+  try {
+    const registrations = await globalThis.navigator?.serviceWorker?.getRegistrations?.();
+    if (registrations?.length) {
+      await Promise.all(registrations.map((registration) => registration.unregister().catch(() => {})));
+    }
+  } catch {
+    /* no service worker support (tests, older WebViews) */
+  }
   state.runtime = globalThis.navigator?.userAgent || "unknown JavaScript runtime";
   const store = await openStore();
   state.store = store;
@@ -910,6 +921,74 @@ function stagedRangeReader(url) {
   };
 }
 
+const BRIDGE_RANGE_CHUNK = 4 * 1024 * 1024;
+
+/**
+ * Byte length of a staged file from the native bridge, or null when the
+ * bridge predates the method or the file is gone. HTTP headers through
+ * the WebView's interception are not a trustworthy source of size at
+ * multi-GB scale; the filesystem is.
+ */
+function bridgedStagedLength(token) {
+  try {
+    const length = bridge()?.stagedFileLength(token);
+    return Number.isFinite(length) && length >= 0 ? length : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The Android ranged reader: bytes from disk via the bridge's
+ * readStagedRange (Kotlin FileInputStream at an exact channel offset,
+ * Base64-encoded), chunked to keep single bridge payloads bounded.
+ * HttpSource only needs a function returning the exact requested
+ * bytes; this one never touches fetch(), the WebView's Range handling,
+ * or any service worker — the layers that have repeatedly corrupted or
+ * refused staged-file reads. A short chunk means EOF (return what we
+ * have; callers validate the total). A null/throw is a real error
+ * worth surfacing, not a reason to silently fall back to the transport
+ * that is known to lie.
+ */
+function bridgedRangeReader(token) {
+  return async (start, length) => {
+    const native = bridge();
+    if (typeof native?.readStagedRange !== "function") {
+      throw new Error("This app build cannot read large picked files; update the app.");
+    }
+    if (length <= 0) return new Uint8Array(0);
+    const out = new Uint8Array(length);
+    let offset = 0;
+    while (offset < length) {
+      const request = Math.min(BRIDGE_RANGE_CHUNK, length - offset);
+      let encoded;
+      try {
+        encoded = native.readStagedRange(token, start + offset, request);
+      } catch (error) {
+        throw new Error(
+          `Reading the picked file failed at byte ${start + offset}: ${error?.message || String(error)}`,
+        );
+      }
+      if (encoded == null) {
+        throw new Error(
+          `Reading the picked file failed at byte ${start + offset}: the file is no longer available.`,
+        );
+      }
+      const chunk = encoded ? base64ToBytes(encoded) : new Uint8Array(0);
+      if (chunk.length > request) {
+        // A misbehaving bridge must not smuggle extra bytes past us.
+        out.set(chunk.subarray(0, request), offset);
+        offset += request;
+        continue;
+      }
+      out.set(chunk, offset);
+      offset += chunk.length;
+      if (chunk.length < request) break; // EOF
+    }
+    return out.subarray(0, offset);
+  };
+}
+
 /**
  * Prove a staged file can be read at a non-zero offset, not just at 0.
  *
@@ -960,11 +1039,28 @@ async function pendingFileSource(token, hints = {}) {
   const cached = state.pendingFiles.get(token);
   if (cached?.source) return cached.source;
   const url = `/__ember_file__/${encodeURIComponent(token)}`;
-  const size = Number(hints.size) > 0 ? Number(hints.size) : await stagedFileSize(url);
+  // Size from the picker hint, else the filesystem via the bridge, else
+  // (old builds, tests) a Content-Range probe over fetch.
+  const size =
+    Number(hints.size) > 0
+      ? Number(hints.size)
+      : (bridgedStagedLength(token) ?? (await stagedFileSize(url)));
   const name = hints.name || state.pendingFiles.get(token)?.name || "file";
   if (size) {
     // Preferred path: random access without copying the file into JS memory.
-    const ranged = new HttpSource({ url, name, size, readRange: stagedRangeReader(url) });
+    // When the native bridge can read ranges directly (current Android
+    // builds), staged bytes come off disk through it and stream() rides
+    // the same reader — fetch() through the WebView's request
+    // interception is not involved at all. The HTTP reader remains for
+    // builds without the bridge methods and for tests.
+    const bridged = typeof bridge()?.readStagedRange === "function";
+    const ranged = new HttpSource({
+      url,
+      name,
+      size,
+      readRange: bridged ? bridgedRangeReader(token) : stagedRangeReader(url),
+      preferRangedStream: bridged,
+    });
     try {
       if (await probeRanged(ranged, size)) {
         const known = state.pendingFiles.get(token) || {};
