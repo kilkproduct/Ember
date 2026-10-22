@@ -164,7 +164,34 @@ export function sniffContainer(head, { isTopLevel = false, totalSize = null, tai
       return { kind: "refused", format: refused.name, note: refused.note };
     }
   }
-  void totalSize;
+
+  // Footer-detected Parquet. Readers (including the vendored hyparquet)
+  // validate the trailing PAR1 and the metadata length before it, not the
+  // header magic — the footer is where Parquet keeps its directory. So a
+  // file whose header magic is missing or damaged but whose footer is
+  // intact is still readable Parquet, and detection should accept exactly
+  // what the reader can read. The metadata-length sanity check (nonzero,
+  // fits inside the file) keeps a coincidental trailing "PAR1" on random
+  // data from qualifying; the Thrift metadata parse during inspection is
+  // the final gate either way.
+  if (
+    isTopLevel &&
+    tail &&
+    tail.length >= 8 &&
+    Number.isFinite(totalSize) &&
+    totalSize > 8 &&
+    startsWith(tail, [0x50, 0x41, 0x52, 0x31], tail.length - 4)
+  ) {
+    const o = tail.length - 8;
+    const metadataLength = (tail[o] | (tail[o + 1] << 8) | (tail[o + 2] << 16) | (tail[o + 3] << 24)) >>> 0;
+    if (metadataLength > 0 && metadataLength <= totalSize - 8) {
+      return {
+        kind: "data",
+        format: "parquet",
+        note: "Detected as Parquet from its footer: the header magic (PAR1) is missing or damaged, but the footer is intact.",
+      };
+    }
+  }
   return null;
 }
 

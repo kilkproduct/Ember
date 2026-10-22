@@ -762,3 +762,25 @@ test("a staged Parquet whose streamed head is mangled still imports via seek rea
     globalThis.fetch = original;
   }
 });
+
+test("a staged Parquet with damaged header magic imports via its footer", async () => {
+  // On a real device the header of a valid .parquet read back as
+  // mid-file bytes ("65 77 2c 81 ...") while seek reads were exact, so
+  // header-magic detection refused it as binary. Detection now also
+  // accepts an intact Parquet footer (trailing PAR1 + sane metadata
+  // length) — the same check the Parquet reader itself performs.
+  const body = fixtureBody("articles_snappy.parquet").slice();
+  body.fill(0, 0, 4);
+  const restore = serveFixtures({ "tok-noheader": body });
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-noheader", name: "articles_snappy.parquet" });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-noheader" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+  } finally {
+    restore();
+  }
+});

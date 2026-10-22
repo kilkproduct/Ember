@@ -256,6 +256,39 @@ test("Parquet is detected from seek reads even when the streamed head is mangled
   assert.equal(summary.documents, 5);
 });
 
+test("Parquet with a damaged header magic is detected from its footer", async () => {
+  // Readers validate the footer (trailing PAR1 + metadata length), not
+  // the header magic. A file whose first four bytes are damaged — as
+  // reported from a real device, where the header read back as mid-file
+  // bytes while every seek read was exact — must still import, with the
+  // plan saying how it was detected.
+  await reset();
+  const bytes = fixture("articles_snappy.parquet").slice();
+  bytes.fill(0, 0, 4); // destroy the leading PAR1; footer untouched
+  const { plan, summary } = await runBytes(bytes, "damaged-header.parquet");
+  assert.equal(plan.dataFormat, "parquet");
+  assert.ok(
+    plan.warnings.some((warning) => /footer/i.test(warning)),
+    `footer detection should be reported, got: ${plan.warnings.join(" ")}`
+  );
+  assert.equal(summary.outcome, "completed");
+  assert.equal(summary.documents, 5);
+});
+
+test("random binary ending in PAR1 with an impossible metadata length is not Parquet", async () => {
+  await reset();
+  const bytes = Uint8Array.from({ length: 4096 }, (_, i) => (i * 37) % 251);
+  bytes.set([0xff, 0xff, 0xff, 0xff, 0x50, 0x41, 0x52, 0x31], bytes.length - 8);
+  let message = "";
+  try {
+    await runBytes(bytes, "coincidence.parquet");
+  } catch (error) {
+    message = error.message;
+  }
+  assert.match(message, /binary data/);
+  assert.match(message, /Last bytes:/);
+});
+
 test("encrypted Parquet (PARE) is refused by name, not as generic binary", async () => {
   await reset();
   const bytes = new Uint8Array(1024);

@@ -774,6 +774,7 @@ export async function planImport({ source, name = "file", limits: limitOverrides
       }
     } else if (container?.kind === "data" && container.format === "parquet") {
       dataFormat = "parquet";
+      if (container.note) warnings.push(container.note);
       if (!source.seekable || !Number.isFinite(source.size) || chain.length > 0) {
         throw new UnsupportedFormatError(
           chain.length > 0
@@ -805,15 +806,29 @@ export async function planImport({ source, name = "file", limits: limitOverrides
       if (sniffed.format === "binary") {
         // Name what was actually seen: "binary data" alone gives the user
         // (and us) no way to tell a misnamed file from a detection bug.
+        // First AND last bytes: for footer-indexed formats like Parquet
+        // the tail is the more telling half.
+        const toHex = (bytes) => [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
         const seen = (head.length ? head : detectedHead).subarray(0, 16);
-        const magic = [...seen].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
+        const magic = toHex(seen);
+        let tailMagic = "";
+        if (source.seekable && Number.isFinite(source.size) && source.size > 0) {
+          try {
+            const tailBytes = new Uint8Array(await source.slice(Math.max(0, source.size - 16), source.size));
+            tailMagic = toHex(tailBytes);
+          } catch {
+            /* diagnostics only: a failed tail read must not mask the refusal */
+          }
+        }
         const namedParquet = /\.parquet$/i.test(String(name || ""));
         throw new UnsupportedFormatError(
           "That file is binary data, not text or a supported dataset. Ember imports text, JSON, CSV/TSV, XML, " +
             `HTML, Parquet, and the supported compression/archive formats. First bytes: ${magic || "(none)"}.` +
+            (tailMagic ? ` Last bytes: ${tailMagic}.` : "") +
             (namedParquet
-              ? " A Parquet file must start with 50 41 52 31 (\"PAR1\") and end with it too; this one does not," +
-                " so it may be encrypted, truncated, a different format renamed to .parquet, or a download that did not finish."
+              ? " A Parquet file must end with 50 41 52 31 (\"PAR1\") preceded by its metadata length, and" +
+                " normally starts with PAR1 too; neither was found, so it may be encrypted, truncated, a" +
+                " different format renamed to .parquet, or a download that did not finish."
               : ""),
           { format: "binary", stage: "detecting the format" }
         );
