@@ -880,10 +880,17 @@ function rememberImportJob(token, job) {
 function stagedRangeReader(url) {
   return async (start, length) => {
     const end = start + length - 1;
-    const response = await fetch(url, {
-      cache: "no-store",
-      headers: { Range: `bytes=${start}-${end}` },
-    });
+    let response;
+    try {
+      response = await fetch(url, {
+        cache: "no-store",
+        headers: { Range: `bytes=${start}-${end}` },
+      });
+    } catch (error) {
+      // Browser-level failures arrive as a bare "Failed to fetch"; say
+      // which read died so the error is diagnosable.
+      throw new Error(`The staged file could not be read at offset ${start}: ${error.message}`);
+    }
     if (response.status !== 206) {
       try {
         await response.body?.cancel?.();
@@ -892,10 +899,39 @@ function stagedRangeReader(url) {
       }
       throw new Error("The runtime did not honour a byte range.");
     }
-    const bytes = new Uint8Array(await response.arrayBuffer());
+    let bytes;
+    try {
+      bytes = new Uint8Array(await response.arrayBuffer());
+    } catch (error) {
+      throw new Error(`The staged file could not be read at offset ${start}: ${error.message}`);
+    }
     if (bytes.length > length) throw new Error("A byte range came back longer than requested.");
     return bytes;
   };
+}
+
+/**
+ * Prove a staged file can be read at a non-zero offset, not just at 0.
+ *
+ * Android WebView re-applies the Range header to intercepted streams
+ * itself, so a native server that returns a pre-seeked slice passes every
+ * offset-0 read and then fails (or silently mis-reads) the first real
+ * seek — which for this importer is the tail/footer read during planning.
+ * Reading an overlapping window and comparing bytes catches both the
+ * failure and the wrong-bytes case here, where the caller can still fall
+ * back to buffering the file as a Blob instead of failing the import.
+ */
+async function probeRanged(source, size) {
+  const head = await source.head(Math.min(32, size));
+  if (!head.length) return false;
+  if (head.length < 2) return true;
+  const start = Math.floor(head.length / 2);
+  const overlap = new Uint8Array(await source.slice(start, head.length));
+  if (overlap.length !== head.length - start) return false;
+  for (let i = 0; i < overlap.length; i++) {
+    if (overlap[i] !== head[start + i]) return false;
+  }
+  return true;
 }
 
 /**
@@ -930,8 +966,7 @@ async function pendingFileSource(token, hints = {}) {
     // Preferred path: random access without copying the file into JS memory.
     const ranged = new HttpSource({ url, name, size, readRange: stagedRangeReader(url) });
     try {
-      const probe = await ranged.head(16);
-      if (probe.length) {
+      if (await probeRanged(ranged, size)) {
         const known = state.pendingFiles.get(token) || {};
         const entry = { ...known, name, source: ranged, bytes: size };
         state.pendingFiles.set(token, entry);

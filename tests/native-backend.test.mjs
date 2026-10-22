@@ -673,3 +673,54 @@ test("a staged file served with byte ranges imports without buffering it", async
     globalThis.fetch = original;
   }
 });
+
+test("Android range bodies absorb the WebView's own seek", () => {
+  // Chromium re-applies Range to intercepted streams (InputStreamReader::
+  // Seek skips to the first byte, ignoring the 206 status), so a bare
+  // pre-seeked slice is seeked twice and any read past offset 0 — the
+  // Parquet footer read is the first — dies as "Failed to fetch". The
+  // Kotlin side must hand Chromium a SkippedPrefixInputStream; covered
+  // for real by SkippedPrefixInputStreamTest in CI.
+  const kotlin = fs.readFileSync(
+    new URL("../android/app/src/main/java/com/kilkproduct/ember/backend/EmberEngine.kt", import.meta.url),
+    "utf8"
+  );
+  assert.match(kotlin, /class SkippedPrefixInputStream\(/);
+  assert.match(kotlin, /SkippedPrefixInputStream\(start, BoundedInputStream\(stream, count\)\)/);
+});
+
+test("a runtime whose seeks break past offset 0 falls back to buffering", async () => {
+  // Emulates the unfixed WebView behavior above: offset-0 range reads
+  // succeed, any later seek rejects as Chromium ERR_FAILED does. The
+  // bridge probe must detect that during inspect and buffer the file as
+  // a Blob instead of failing the import with "Failed to fetch".
+  const body = fixtureBody("articles_snappy.parquet");
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const header = init?.headers?.Range;
+    if (!header) return new Response(body, { status: 200 });
+    const [startText, endText] = String(header).replace("bytes=", "").split("-");
+    const start = Number(startText);
+    const end = endText ? Number(endText) : body.length - 1;
+    if (start > 0) throw new TypeError("Failed to fetch");
+    return new Response(body.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${body.length}` },
+    });
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", {
+      token: "tok-broken-range",
+      name: "articles_snappy.parquet",
+      size: body.length,
+    });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-broken-range" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

@@ -34,6 +34,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.io.IOException
+import java.io.InputStream
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -464,6 +465,18 @@ class EmberEngine private constructor(private val app: Application) {
      * footers, ZIP central directories and resume offsets are read out of
      * order. Without ranges the engine would have to buffer the whole file,
      * which is what used to cap imports at a few hundred megabytes.
+     *
+     * Range bodies are wrapped in [SkippedPrefixInputStream]: the WebView
+     * applies the request's Range to the returned stream itself (Chromium's
+     * InputStreamReader::Seek validates against available() and then skips
+     * first_byte_position bytes, whatever status we set), so a bare
+     * pre-seeked slice would be seeked a second time — wrong bytes, or
+     * ERR_FAILED ("Failed to fetch" in JS) when the offset is past the end
+     * of the slice, which is exactly where a Parquet footer lives. The
+     * wrapper's virtual prefix absorbs that skip; reads only ever return
+     * the slice. Error bodies (404/416) get the same treatment, or the
+     * WebView's skip into an empty body would turn the status into a
+     * network error before the page could see it.
      */
     private fun serveImport(path: String, request: WebResourceRequest? = null): WebResourceResponse {
         // `path` is either the full URL path ("/__ember_file__/<token>", from
@@ -472,6 +485,10 @@ class EmberEngine private constructor(private val app: Application) {
         // importTokenFromPath handles both; see its doc for the 404 this
         // distinction caused when only the suffix shape was handled.
         val token = importTokenFromPath(path)
+        val range = request?.requestHeaders?.entries
+            ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
+            ?.value
+            ?.let(::parseByteRange)
         val file = importFileFor(token)
         if (file == null || !file.exists()) {
             return WebResourceResponse(
@@ -480,15 +497,17 @@ class EmberEngine private constructor(private val app: Application) {
                 404,
                 "Not Found",
                 mapOf("Cache-Control" to "no-store"),
-                ByteArrayInputStream(ByteArray(0)),
+                // available() must stay 0 here so Chromium skips its range
+                // verification; the prefix still absorbs its skip.
+                SkippedPrefixInputStream(
+                    prefixLength = maxOf(range?.first ?: 0L, 0L),
+                    body = ByteArrayInputStream(ByteArray(0)),
+                    reportAvailable = false,
+                ),
             )
         }
         val length = file.length()
         val mime = importMimes[token] ?: "application/octet-stream"
-        val range = request?.requestHeaders?.entries
-            ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
-            ?.value
-            ?.let(::parseByteRange)
         val baseHeaders = mutableMapOf(
             "Cache-Control" to "no-store",
             "Accept-Ranges" to "bytes",
@@ -505,7 +524,11 @@ class EmberEngine private constructor(private val app: Application) {
                 416,
                 "Range Not Satisfiable",
                 mapOf("Content-Range" to "bytes */$length", "Cache-Control" to "no-store"),
-                ByteArrayInputStream(ByteArray(0)),
+                SkippedPrefixInputStream(
+                    prefixLength = maxOf(start, 0L),
+                    body = ByteArrayInputStream(ByteArray(0)),
+                    reportAvailable = false,
+                ),
             )
         }
         val end = minOf(endInclusive ?: (length - 1), length - 1)
@@ -515,7 +538,14 @@ class EmberEngine private constructor(private val app: Application) {
             put("Content-Length", count.toString())
             put("Content-Range", "bytes $start-$end/$length")
         }
-        return WebResourceResponse(mime, "UTF-8", 206, "Partial Content", headers, BoundedInputStream(stream, count))
+        return WebResourceResponse(
+            mime,
+            "UTF-8",
+            206,
+            "Partial Content",
+            headers,
+            SkippedPrefixInputStream(start, BoundedInputStream(stream, count)),
+        )
     }
 
     /** Parse `bytes=start-end` (end optional); null when unparseable. */
@@ -527,30 +557,6 @@ class EmberEngine private constructor(private val app: Application) {
         val start = startText.toLongOrNull() ?: return null
         val end = endText.toLongOrNull()
         return start to end
-    }
-
-    /** Stops reading after [limit] bytes so a range response never runs long. */
-    private class BoundedInputStream(
-        private val inner: java.io.InputStream,
-        private var remaining: Long,
-    ) : java.io.InputStream() {
-        override fun read(): Int {
-            if (remaining <= 0) return -1
-            val value = inner.read()
-            if (value >= 0) remaining -= 1
-            return value
-        }
-
-        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
-            if (remaining <= 0) return -1
-            val read = inner.read(buffer, offset, minOf(length.toLong(), remaining).toInt())
-            if (read > 0) remaining -= read
-            return read
-        }
-
-        override fun close() {
-            inner.close()
-        }
     }
 
     private fun failStartup(message: String) {
@@ -720,3 +726,93 @@ fun importTokenFromPath(path: String): String =
         .substringBefore('#')
         .trimEnd('/')
         .substringAfterLast('/')
+
+/** Stops reading after [remaining] bytes so a range response never runs long. */
+class BoundedInputStream(
+    private val inner: InputStream,
+    private var remaining: Long,
+) : InputStream() {
+    override fun read(): Int {
+        if (remaining <= 0) return -1
+        val value = inner.read()
+        if (value >= 0) remaining -= 1
+        return value
+    }
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (remaining <= 0) return -1
+        val read = inner.read(buffer, offset, minOf(length.toLong(), remaining).toInt())
+        if (read > 0) remaining -= read
+        return read
+    }
+
+    override fun available(): Int =
+        minOf(remaining, inner.available().toLong())
+            .coerceIn(0L, Int.MAX_VALUE.toLong())
+            .toInt()
+
+    override fun close() {
+        inner.close()
+    }
+}
+
+/**
+ * A body stream preceded by a virtual prefix that can be skipped but never
+ * read.
+ *
+ * Android WebView applies the request's `Range` to every intercepted stream
+ * itself: Chromium's `InputStreamReader::Seek` validates the range against
+ * [available] and then `skip()`s to the range's first byte, ignoring the
+ * response's status. A 206 body is already the requested slice, so without
+ * this wrapper that skip lands inside the slice a second time — returning
+ * wrong bytes, or failing the whole fetch with `ERR_FAILED` (JS:
+ * `TypeError: Failed to fetch`) when the range starts past the slice's end.
+ * With a prefix exactly as long as the range start, the WebView's skip
+ * consumes only the prefix and reads begin at the slice's first byte. If a
+ * future WebView stops skipping, reads still return only body bytes, so
+ * the data stays correct either way.
+ *
+ * [available] reports prefix + body so Chromium's range verification sees
+ * the full virtual resource and computes the correct content length. It
+ * reports 0 ("unknown", which makes Chromium skip verification but still
+ * perform the skip) when the total cannot fit in the `int` Chromium reads,
+ * or when [reportAvailable] is false — used for error bodies, whose range
+ * verification must not run at all.
+ *
+ * Covered by `SkippedPrefixInputStreamTest`.
+ */
+class SkippedPrefixInputStream(
+    prefixLength: Long,
+    private val body: InputStream,
+    private val reportAvailable: Boolean = true,
+) : InputStream() {
+    private var prefixRemaining: Long = maxOf(prefixLength, 0L)
+
+    override fun available(): Int {
+        if (!reportAvailable) return 0
+        val total = prefixRemaining + body.available()
+        return if (total > Int.MAX_VALUE) 0 else total.toInt()
+    }
+
+    override fun skip(n: Long): Long {
+        if (n <= 0) return 0
+        if (prefixRemaining > 0) {
+            // Chromium reads each skip result through an int-sized JNI
+            // value; it loops until the full skip is consumed, so cap
+            // each call rather than overflowing on >2 GiB offsets.
+            val skipped = minOf(n, prefixRemaining, Int.MAX_VALUE.toLong())
+            prefixRemaining -= skipped
+            return skipped
+        }
+        return body.skip(n)
+    }
+
+    override fun read(): Int = body.read()
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+        body.read(buffer, offset, length)
+
+    override fun close() {
+        body.close()
+    }
+}
