@@ -82,7 +82,13 @@ class EmberEngine private constructor(private val app: Application) {
         const val ASSET_URL = "https://appassets.androidplatform.net/assets/www/native-backend.html"
         private const val DOMAIN = "appassets.androidplatform.net"
         private const val TAG = "EmberEngine"
-        private const val MAX_IMPORT_BYTES = 256L * 1024 * 1024
+        /**
+         * Staged files live on internal storage and are streamed to the
+         * engine, so this is a sanity cap rather than a memory bound. Space
+         * is checked before the copy starts.
+         */
+        private const val MAX_IMPORT_BYTES = 8L * 1024 * 1024 * 1024
+        private const val MIN_FREE_BYTES = 64L * 1024 * 1024
 
         @Volatile
         private var instance: EmberEngine? = null
@@ -110,6 +116,7 @@ class EmberEngine private constructor(private val app: Application) {
     private val pending = ConcurrentHashMap<String, CompletableDeferred<RpcResult>>()
     private val importFiles = ConcurrentHashMap<String, File>()
     private val importMimes = ConcurrentHashMap<String, String>()
+    private val importNames = ConcurrentHashMap<String, String>()
     private val exportStates = ConcurrentHashMap<String, ExportState>()
     private var ready = CompletableDeferred<Unit>()
 
@@ -270,11 +277,16 @@ class EmberEngine private constructor(private val app: Application) {
      */
     fun stageImport(uri: Uri, displayName: String, mime: String): StagedImport {
         val token = UUID.randomUUID().toString().replace("-", "")
-        val dir = File(app.cacheDir, "imports").apply { mkdirs() }
+        // filesDir, not cacheDir: Android may evict the cache at any time, and
+        // a paused dataset import must still be resumable afterwards.
+        val dir = importsDir()
         val ext = displayName.substringAfterLast('.', "")
             .takeIf { it.isNotEmpty() && it.length <= 12 && it.all(Char::isLetterOrDigit) }
             ?: "dat"
         val file = File(dir, "$token.$ext")
+        if (dir.usableSpace < MIN_FREE_BYTES) {
+            throw IOException("There is not enough free storage to stage this file for import.")
+        }
         var total = 0L
         try {
             val input = app.contentResolver.openInputStream(uri)
@@ -300,12 +312,25 @@ class EmberEngine private constructor(private val app: Application) {
         }
         importFiles[token] = file
         importMimes[token] = mime.ifBlank { "application/octet-stream" }
+        importNames[token] = displayName
         return StagedImport(token, file, total, displayName, mime)
     }
 
     fun releaseImport(token: String) {
         importFiles.remove(token)?.delete()
         importMimes.remove(token)
+        importNames.remove(token)
+    }
+
+    /** Staged files survive a process restart, so Resume can find them. */
+    private fun importsDir(): File = File(app.filesDir, "imports").apply { mkdirs() }
+
+    private fun importFileFor(token: String): File? {
+        if (token.isEmpty() || !token.all { it.isLetterOrDigit() }) return null
+        importFiles[token]?.let { if (it.exists()) return it }
+        val hit = importsDir().listFiles()?.firstOrNull { it.name.startsWith("$token.") }
+        if (hit != null) importFiles[token] = hit
+        return hit
     }
 
     fun clearCaches() {
@@ -323,12 +348,19 @@ class EmberEngine private constructor(private val app: Application) {
         File(app.cacheDir, "exports").deleteRecursively()
         importFiles.clear()
         importMimes.clear()
+        importNames.clear()
     }
 
     private fun cleanupCaches() {
         try {
             File(app.cacheDir, "imports").deleteRecursively()
             File(app.cacheDir, "exports").deleteRecursively()
+            // Staged imports are only removed once they are clearly abandoned:
+            // a paused import stays resumable across restarts.
+            val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
+            importsDir().listFiles()?.forEach { file ->
+                if (file.lastModified() < cutoff) file.delete()
+            }
         } catch (_: Throwable) {
             // cache cleanup must never block startup
         }
@@ -369,6 +401,12 @@ class EmberEngine private constructor(private val app: Application) {
                 request: WebResourceRequest?,
             ): WebResourceResponse? {
                 val url = request?.url ?: return null
+                // The staged-file handler needs the request headers to honour
+                // Range requests; everything else goes through the asset
+                // loader's path table.
+                if (url.host == DOMAIN && url.path?.startsWith("/__ember_file__/") == true) {
+                    return serveImport(url.path ?: "", request)
+                }
                 return loader.shouldInterceptRequest(url)
             }
 
@@ -419,9 +457,17 @@ class EmberEngine private constructor(private val app: Application) {
         return view
     }
 
-    private fun serveImport(path: String): WebResourceResponse {
+    /**
+     * Serve a staged file to the engine.
+     *
+     * Byte ranges are honoured (206) because the importer seeks: Parquet
+     * footers, ZIP central directories and resume offsets are read out of
+     * order. Without ranges the engine would have to buffer the whole file,
+     * which is what used to cap imports at a few hundred megabytes.
+     */
+    private fun serveImport(path: String, request: WebResourceRequest? = null): WebResourceResponse {
         val token = path.trimStart('/').substringBefore('/').substringBefore('?')
-        val file = importFiles[token]
+        val file = importFileFor(token)
         if (file == null || !file.exists()) {
             return WebResourceResponse(
                 "text/plain",
@@ -432,18 +478,74 @@ class EmberEngine private constructor(private val app: Application) {
                 ByteArrayInputStream(ByteArray(0)),
             )
         }
-        val headers = mapOf(
+        val length = file.length()
+        val mime = importMimes[token] ?: "application/octet-stream"
+        val range = request?.requestHeaders?.entries
+            ?.firstOrNull { it.key.equals("Range", ignoreCase = true) }
+            ?.value
+            ?.let(::parseByteRange)
+        val baseHeaders = mutableMapOf(
             "Cache-Control" to "no-store",
-            "Content-Length" to file.length().toString(),
+            "Accept-Ranges" to "bytes",
         )
-        return WebResourceResponse(
-            importMimes[token] ?: "application/octet-stream",
-            "UTF-8",
-            200,
-            "OK",
-            headers,
-            FileInputStream(file),
-        )
+        if (range == null || length == 0L) {
+            baseHeaders["Content-Length"] = length.toString()
+            return WebResourceResponse(mime, "UTF-8", 200, "OK", baseHeaders, FileInputStream(file))
+        }
+        val (start, endInclusive) = range
+        if (start < 0 || start >= length) {
+            return WebResourceResponse(
+                "text/plain",
+                "UTF-8",
+                416,
+                "Range Not Satisfiable",
+                mapOf("Content-Range" to "bytes */$length", "Cache-Control" to "no-store"),
+                ByteArrayInputStream(ByteArray(0)),
+            )
+        }
+        val end = minOf(endInclusive ?: (length - 1), length - 1)
+        val count = end - start + 1
+        val stream = FileInputStream(file).apply { channel.position(start) }
+        val headers = baseHeaders.apply {
+            put("Content-Length", count.toString())
+            put("Content-Range", "bytes $start-$end/$length")
+        }
+        return WebResourceResponse(mime, "UTF-8", 206, "Partial Content", headers, BoundedInputStream(stream, count))
+    }
+
+    /** Parse `bytes=start-end` (end optional); null when unparseable. */
+    private fun parseByteRange(value: String): Pair<Long, Long?>? {
+        val spec = value.substringAfter("bytes=", "").substringBefore(',').trim()
+        if (spec.isEmpty()) return null
+        val startText = spec.substringBefore('-')
+        val endText = spec.substringAfter('-', "")
+        val start = startText.toLongOrNull() ?: return null
+        val end = endText.toLongOrNull()
+        return start to end
+    }
+
+    /** Stops reading after [limit] bytes so a range response never runs long. */
+    private class BoundedInputStream(
+        private val inner: java.io.InputStream,
+        private var remaining: Long,
+    ) : java.io.InputStream() {
+        override fun read(): Int {
+            if (remaining <= 0) return -1
+            val value = inner.read()
+            if (value >= 0) remaining -= 1
+            return value
+        }
+
+        override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+            if (remaining <= 0) return -1
+            val read = inner.read(buffer, offset, minOf(length.toLong(), remaining).toInt())
+            if (read > 0) remaining -= read
+            return read
+        }
+
+        override fun close() {
+            inner.close()
+        }
     }
 
     private fun failStartup(message: String) {

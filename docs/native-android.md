@@ -6,6 +6,10 @@ the web build runs; it is simply hosted by an invisible, app-scoped WebView
 that Compose never shows. There is no web screen, no dev server, and no
 localhost URL anywhere in the APK.
 
+Dataset import has its own document: [`docs/import.md`](import.md) covers
+detected formats, extraction rules, limits, resume behaviour and the results
+measured with real fixtures.
+
 ## Layers
 
 ```

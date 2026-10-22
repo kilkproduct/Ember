@@ -548,6 +548,7 @@ data class PreviewDocument(
     val source: String,
     val chars: Long,
     val excerpt: String,
+    val entry: String? = null,
 ) {
     companion object {
         fun fromJson(json: JSONObject) = PreviewDocument(
@@ -555,10 +556,18 @@ data class PreviewDocument(
             source = json.stringOr("source"),
             chars = json.longOr("chars"),
             excerpt = json.stringOr("excerpt"),
+            entry = json.stringOrNull("entry"),
         )
     }
 }
 
+/**
+ * A file that has been detected and sampled but not imported yet.
+ *
+ * `format` is what the importer measured from the bytes (never the file name
+ * alone); `compression`/`archive` are the containers it peeled to get there.
+ * A brain keeps `kind == "brain"` and takes the separate brain import path.
+ */
 data class FilePreview(
     val token: String,
     val kind: String,
@@ -569,30 +578,156 @@ data class FilePreview(
     val documents: List<PreviewDocument>,
     val warnings: List<String>,
     val message: String,
+    val format: String = "",
+    val compression: List<String> = emptyList(),
+    val archive: List<String> = emptyList(),
+    val entries: Int = 0,
+    val encoding: String = "",
+    val resumable: Boolean = true,
+    val notes: List<String> = emptyList(),
 ) {
     val isBrain: Boolean get() = kind == "brain"
 
+    /** "CSV inside gzip" style description for the sheet subtitle. */
+    val formatLine: String
+        get() {
+            if (isBrain) return "Ember brain"
+            val base = format.ifBlank { "unknown" }.uppercase()
+            val layers = (compression + archive).map { it.uppercase() }
+            return if (layers.isEmpty()) base else "$base inside ${layers.joinToString(" → ")}"
+        }
+
     companion object {
-        fun fromJson(json: JSONObject): FilePreview = FilePreview(
-            token = json.stringOr("token"),
-            kind = json.stringOr("kind", "documents"),
+        fun fromJson(json: JSONObject): FilePreview {
+            val documents = json.arrayOrEmpty("documents").objects()
+                .ifEmpty { json.arrayOrEmpty("preview").objects() }
+                .map(PreviewDocument::fromJson)
+            return FilePreview(
+                token = json.stringOr("token"),
+                kind = json.stringOr("kind", "documents"),
+                name = json.stringOr("name", "file"),
+                mime = json.stringOr("mime"),
+                bytes = json.longOr("bytes"),
+                fields = json.arrayOrEmpty("fields").objects().map(PreviewField::fromJson),
+                documents = documents,
+                warnings = json.arrayOrEmpty("warnings").strings(),
+                message = json.stringOr("message"),
+                format = json.stringOr("format"),
+                compression = json.arrayOrEmpty("compression").strings(),
+                archive = json.arrayOrEmpty("archive").strings(),
+                entries = json.intOr("entries"),
+                encoding = json.stringOr("encoding"),
+                resumable = json.boolOr("resumable", true),
+                notes = json.arrayOrEmpty("notes").strings(),
+            )
+        }
+    }
+}
+
+/** One progress tick from the importer (see `web/ingest/pipeline.js`). */
+data class ImportProgress(
+    val token: String,
+    val processed: Int = 0,
+    val total: Int = 0,
+    val percent: Int = 0,
+    val stage: String = "reading",
+    val records: Int = 0,
+    val merged: Int = 0,
+    val skipped: Int = 0,
+    val failed: Int = 0,
+    val bytesRead: Long = 0,
+    val sourceBytes: Long = 0,
+    val entries: Int = 0,
+    val message: String = "",
+    val elapsedMs: Long = 0,
+) {
+    val stageLabel: String
+        get() = when (stage) {
+            "opening" -> "Opening the file"
+            "reading" -> "Reading records"
+            "committing" -> "Writing documents"
+            "finalizing" -> "Finishing up"
+            "paused" -> "Paused"
+            "cancelled" -> "Stopped"
+            "failed" -> "Failed"
+            "completed" -> "Complete"
+            else -> stage.replaceFirstChar { it.uppercase() }
+        }
+}
+
+/**
+ * An import recorded in the durable manifest. Kept so a paused (or
+ * interrupted) import can be found again after the app restarts.
+ */
+data class PendingImport(
+    val token: String,
+    val name: String,
+    val status: String,
+    val format: String,
+    val documents: Int,
+    val updatedAt: Long,
+    val resumable: Boolean,
+) {
+    val canResume: Boolean get() = resumable && status in setOf("paused", "partial", "failed")
+
+    companion object {
+        fun fromJson(json: JSONObject) = PendingImport(
+            token = json.stringOr("id"),
             name = json.stringOr("name", "file"),
-            mime = json.stringOr("mime"),
-            bytes = json.longOr("bytes"),
-            fields = json.arrayOrEmpty("fields").objects().map(PreviewField::fromJson),
-            documents = json.arrayOrEmpty("documents").objects().map(PreviewDocument::fromJson),
-            warnings = json.arrayOrEmpty("warnings").strings(),
-            message = json.stringOr("message"),
+            status = json.stringOr("status", "unknown"),
+            format = json.stringOr("dataFormat"),
+            documents = json.objectOrNull("counts")?.intOr("documents") ?: json.intOr("documents"),
+            updatedAt = json.longOr("updatedAt"),
+            resumable = json.boolOr("resumable", true),
         )
     }
 }
 
-data class ImportProgress(
-    val token: String,
-    val processed: Int,
-    val total: Int,
-    val percent: Int,
-)
+/** The result of running an import (not of inspecting a file). */
+data class DatasetImportResult(
+    val outcome: String,
+    val documents: Int,
+    val accepted: Int,
+    val merged: Int,
+    val skipped: Int,
+    val malformed: Int,
+    val failedEntries: Int,
+    val records: Int,
+    val bytesRead: Long,
+    val decompressedBytes: Long,
+    val elapsedMs: Long,
+    val resumeRecords: Int,
+    val resumable: Boolean,
+    val warnings: List<String>,
+    val message: String,
+) {
+    val completed: Boolean get() = outcome == "completed"
+    val paused: Boolean get() = outcome == "paused"
+    val cancelled: Boolean get() = outcome == "cancelled"
+
+    companion object {
+        fun fromJson(json: JSONObject): DatasetImportResult {
+            val counts = json.objectOrNull("counts")
+            return DatasetImportResult(
+                outcome = json.stringOr("outcome", "failed"),
+                documents = counts?.intOr("documents") ?: json.intOr("documents"),
+                accepted = counts?.intOr("accepted") ?: json.intOr("accepted"),
+                merged = counts?.intOr("merged") ?: json.intOr("merged"),
+                skipped = counts?.intOr("skipped") ?: json.intOr("skipped"),
+                malformed = counts?.intOr("malformed") ?: json.intOr("malformed"),
+                failedEntries = counts?.intOr("failedEntries") ?: json.intOr("failedEntries"),
+                records = counts?.intOr("records") ?: json.intOr("records"),
+                bytesRead = json.longOr("bytesRead"),
+                decompressedBytes = json.longOr("decompressedBytes"),
+                elapsedMs = json.longOr("elapsedMs"),
+                resumeRecords = json.intOr("resumeRecords"),
+                resumable = json.boolOr("resumable", true),
+                warnings = json.arrayOrEmpty("warnings").strings(),
+                message = json.stringOr("message"),
+            )
+        }
+    }
+}
 
 data class ImportResult(
     val processed: Int,

@@ -53,8 +53,14 @@ import {
 } from "./scrape.js";
 import { TEACHERS, TeacherDesk, WINDOWS } from "./teachers.js";
 import { githubHead, githubPull, githubPush } from "./github.js";
+import { createControl, planImport, runImport } from "./ingest/pipeline.js";
+import { createCorpusSink } from "./ingest/sink.js";
+import { HttpSource, sourceFromBlob } from "./ingest/source.js";
 
-const MAX_IMPORT_BYTES = 256 * 1024 * 1024;
+// Imported files are staged natively and streamed (range requests) rather
+// than buffered in JavaScript, so this is a sanity cap that matches the
+// native staging limit, not a memory bound.
+const MAX_IMPORT_BYTES = 8 * 1024 * 1024 * 1024;
 const MAX_IMPORT_DOCS = 20_000;
 const TRAIN_LOG_LIMIT = 400;
 
@@ -98,6 +104,8 @@ const state = {
   forageState: null,
   pendingFiles: new Map(),
   importCancel: new Set(),
+  importJobs: new Map(),
+  importRunning: new Set(),
   github: { repo: "", path: "brains/ember.json", token: "", pullStart: false },
   teachersRunning: false,
 };
@@ -830,6 +838,443 @@ async function inspectText(text, name, mime, token = randomId("file")) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Dataset ingestion
+// ---------------------------------------------------------------------------
+//
+// The importer (`web/ingest/`) owns format detection, decompression, archive
+// walking, parsing and text extraction. This section only connects it to the
+// native bridge: it opens the pending file, keeps a plan per token, forwards
+// progress, and lets the Compose UI pause/resume/cancel a run.
+
+// `file.inspectText` previews pasted text with the older in-memory path;
+// those previews still commit through `commitImport`.
+function isLegacyImport(token) {
+  return state.pendingFiles.get(String(token || ""))?.kind === "documents";
+}
+
+function importJob(token) {
+  return state.importJobs.get(token) || null;
+}
+
+function rememberImportJob(token, job) {
+  // Old finished jobs are cheap to keep, but a long session must not grow
+  // without bound.
+  if (state.importJobs.size >= 8) {
+    for (const [key, value] of state.importJobs) {
+      if (value.running) continue;
+      state.importJobs.delete(key);
+      if (state.importJobs.size < 8) break;
+    }
+  }
+  state.importJobs.set(token, job);
+}
+
+/**
+ * Read byte ranges from a staged file through the WebView.
+ *
+ * The native handler answers 206 for a Range request. If it does not (an
+ * older build, or a runtime that strips the header) this throws and the
+ * caller falls back to buffering the file, which is slower and needs memory.
+ */
+function stagedRangeReader(url) {
+  return async (start, length) => {
+    const end = start + length - 1;
+    const response = await fetch(url, {
+      cache: "no-store",
+      headers: { Range: `bytes=${start}-${end}` },
+    });
+    if (response.status !== 206) {
+      try {
+        await response.body?.cancel?.();
+      } catch {
+        /* nothing to release */
+      }
+      throw new Error("The runtime did not honour a byte range.");
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > length) throw new Error("A byte range came back longer than requested.");
+    return bytes;
+  };
+}
+
+/**
+ * Ask the runtime how large a staged file is, using a one-byte range.
+ *
+ * The native layer reports `size` when the file is picked; after a restart the
+ * only thing left is the staged URL, and this keeps random access available
+ * without downloading the file first.
+ */
+async function stagedFileSize(url) {
+  try {
+    const response = await fetch(url, { cache: "no-store", headers: { Range: "bytes=0-0" } });
+    if (response.status !== 206) {
+      await response.body?.cancel?.();
+      return null;
+    }
+    const total = /\/\s*(\d+)\s*$/.exec(response.headers.get("content-range") || "");
+    await response.arrayBuffer();
+    return total ? Number(total[1]) : null;
+  } catch {
+    return null;
+  }
+}
+
+async function pendingFileSource(token, hints = {}) {
+  const cached = state.pendingFiles.get(token);
+  if (cached?.source) return cached.source;
+  const url = `/__ember_file__/${encodeURIComponent(token)}`;
+  const size = Number(hints.size) > 0 ? Number(hints.size) : await stagedFileSize(url);
+  const name = hints.name || state.pendingFiles.get(token)?.name || "file";
+  if (size) {
+    // Preferred path: random access without copying the file into JS memory.
+    const ranged = new HttpSource({ url, name, size, readRange: stagedRangeReader(url) });
+    try {
+      const probe = await ranged.head(16);
+      if (probe.length) {
+        const known = state.pendingFiles.get(token) || {};
+        const entry = { ...known, name, source: ranged, bytes: size };
+        state.pendingFiles.set(token, entry);
+        return ranged;
+      }
+    } catch {
+      // Fall through to the buffered Blob path below.
+    }
+  }
+  let response;
+  try {
+    response = await fetch(url, { cache: "no-store" });
+  } catch (error) {
+    throw new Error(`The selected file could not be read by the training runtime: ${error.message}`);
+  }
+  if (!response.ok) {
+    throw new Error(`The selected file is no longer available (HTTP ${response.status}). Pick it again.`);
+  }
+  const blob = await response.blob();
+  const known = state.pendingFiles.get(token) || {};
+  // The filename comes from the native picker (the staged URL only carries a
+  // token). It is used for display and as a weak hint — never as the sole
+  // format signal.
+  const blobName = hints.name || known.name || blob.name || "file";
+  const source = await sourceFromBlob(blob, { name: blobName, mime: hints.mime || known.mime || blob.type || "" });
+  const entry = { ...known, name: blobName, source, bytes: source.size };
+  state.pendingFiles.set(token, entry);
+  return source;
+}
+
+/**
+ * One control object per job. `createControl()` is the importer's own pause /
+ * cancel primitive, so the bridge cannot invent a look-alike that the
+ * pipeline would call differently.
+ */
+function importControl(job, { fresh = false } = {}) {
+  if (fresh || !job.control) job.control = createControl();
+  return job.control;
+}
+
+function importProgressPayload(progress) {
+  return progress;
+}
+
+async function looksLikeBrain(source) {
+  // Brains are plain JSON objects, so look at the first non-space byte and
+  // let the cheap size cap keep huge datasets out of the JSON.parse path.
+  const limit = Math.min(source.size ?? 0, 4 * 1024 * 1024);
+  if (!limit) return false;
+  try {
+    const bytes = new Uint8Array(await source.slice(0, limit));
+    let start = 0;
+    while (start < bytes.length && (bytes[start] === 0x20 || bytes[start] === 0x0a || bytes[start] === 0x0d || bytes[start] === 0x09)) start++;
+    if (bytes[start] !== 0x7b) return false;
+    if (source.size > limit) return false;
+    const parsed = JSON.parse(new TextDecoder("utf-8").decode(bytes));
+    return isBrainObject(parsed);
+  } catch {
+    return false;
+  }
+}
+
+async function inspectDataset(params = {}) {
+  requireStore();
+  const token = String(params.token || "");
+  if (!token) throw new Error("No file was selected.");
+  const source = await pendingFileSource(token, { name: params.name, mime: params.mime, size: params.size });
+  if (Number.isFinite(source.size) && source.size > MAX_IMPORT_BYTES) {
+    throw new Error(
+      `That file is ${(source.size / 1048576).toFixed(0)} MB; this build can stage up to ${MAX_IMPORT_BYTES / 1048576} MB per import.`,
+    );
+  }
+
+  // A brain is an Ember-specific document, not a dataset. Keep that flow
+  // (still format-detected: a brain may arrive gzipped or inside a zip).
+  if (await looksLikeBrain(source)) {
+    return inspectFileWithSource({ token, source, name: params.name, mime: params.mime });
+  }
+
+  const limits = importLimits(params.limits);
+  const plan = await planImport({ source, limits, control: createControl() });
+
+  const job = { token, source, plan, running: false, control: createControl() };
+  rememberImportJob(token, job);
+  const entry = state.pendingFiles.get(token) || { token };
+  state.pendingFiles.set(token, { ...entry, kind: "dataset", token, plan });
+  const summary = importSummary(job);
+  if (!plan.preview?.length) {
+    summary.warnings = [
+      ...(summary.warnings || []),
+      "No readable text was found in the sampled part of this file; importing it will skip it.",
+    ];
+  }
+  return summary;
+}
+
+function importSummary(job) {
+  const plan = job.plan || {};
+  const last = job.last || {};
+  const preview = Array.isArray(plan.preview) ? plan.preview : [];
+  return {
+    token: job.token,
+    kind: "dataset",
+    name: plan.name || state.pendingFiles.get(job.token)?.name || "file",
+    bytes: plan.size || 0,
+    format: plan.dataFormat || "unknown",
+    compression: (plan.chain || []).filter((layer) => layer.kind === "compression").map((layer) => layer.format),
+    archive: (plan.chain || []).filter((layer) => layer.kind === "archive").map((layer) => layer.format),
+    chain: plan.chain || [],
+    encoding: plan.encoding || "",
+    extraction: plan.extraction || null,
+    entry: plan.archiveEntries?.length ? plan.archiveEntries[0] : null,
+    entries: plan.archiveEntries?.length || 0,
+    documents: preview.length,
+    preview: preview.map((item) => ({
+      title: item.title,
+      chars: item.chars,
+      excerpt: item.excerpt,
+      source: item.source,
+      entry: item.entry,
+    })),
+    fields: [],
+    warnings: [...(plan.warnings || []), ...(plan.extractionSummary?.warnings || [])],
+    notes: plan.info || [],
+    resumable: plan.resumable !== false,
+    status: job.status || (job.running ? "running" : "inspected"),
+    progress: last,
+    message: describePlan(plan),
+  };
+}
+
+function describePlan(plan) {
+  const chain = (plan.chain || []).map((layer) => layer.format).join(" → ");
+  const parts = [String(plan.dataFormat || "unknown").toUpperCase()];
+  if (chain) parts.push(`inside ${chain}`);
+  if (plan.extraction?.field) parts.push(`text field “${plan.extraction.field}”`);
+  if (plan.extraction?.columns?.length) parts.push(`columns ${plan.extraction.columns.join(", ")}`);
+  return parts.join(" · ");
+}
+
+async function commitDataset(params = {}) {
+  const store = requireStore();
+  const token = String(params.token || "");
+  const job = importJob(token);
+  if (!job) throw new Error("No inspected file is waiting to import. Choose the file again.");
+  if (job.running) throw new Error("This file is already importing.");
+  if (state.importRunning.size > 0 && !state.importRunning.has(token)) {
+    throw new Error("Another import is already running. Wait for it to finish, or cancel it.");
+  }
+
+  job.running = true;
+  job.control = importControl(job, { fresh: job.mode === "fresh" });
+  job.status = "running";
+  job.startedAt = Date.now();
+  job.mode = params.mode === "resume" ? "resume" : "fresh";
+  state.importRunning.add(token);
+
+  const manifest = await store.getManifest(token).catch(() => null);
+  // Resume continues after the records the paused run committed.
+  const resumeRecords = job.mode === "resume" ? Number(manifest?.resumeRecords) || 0 : 0;
+  // The manifest is keyed by the pending-file token so a later Resume finds
+  // this import's checkpoint without a second index.
+  job.plan = { ...job.plan, id: token };
+  const sink = createCorpusSink(store, { token, limits: importLimits(params.limits) });
+  let result;
+  try {
+    result = await runImport({
+      source: job.source,
+      plan: job.plan,
+      sink,
+      limits: importLimits(params.limits),
+      control: job.control,
+      resumeRecords,
+      onProgress: (progress) => {
+        job.last = progress;
+        job.status = progress.stage;
+        postEvent("import.progress", { token, ...importProgressPayload(progress) });
+      },
+    });
+  } catch (error) {
+    job.running = false;
+    job.status = "failed";
+    state.importRunning.delete(token);
+    throw error;
+  }
+  job.running = false;
+  job.status = result.outcome;
+  job.result = result;
+  job.finishedAt = Date.now();
+  state.importRunning.delete(token);
+
+  if (result.documents > 0) await emitCorpusChanged();
+  for (const warning of (result.warnings || []).slice(0, 6)) notice("warning", "Import warning", warning);
+  if (result.outcome === "failed") {
+    const detail = result.warnings?.[0] || "The file could not be imported.";
+    notice("error", "Import failed", detail);
+  } else if (result.outcome === "paused") {
+    notice("info", "Import paused", `${result.documents.toLocaleString()} documents are stored so far. Resume to continue.`);
+  } else if (result.outcome === "cancelled") {
+    notice("info", "Import stopped", `${result.documents.toLocaleString()} documents were kept.`);
+  }
+
+  const summary = importSummary(job);
+  summary.outcome = result.outcome;
+  summary.counts = {
+    records: result.records,
+    documents: result.documents,
+    accepted: result.accepted,
+    merged: result.merged,
+    skipped: result.skipped,
+    malformed: result.malformed,
+    failedEntries: result.failedEntries,
+  };
+  summary.skipReasons = result.skipReasons || {};
+  summary.malformedSamples = result.malformedSamples || [];
+  summary.bytesRead = result.bytesRead;
+  summary.decompressedBytes = result.decompressedBytes;
+  summary.elapsedMs = result.elapsedMs;
+  summary.resumeRecords = result.resumeRecords;
+  summary.resumable = result.resumable;
+  summary.progress = job.last || null;
+  summary.message = importOutcomeMessage(result);
+  postEvent("import.finished", { token, ...summary });
+  return summary;
+}
+
+function importOutcomeMessage(result) {
+  if (result.outcome === "failed") return `Import failed · ${result.warnings?.[0] || "unreadable file"}`;
+  if (result.outcome === "paused") return `Paused after ${result.documents.toLocaleString()} documents`;
+  if (result.outcome === "cancelled") return `Stopped after ${result.documents.toLocaleString()} documents`;
+  const bits = [`${result.documents.toLocaleString()} documents`];
+  if (result.merged) bits.push(`${result.merged.toLocaleString()} merged with existing text`);
+  if (result.skipped) bits.push(`${result.skipped.toLocaleString()} skipped`);
+  if (result.malformed) bits.push(`${result.malformed.toLocaleString()} malformed records`);
+  return bits.join(" · ");
+}
+
+async function pauseDataset(params = {}) {
+  const token = String(params.token || "");
+  const job = importJob(token);
+  if (!job || !job.running) return { paused: false, reason: "not running" };
+  job.control?.pause();
+  return { pausing: true };
+}
+
+async function resumeDataset(params = {}) {
+  const store = requireStore();
+  const token = String(params.token || "");
+  let job = importJob(token);
+  if (!job) {
+    // The app may have been restarted after a pause. The manifest keeps the
+    // plan and the staged file is on disk, so the import can still continue.
+    const manifest = await store.getManifest(token).catch(() => null);
+    if (!manifest?.plan) {
+      throw new Error("No paused import was found for this file. Choose it again to start over.");
+    }
+    if (manifest.status !== "paused" && manifest.status !== "partial" && manifest.status !== "failed") {
+      throw new Error(`That import is already ${manifest.status}; there is nothing to resume.`);
+    }
+    const source = await pendingFileSource(token, { name: manifest.name, size: params.size });
+    job = {
+      token,
+      source,
+      plan: { ...manifest.plan, id: token },
+      running: false,
+      status: "paused",
+      control: createControl(),
+    };
+    rememberImportJob(token, job);
+    state.pendingFiles.set(token, {
+      ...(state.pendingFiles.get(token) || {}),
+      token,
+      kind: "dataset",
+      name: manifest.name,
+      plan: job.plan,
+      source,
+    });
+  }
+  if (job.plan?.resumable === false) {
+    throw new Error("This file cannot be resumed in place; import it again from the start.");
+  }
+  return commitDataset({ ...params, token, mode: "resume" });
+}
+
+function cancelDataset(params = {}) {
+  const token = String(params.token || "");
+  const job = importJob(token);
+  if (job) job.control?.cancel();
+  if (token) state.importCancel.add(token);
+  return { cancelling: true };
+}
+
+async function discardDataset(params = {}) {
+  const token = String(params.token || "");
+  const job = importJob(token);
+  if (job?.running) job.control?.cancel();
+  state.importJobs.delete(token);
+  state.pendingFiles.delete(token);
+  state.importCancel.delete(token);
+  // Discarding is final for this file: drop its manifest so it is not offered
+  // for resume again. Documents already committed stay in the corpus.
+  try {
+    await state.store?.deleteManifest(token);
+  } catch {
+    /* the manifest may not exist */
+  }
+  return { discarded: true };
+}
+
+async function listDatasetImports() {
+  const store = requireStore();
+  try {
+    const manifests = await store.listManifests();
+    return manifests
+      .map((manifest) => ({
+        id: manifest.id,
+        name: manifest.name,
+        status: manifest.status,
+        dataFormat: manifest.dataFormat,
+        counts: manifest.counts || {},
+        resumeRecords: manifest.resumeRecords || 0,
+        updatedAt: manifest.updatedAt,
+        resumable: manifest.plan?.resumable !== false,
+        warnings: manifest.warnings || [],
+      }))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  } catch {
+    return [];
+  }
+}
+
+function importLimits(overrides) {
+  // Only bounded, non-destructive overrides are accepted from the UI; an
+  // unknown key falls back to the documented default in `limits.js`.
+  const allowed = {};
+  if (overrides && typeof overrides === "object") {
+    for (const key of ["maxDecompressedBytes", "maxNestingDepth", "maxDocumentChars", "maxEntries", "maxExpansionRatio"]) {
+      if (Number.isFinite(Number(overrides[key])) && Number(overrides[key]) > 0) allowed[key] = Number(overrides[key]);
+    }
+  }
+  return allowed;
+}
+
 async function inspectFile(params = {}) {
   requireStore();
   const token = String(params.token || "");
@@ -845,7 +1290,17 @@ async function inspectFile(params = {}) {
     throw new Error(`The selected file is no longer available (HTTP ${response.status}). Pick it again.`);
   }
   const text = await response.text();
-  return inspectText(text, params.name, params.mime, token);
+  return inspectFileText(text, token, params.name, params.mime);
+}
+
+async function inspectFileWithSource({ token, source, name, mime }) {
+  const bytes = await source.slice(0, source.size ?? 0);
+  const text = new TextDecoder("utf-8").decode(new Uint8Array(bytes));
+  return inspectFileText(text, token, name, mime);
+}
+
+function inspectFileText(text, token, name, mime) {
+  return inspectText(text, name, mime, token);
 }
 
 async function commitImport(params = {}) {
@@ -1940,18 +2395,31 @@ async function dispatch(method, params = {}) {
     case "corpus.dedupe":
       return dedupeCorpus();
 
-    case "file.inspect":
-      return inspectFile(params);
     case "file.inspectText": {
       requireReady();
       return inspectText(params.text, params.name, params.mime, String(params.token || randomId("file")));
     }
+
+    // Dataset ingestion. `file.inspect` inspects an arbitrary file (any
+    // supported format, compressed or archived) and never writes to the
+    // corpus; `file.commit` runs the import and can be paused, resumed or
+    // cancelled. Brain imports keep their own path through
+    // `brain.importFile`, which still recognizes brain JSON inside any
+    // container the importer can read.
+    case "file.inspect":
+      return inspectDataset(params);
     case "file.commit":
-      return commitImport(params);
+      return isLegacyImport(params.token) ? commitImport(params) : commitDataset(params);
+    case "file.pause":
+      return pauseDataset(params);
+    case "file.resume":
+      return resumeDataset(params);
     case "file.cancel":
-      return cancelImport(params);
+      return isLegacyImport(params.token) ? cancelImport(params) : cancelDataset(params);
     case "file.discard":
-      return discardImport(params);
+      return isLegacyImport(params.token) ? discardImport(params) : discardDataset(params);
+    case "file.imports":
+      return { imports: await listDatasetImports() };
 
     case "vessel.estimate":
       return estimateVessel(params);

@@ -105,6 +105,10 @@ data class UiState(
     val importProgress: ImportProgress? = null,
     val importError: String? = null,
     val importCancelling: Boolean = false,
+    val importPaused: Boolean = false,
+    val importPausing: Boolean = false,
+    val importResult: DatasetImportResult? = null,
+    val pendingImports: List<PendingImport> = emptyList(),
     val pendingExport: PendingExport? = null,
     val exportBusy: Boolean = false,
     val exportError: String? = null,
@@ -237,6 +241,7 @@ class EmberRepository private constructor(
                 // empty list next to a non-zero corpus count.
                 loadCorpus(reset = true)
                 _state.update { it.copy(initializing = false, initialized = true, backendError = null) }
+                refreshPendingImports()
                 _state.value.status.autosave?.let { autosave ->
                     if (autosave.error == null) {
                         addNotice(
@@ -429,12 +434,28 @@ class EmberRepository private constructor(
                         it.copy(
                             importProgress = ImportProgress(
                                 token = token,
-                                processed = data.intOr("processed"),
-                                total = data.intOr("total"),
+                                processed = data.intOr("documents"),
+                                total = data.intOr("records").coerceAtLeast(data.intOr("documents")),
                                 percent = data.intOr("percent"),
+                                stage = data.stringOr("stage", "reading"),
+                                records = data.intOr("records"),
+                                merged = data.intOr("merged"),
+                                skipped = data.intOr("skipped"),
+                                failed = data.intOr("failed"),
+                                bytesRead = data.longOr("bytesRead"),
+                                sourceBytes = data.longOr("sourceBytes"),
+                                entries = data.intOr("entries"),
+                                message = data.stringOr("message"),
+                                elapsedMs = data.longOr("elapsedMs"),
                             )
                         )
                     }
+                }
+            }
+            "import.finished" -> if (data != null) {
+                val token = data.stringOr("token")
+                if (token == currentImportToken) {
+                    _state.update { it.copy(importProgress = it.importProgress?.copy(stage = data.stringOr("outcome", "completed"))) }
                 }
             }
         }
@@ -858,6 +879,9 @@ class EmberRepository private constructor(
                 importPreview = null,
                 importProgress = null,
                 importCancelling = false,
+                importPaused = false,
+                importPausing = false,
+                importResult = null,
             )
         }
         scope.launch {
@@ -873,6 +897,9 @@ class EmberRepository private constructor(
                     .put("token", staged.token)
                     .put("name", name)
                     .put("mime", mime)
+                    // Lets the importer read the staged file with byte ranges
+                    // instead of buffering all of it in JavaScript memory.
+                    .put("size", staged.bytes)
                 val preview = FilePreview.fromJson(engine.call("file.inspect", params, timeoutMs = 180_000))
                 currentImportKind = preview.kind
                 _state.update { it.copy(importPreview = preview, importError = null) }
@@ -896,7 +923,15 @@ class EmberRepository private constructor(
     fun discardImportPreview() {
         discardCurrentImport(silent = true)
         _state.update {
-            it.copy(importPreview = null, importProgress = null, importError = null, importCancelling = false)
+            it.copy(
+                importPreview = null,
+                importProgress = null,
+                importError = null,
+                importCancelling = false,
+                importPausing = false,
+                importPaused = false,
+                importResult = null,
+            )
         }
     }
 
@@ -919,64 +954,209 @@ class EmberRepository private constructor(
 
     fun commitImport() {
         val preview = _state.value.importPreview ?: return
-        if (!preview.isBrain) {
-            if (!gate.tryStart(Ops.IMPORT_COMMIT)) return
-            markBusy(Ops.IMPORT_COMMIT, true)
-            _state.update {
-                it.copy(importBusy = true, importError = null, importCancelling = false, importProgress = ImportProgress(preview.token, 0, 0, 0))
+        if (preview.isBrain) {
+            importBrainFile(preview)
+        } else {
+            runDatasetImport(resume = false)
+        }
+    }
+
+    /** Continue a paused import from its last checkpoint. */
+    fun resumeImport() {
+        runDatasetImport(resume = true)
+    }
+
+    /** Ask a running import to stop at the next safe point. */
+    fun pauseImport() {
+        val token = currentImportToken ?: return
+        _state.update { it.copy(importPausing = true) }
+        scope.launch {
+            try {
+                engine.call("file.pause", JSONObject().put("token", token), timeoutMs = 30_000)
+            } catch (t: Throwable) {
+                _state.update { it.copy(importPausing = false) }
+                addNotice(NoticeLevel.WARNING, "Could not pause the import", t.message ?: "Unknown error")
             }
-            scope.launch {
-                try {
-                    val result = ImportResult.fromJson(
-                        engine.call("file.commit", JSONObject().put("token", preview.token), timeoutMs = 1_800_000)
-                    )
-                    _state.update {
-                        it.copy(
-                            importProgress = ImportProgress(
-                                preview.token,
-                                result.processed,
-                                result.total,
-                                if (result.total > 0) (result.processed * 100 / result.total) else 100,
+        }
+    }
+
+    /**
+     * Run (or resume) the dataset import for the current preview.
+     *
+     * The importer writes documents in bounded batches and checkpoints its
+     * manifest, so a pause, a cancel or a process death leaves a corpus that
+     * matches the report exactly.
+     */
+    private fun runDatasetImport(resume: Boolean) {
+        val preview = _state.value.importPreview ?: return
+        if (preview.isBrain) return
+        if (!gate.tryStart(Ops.IMPORT_COMMIT)) return
+        markBusy(Ops.IMPORT_COMMIT, true)
+        _state.update {
+            it.copy(
+                importBusy = true,
+                importError = null,
+                importCancelling = false,
+                importPausing = false,
+                importPaused = false,
+                importResult = null,
+                importProgress = ImportProgress(token = preview.token, stage = "opening"),
+            )
+        }
+        scope.launch {
+            try {
+                val params = JSONObject().put("token", preview.token)
+                val method = if (resume) "file.resume" else "file.commit"
+                val json = engine.call(method, params, timeoutMs = 6 * 60 * 60 * 1000)
+                val result = DatasetImportResult.fromJson(json)
+                when {
+                    result.paused -> {
+                        // Keep the staged file and the preview: Resume continues
+                        // from the checkpoint the importer just wrote.
+                        _state.update {
+                            it.copy(
+                                importPaused = true,
+                                importProgress = it.importProgress?.copy(stage = "paused"),
+                                importResult = result,
                             )
+                        }
+                        addNotice(
+                            NoticeLevel.INFO,
+                            "Import paused",
+                            "${result.documents} documents are already stored. Resume when you are ready.",
                         )
+                        refreshStatus()
+                        loadCorpus(reset = true)
                     }
-                    if (result.cancelled) {
+                    result.cancelled -> {
                         addNotice(
                             NoticeLevel.WARNING,
-                            "Import cancelled",
-                            "${result.processed} of ${result.total} documents were processed before cancellation. ${result.documentsAdded} new documents were added.",
+                            "Import stopped",
+                            "${result.documents} documents were kept (${result.accepted} new, ${result.merged} merged). " +
+                                "Nothing after the stop was imported.",
                         )
-                    } else {
+                        finishImport(preview.token)
+                    }
+                    result.completed -> {
+                        val detail = buildString {
+                            append("${result.documents} documents read")
+                            if (result.accepted > 0) append(" · ${result.accepted} new")
+                            if (result.merged > 0) append(" · ${result.merged} merged with existing text")
+                            if (result.skipped > 0) append(" · ${result.skipped} skipped")
+                            if (result.malformed > 0) append(" · ${result.malformed} malformed records")
+                            if (result.failedEntries > 0) append(" · ${result.failedEntries} unreadable archive entries")
+                        }
                         addNotice(
                             NoticeLevel.SUCCESS,
-                            "Dataset imported",
-                            "${result.documentsAdded} new documents added (${result.processed} processed, ${result.errors} skipped). " +
-                                "The corpus now holds ${result.documentsAfter} documents.",
+                            if (result.documents > 0) "Dataset imported" else "Nothing to import",
+                            detail,
                         )
+                        result.warnings.take(3).forEach { warning ->
+                            addNotice(NoticeLevel.WARNING, "Import warning", warning)
+                        }
+                        finishImport(preview.token)
                     }
-                    currentImportToken = null
-                    currentImportKind = null
-                    engine.releaseImport(preview.token)
-                    _state.update {
-                        it.copy(importPreview = null, importProgress = null, importCancelling = false)
+                    else -> {
+                        val message = result.warnings.firstOrNull()
+                            ?: result.message.ifBlank { "The file could not be imported." }
+                        _state.update { it.copy(importError = message, importResult = result) }
+                        addNotice(NoticeLevel.ERROR, "Import failed", message)
+                        finishImport(preview.token)
                     }
-                    refreshStatus()
-                    loadCorpus(reset = true)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (t: Throwable) {
-                    val message = t.message ?: "The import failed."
-                    _state.update { it.copy(importError = message, importCancelling = false) }
-                    addNotice(NoticeLevel.ERROR, "Import failed", message)
-                } finally {
-                    _state.update { it.copy(importBusy = false) }
-                    markBusy(Ops.IMPORT_COMMIT, false)
-                    gate.finish(Ops.IMPORT_COMMIT)
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                val message = t.message ?: "The import failed."
+                _state.update { it.copy(importError = message, importCancelling = false) }
+                addNotice(NoticeLevel.ERROR, "Import failed", message)
+            } finally {
+                _state.update { it.copy(importBusy = false, importPausing = false) }
+                markBusy(Ops.IMPORT_COMMIT, false)
+                gate.finish(Ops.IMPORT_COMMIT)
             }
-            return
         }
+    }
 
+    /**
+     * Refresh the list of imports recorded in the manifest.
+     *
+     * A paused or interrupted import keeps its staged file and its plan, so
+     * it can be resumed even after Ember was closed.
+     */
+    fun refreshPendingImports() {
+        scope.launch {
+            try {
+                val json = engine.call("file.imports", JSONObject(), timeoutMs = 30_000)
+                val rows = json.arrayOrEmpty("imports").objects().map(PendingImport::fromJson)
+                _state.update { it.copy(pendingImports = rows.filter { row -> row.canResume }) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Throwable) {
+                // The imports list is a convenience; a failure is not an error.
+            }
+        }
+    }
+
+    /** Continue a paused import found in the manifest. */
+    fun resumePendingImport(row: PendingImport) {
+        if (gate.isBusy(Ops.IMPORT_COMMIT)) return
+        _state.update {
+            it.copy(
+                importPreview = FilePreview(
+                    token = row.token,
+                    kind = "dataset",
+                    name = row.name,
+                    mime = "",
+                    bytes = 0,
+                    fields = emptyList(),
+                    documents = emptyList(),
+                    warnings = emptyList(),
+                    message = "",
+                    format = row.format,
+                    resumable = row.resumable,
+                ),
+                importError = null,
+                importPaused = true,
+                importResult = null,
+            )
+        }
+        runDatasetImport(resume = true)
+    }
+
+    /** Forget a paused import and delete its staged copy. */
+    fun discardPendingImport(row: PendingImport) {
+        scope.launch {
+            try {
+                engine.call("file.discard", JSONObject().put("token", row.token), timeoutMs = 30_000)
+            } catch (_: Throwable) {
+                // The staged copy may already be gone.
+            }
+            engine.releaseImport(row.token)
+            refreshPendingImports()
+        }
+    }
+
+    /** Release a staged file once its import reached a final state. */
+    private fun finishImport(token: String) {
+        currentImportToken = null
+        currentImportKind = null
+        engine.releaseImport(token)
+        _state.update {
+            it.copy(
+                importPreview = null,
+                importProgress = null,
+                importCancelling = false,
+                importPausing = false,
+                importPaused = false,
+            )
+        }
+        refreshStatus()
+        loadCorpus(reset = true)
+        refreshPendingImports()
+    }
+
+    private fun importBrainFile(preview: FilePreview) {
         if (!gate.tryStart(Ops.IMPORT_BRAIN)) return
         markBusy(Ops.IMPORT_BRAIN, true)
         _state.update { it.copy(importBusy = true, importError = null) }

@@ -319,6 +319,24 @@ fun FuelScreen(
                         tone = if (health.issues.size > 2) com.kilkproduct.ember.ui.theme.EmberWarning else EmberTeal,
                     )
                 }
+                ui.pendingImports.firstOrNull()?.let { pending ->
+                    Spacer(Modifier.height(10.dp))
+                    EmberCard(
+                        title = "Unfinished import",
+                        subtitle = "${pending.name} · ${Formats.integer(pending.documents)} documents stored · ${pending.status}",
+                    ) {
+                        Text(
+                            text = "Its staged copy is still on this device, so it can continue where it stopped.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Button(onClick = { vm.repo.resumePendingImport(pending) }) { Text("Resume import") }
+                            OutlinedButton(onClick = { vm.repo.discardPendingImport(pending) }) { Text("Discard") }
+                        }
+                    }
+                }
                 Spacer(Modifier.height(12.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(onClick = onOpenAddText) { Text("Add text") }

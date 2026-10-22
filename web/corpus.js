@@ -83,6 +83,34 @@ export function sanitizeMeta(meta) {
     parentId: str(meta.parentId, 40),
     createdUtc: Number.isFinite(meta.createdUtc) && meta.createdUtc > 0 ? Math.floor(meta.createdUtc) : null,
   };
+  // Import provenance and the source metadata the importer preserves
+  // (title/language/date/URL/record position). Additive: documents without
+  // it keep exactly the shape they had before.
+  const imp = meta.import && typeof meta.import === "object" ? meta.import : null;
+  if (imp) {
+    out.import = {
+      id: str(imp.id, 40),
+      file: str(imp.file, 200),
+      entry: str(imp.entry, 200),
+      record: Number.isFinite(imp.record) ? Math.floor(imp.record) : null,
+      part: Number.isFinite(imp.part) ? Math.floor(imp.part) : null,
+      of: Number.isFinite(imp.of) ? Math.floor(imp.of) : null,
+    };
+  }
+  if (meta.language) out.language = str(meta.language, 40);
+  if (meta.date) out.date = str(meta.date, 40);
+  if (meta.columns && typeof meta.columns === "object") {
+    const columns = {};
+    let count = 0;
+    for (const [key, value] of Object.entries(meta.columns)) {
+      if (count >= 12) break;
+      const text = typeof value === "string" ? value.trim() : "";
+      if (!text || text.length > 120) continue;
+      columns[String(key).slice(0, 60)] = text;
+      count += 1;
+    }
+    if (count) out.columns = columns;
+  }
   return Object.values(out).some((v) => v != null) ? out : null;
 }
 
