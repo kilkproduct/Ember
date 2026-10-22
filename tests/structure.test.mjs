@@ -141,7 +141,7 @@ test("stream format 2 keeps thread order: post before its comments, comments by 
     { title: "the post", text: "the post\n\noriginal post body words", kind: "reddit", meta: { subreddit: "s", threadId: "t1", parentId: null, createdUtc: 50 } },
   ];
   await trainer.initDocs(docs, CFG, 3e-3, { valFraction: 0, streamFormat: 2 });
-  const stream = trainer._stream2(normalizeDocs(docs), { expandWeights: false, shuffle: false });
+  const stream = await trainer._stream2(normalizeDocs(docs), { expandWeights: false, shuffle: false });
   const decoded = trainer.tokenizer.decode(stream.ids);
   const iPost = decoded.indexOf("original post body");
   const iEarly = decoded.indexOf("earlier comment");

@@ -174,6 +174,15 @@ data class ModelStatus(
     val config: ModelConfig?,
     val lastRun: LastRun?,
     val backend: String,
+    /** 0..1 while a vessel cast is running (null otherwise), with its stage label. */
+    val castProgress: Double? = null,
+    val castStage: String = "",
+    /** Whether the last cast trained on a bounded sample of an over-budget corpus. */
+    val castSampled: Boolean = false,
+    val castSampleDocuments: Long = 0,
+    val castCorpusDocuments: Long = 0,
+    val castSampleChars: Long = 0,
+    val castCorpusChars: Long = 0,
 ) {
     companion object {
         val EMPTY = ModelStatus(
@@ -250,6 +259,13 @@ data class ModelStatus(
                 config = ModelConfig.fromJson(json.objectOrNull("config")),
                 lastRun = LastRun.fromJson(json.objectOrNull("lastRun")),
                 backend = json.stringOr("backend", "cpu"),
+                castProgress = json.doubleOrNull("castProgress"),
+                castStage = json.stringOr("castStage"),
+                castSampled = json.boolOr("castSampled"),
+                castSampleDocuments = json.longOr("castSampleDocuments"),
+                castCorpusDocuments = json.longOr("castCorpusDocuments"),
+                castSampleChars = json.longOr("castSampleChars"),
+                castCorpusChars = json.longOr("castCorpusChars"),
             )
         }
     }
@@ -1025,6 +1041,8 @@ data class VesselEstimate(
     val trainBytes: Long,
     val vocabSize: Int,
     val warning: String?,
+    /** True when the config exceeds the phone memory budget and casting will be refused. */
+    val blocked: Boolean = false,
 ) {
     companion object {
         fun fromJson(json: JSONObject) = VesselEstimate(
@@ -1032,6 +1050,7 @@ data class VesselEstimate(
             trainBytes = json.longOr("trainBytes"),
             vocabSize = json.intOr("vocabSize"),
             warning = json.stringOrNull("warning"),
+            blocked = json.boolOr("blocked"),
         )
     }
 }

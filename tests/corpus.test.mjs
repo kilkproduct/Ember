@@ -95,3 +95,37 @@ test("Store.addDoc cleans text, dedups by content (merging weight), and keeps UR
   assert.notEqual(reAdded.id, first.id, "after removal the same text can be added fresh");
   assert.equal(reAdded.weight, 1);
 });
+
+test("corpusTotals counts without materializing docs; loadDocsBounded bounds chars and keeps lessons", async () => {
+  const store = await openStore();
+  await store.clear();
+  const body = "bounded corpus body text ".repeat(20);
+  for (let i = 0; i < 10; i++) {
+    await store.addDoc({ text: `doc ${i} ${body}`, title: `d${i}`, source: "test" });
+  }
+  await store.addDoc({ text: "### Prompt:\nq\n\n### Response:\na", kind: "lesson", source: "test" });
+
+  const totals = await store.corpusTotals();
+  assert.equal(totals.documents, 11);
+  const all = await store.allDocs();
+  assert.equal(totals.characters, all.reduce((s, d) => s + (d.chars || d.text.length), 0));
+
+  const full = await store.loadDocsBounded(totals.characters);
+  assert.equal(full.docs.length, 11);
+  assert.equal(full.sampled, false);
+
+  const budget = Math.floor(totals.characters / 3);
+  const bounded = await store.loadDocsBounded(budget);
+  assert.equal(bounded.sampled, true);
+  assert.equal(bounded.documents, 11);
+  assert.equal(bounded.characters, totals.characters);
+  assert.ok(bounded.docs.length < 11);
+  assert.ok(bounded.keptChars <= budget + 600, `keptChars ${bounded.keptChars} should hug the ${budget} budget`);
+  assert.ok(bounded.docs.some((d) => d.kind === "lesson"), "lessons are always kept");
+  // stable: the same corpus loads the same sample again
+  const again = await store.loadDocsBounded(budget);
+  assert.deepEqual(
+    again.docs.map((d) => d.id),
+    bounded.docs.map((d) => d.id)
+  );
+});

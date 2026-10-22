@@ -225,6 +225,35 @@ test("vessel casting uses the real tokenizer/model and reports exact parameters"
   assert.ok(cast.model.corpusTokens > 0);
 });
 
+test("estimate is corpus-aware; over-budget vessels refuse cleanly; casts report progress", async () => {
+  await resetCorpus();
+  const small = { nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 16, vocabSize: 500, dropout: 0, ffnMult: 2 };
+  const estimate = await call("vessel.estimate", { config: small });
+  const corpusChars = SAMPLE_CORPUS.reduce((s, d) => s + d.text.length, 0);
+  assert.equal(estimate.corpusDocuments, 3);
+  assert.equal(estimate.corpusChars, corpusChars);
+  assert.equal(estimate.blocked, false);
+  assert.ok(estimate.estTokens > 0);
+  assert.equal(estimate.streamBytes, estimate.estTokens * 5);
+
+  const monster = { nLayer: 32, nHead: 16, nEmbd: 2048, blockSize: 256, vocabSize: 6000, dropout: 0, ffnMult: 4 };
+  const bigEstimate = await call("vessel.estimate", { config: monster });
+  assert.equal(bigEstimate.blocked, true);
+  assert.match(bigEstimate.warning, /refused/);
+  await assert.rejects(() => call("vessel.cast", { config: monster, lr: 0.003, tokenizer: "byte-bpe" }), /phone budget/);
+
+  // The refusal must not wedge casting state: a sane cast right after works,
+  // and emits cast progress events while it runs.
+  const cursor = eventCursor();
+  const cast = await call("vessel.cast", { config: small, lr: 0.003, tokenizer: "byte-bpe" });
+  assert.equal(cast.model.ready, true);
+  const progress = events.slice(cursor).filter((e) => e.name === "model.castProgress");
+  assert.ok(progress.length >= 1, "expected at least one model.castProgress event");
+  assert.ok(progress.every((e) => e.data.castProgress >= 0 && e.data.castProgress <= 1));
+  assert.equal(cast.model.castProgress, null, "progress is cleared in the final snapshot");
+  assert.equal(cast.model.castSampled, false);
+});
+
 test("real training runs, emits progress/validation, and completes", async () => {
   await call("corpus.clear");
   for (const doc of SAMPLE_CORPUS) await call("corpus.addText", doc);

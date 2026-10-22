@@ -88,6 +88,70 @@ export function estimateTrainBytes(cfg) {
   return estimateParams(cfg) * 16;
 }
 
+/**
+ * Phone-safe ceiling on how much corpus text one cast will encode into
+ * the in-RAM token stream (chars of document text). Corpora past this
+ * are cast from a deterministic hash-ordered sample (lessons and
+ * weighted documents always kept) instead of dying: the old unbounded
+ * build materialized every document and pushed every token into plain
+ * JS arrays, which froze the WebView and OOM-crashed the app on
+ * FineWeb-scale corpora. ~64M chars ≈ ~16M BPE tokens ≈ 80 MB of typed
+ * stream — weeks of unique training windows at phone speeds.
+ */
+export const MAX_STREAM_CHARS = 64 * 1024 * 1024;
+
+/** Yield to the event loop so a long cast never bricks the WebView. */
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+/**
+ * Growable typed token stream: Uint32 ids + Uint8 target flags.
+ * Replaces two plain JS arrays (~16-32 bytes/token across both, with GC
+ * churn on every push) with 5 bytes/token retained.
+ */
+class TokenSink {
+  constructor() {
+    this._cap = 1 << 16;
+    this._ids = new Uint32Array(this._cap);
+    this._ok = new Uint8Array(this._cap);
+    this.length = 0;
+  }
+
+  _grow(need) {
+    if (this.length + need <= this._cap) return;
+    let cap = this._cap;
+    while (this.length + need > cap) cap *= 2;
+    const ids = new Uint32Array(cap);
+    ids.set(this._ids.subarray(0, this.length));
+    const ok = new Uint8Array(cap);
+    ok.set(this._ok.subarray(0, this.length));
+    this._ids = ids;
+    this._ok = ok;
+    this._cap = cap;
+  }
+
+  pushOne(id, ok) {
+    this._grow(1);
+    this._ids[this.length] = id;
+    this._ok[this.length] = ok;
+    this.length += 1;
+  }
+
+  /** Append a whole record; `ok` is a parallel array-like or one 0/1 for all. */
+  pushAll(ids, ok) {
+    const n = ids.length;
+    if (!n) return;
+    this._grow(n);
+    this._ids.set(ids, this.length);
+    if (typeof ok === "number") this._ok.fill(ok, this.length, this.length + n);
+    else this._ok.set(ok, this.length);
+    this.length += n;
+  }
+
+  finish() {
+    return { ids: this._ids.slice(0, this.length), targetOk: this._ok.slice(0, this.length) };
+  }
+}
+
 /** Architecture bounds supported by the brain format and this engine. */
 export function validateModelConfig(config) {
   const cfg = {
@@ -458,6 +522,48 @@ export function normalizeDocs(docs) {
 }
 
 /**
+ * Bound a normalized corpus to `maxChars` of text for one cast/stream
+ * build. Under the budget this is the identity. Over it, lessons and
+ * weighted documents are always kept (the user curated those), and the
+ * rest fill the budget in content-hash order — a deterministic,
+ * corpus-wide sample (the same corpus always casts the same stream,
+ * and streamed/shuffled corpora like FineWeb sample uniformly).
+ * Returns the kept docs plus a castSample report for status/logs.
+ */
+export function sampleForStream(clean, maxChars = MAX_STREAM_CHARS) {
+  let corpusChars = 0;
+  for (const d of clean) corpusChars += d.text.length;
+  const report = (docs, chars, sampled) => ({
+    docs,
+    castSample: {
+      sampled,
+      documents: docs.length,
+      corpusDocuments: clean.length,
+      chars,
+      corpusChars,
+    },
+  });
+  if (corpusChars <= maxChars) return report(clean, corpusChars, false);
+  const forced = [];
+  const eligible = [];
+  for (const d of clean) {
+    if (d.kind === "lesson" || d.weight > 1) forced.push(d);
+    else eligible.push(d);
+  }
+  eligible.sort((a, b) => a.hash - b.hash);
+  const kept = [...forced];
+  let used = 0;
+  for (const d of forced) used += d.text.length;
+  for (const d of eligible) {
+    if (used >= maxChars) break;
+    if (kept.length && used + d.text.length > maxChars) continue; // a smaller doc may still fit
+    kept.push(d);
+    used += d.text.length;
+  }
+  return report(kept, used, true);
+}
+
+/**
  * Deterministic document-level train/validation split. Documents are
  * grouped into THREAD UNITS (same meta.threadId) so one Reddit thread
  * can never straddle the split — comments from a validation thread
@@ -516,7 +622,8 @@ export class DeviceTrainer {
     this.model = null;
     this.opt = null;
     this.tokenizer = new Tokenizer();
-    this.tokens = null; // training token stream (<doc>-separated documents)
+    this.tokens = null; // training token stream (Uint32Array, <doc>-separated documents)
+    this.castSample = null; // {sampled, documents, corpusDocuments, chars, corpusChars} of the last stream build
     this.valTokens = null; // held-out stream, never used for gradient updates
     this.cfg = null;
     this.step = 0;
@@ -617,16 +724,19 @@ export class DeviceTrainer {
    * turning into a wall of <unk>. Only the model weights are kept honest —
    * validation documents never produce gradients (see setDocs/validate).
    */
-  async initDocs(docs, cfg, lr = 3e-4, { valFraction = 0.1, tokenizerType = "legacy", streamFormat = 1 } = {}) {
+  async initDocs(docs, cfg, lr = 3e-4, { valFraction = 0.1, tokenizerType = "legacy", streamFormat = 1, onProgress = null, maxStreamChars } = {}) {
     this.setLr(lr);
     const shape = validateModelConfig(cfg);
     const clean = normalizeDocs(docs);
     if (!clean.length) throw new Error("No documents to cast from. Add fuel first.");
+    onProgress?.({ stage: "tokenizer", ratio: 0 });
     const tokenizer = createTokenizer(tokenizerType);
     const trainTexts = clean.map((d) => d.text);
     // new format-2 brains learn the structural markers as stable pieces
     if (streamFormat === 2) trainTexts.push(STREAM_MARKER_PRIMER);
     tokenizer.train(trainTexts, shape.vocabSize);
+    onProgress?.({ stage: "model", ratio: 0.08 });
+    await tick();
     const fullCfg = { ...shape, vocabSize: tokenizer.vocabSize };
     const model = new EmberNet(fullCfg); // build first; swap only on success
     this._disposeCurrent();
@@ -645,7 +755,14 @@ export class DeviceTrainer {
     this.trainingDataSnapshot = null;
     this.valFraction = valFraction;
     this.streamFormat = streamFormat === 2 ? 2 : 1;
-    this.setDocs(clean);
+    await this.setDocs(clean, {
+      preNormalized: true,
+      maxStreamChars,
+      onProgress: onProgress
+        ? ({ ratio }) => onProgress({ stage: "stream", ratio: 0.1 + 0.9 * ratio })
+        : null,
+    });
+    onProgress?.({ stage: "done", ratio: 1 });
   }
 
   _resetTrainingStats() {
@@ -719,6 +836,7 @@ export class DeviceTrainer {
     this.streamFormat = streamFormat === 2 ? 2 : 1;
     this.targetOk = null;
     this.valTokens = null; // caller re-supplies the corpus via refreshDocs
+    this.castSample = null;
     this.valTargetOk = null;
   }
 
@@ -731,7 +849,7 @@ export class DeviceTrainer {
    * the first content token after it is masked — a new document's
    * opening is not predictable from the previous document.
    */
-  _stream(docs, { expandWeights, shuffle }) {
+  async _stream(docs, { expandWeights, shuffle, onDoc = null }) {
     const order = [...docs];
     if (shuffle) {
       for (let i = order.length - 1; i > 0; i--) {
@@ -739,27 +857,27 @@ export class DeviceTrainer {
         [order[i], order[j]] = [order[j], order[i]];
       }
     }
-    const ids = [];
-    const targetOk = [];
+    const sink = new TokenSink();
     const sourceTokens = {};
+    let seen = 0;
     for (const d of order) {
       const enc = this.tokenizer.encode(d.text);
       const reps = expandWeights ? d.weight : 1;
       const key = d.meta?.subreddit ? `r/${d.meta.subreddit}` : d.source || "manual";
       sourceTokens[key] = (sourceTokens[key] || 0) + (enc.length + 1) * reps;
+      const okArr = new Uint8Array(enc.length).fill(1);
+      if (enc.length) okArr[0] = 0; // a document's opening token is not a target
       for (let r = 0; r < reps; r++) {
-        ids.push(this.tokenizer.docId);
-        targetOk.push(1);
-        enc.forEach((tok, k) => {
-          ids.push(tok);
-          targetOk.push(k === 0 ? 0 : 1);
-        });
+        sink.pushOne(this.tokenizer.docId, 1);
+        sink.pushAll(enc, okArr);
+      }
+      if ((++seen & 511) === 0) {
+        onDoc?.(seen);
+        await tick();
       }
     }
-    if (!ids.length) {
-      ids.push(this.tokenizer.bosId);
-      targetOk.push(1);
-    }
+    if (!sink.length) sink.pushOne(this.tokenizer.bosId, 1);
+    const { ids, targetOk } = sink.finish();
     return { ids, targetOk, sourceTokens };
   }
 
@@ -819,7 +937,7 @@ export class DeviceTrainer {
    * tokens are masked out of the loss; they are conditioning the model
    * is given, not text it must predict.
    */
-  _stream2(docs, { expandWeights, shuffle }) {
+  async _stream2(docs, { expandWeights, shuffle, onDoc = null }) {
     const units = [];
     const byThread = new Map();
     for (const d of docs) {
@@ -849,9 +967,9 @@ export class DeviceTrainer {
         [units[i], units[j]] = [units[j], units[i]];
       }
     }
-    const ids = [];
-    const targetOk = [];
+    const sink = new TokenSink();
     const sourceTokens = {};
+    let seen = 0;
     for (const unit of units) {
       for (const d of unit) {
         const rec = this._record2(d);
@@ -859,19 +977,20 @@ export class DeviceTrainer {
         const key = d.meta?.subreddit ? `r/${d.meta.subreddit}` : d.source || "manual";
         sourceTokens[key] = (sourceTokens[key] || 0) + rec.ids.length * reps;
         for (let r = 0; r < reps; r++) {
-          ids.push(...rec.ids);
-          targetOk.push(...rec.targetOk);
+          sink.pushAll(rec.ids, rec.targetOk);
+        }
+        if ((++seen & 511) === 0) {
+          onDoc?.(seen);
+          await tick();
         }
       }
     }
-    if (!ids.length) {
-      ids.push(this.tokenizer.bosId);
-      targetOk.push(1);
-    }
+    if (!sink.length) sink.pushOne(this.tokenizer.bosId, 1);
+    const { ids, targetOk } = sink.finish();
     return { ids, targetOk, sourceTokens };
   }
 
-  _buildStream(docs, opts) {
+  async _buildStream(docs, opts) {
     return this.streamFormat === 2 ? this._stream2(docs, opts) : this._stream(docs, opts);
   }
 
@@ -880,8 +999,12 @@ export class DeviceTrainer {
    * split is at document level (never overlapping windows of one page on
    * both sides). Returns the split sizes for reporting.
    */
-  setDocs(docs) {
-    const clean = normalizeDocs(docs);
+  async setDocs(docs, { preNormalized = false, onProgress = null, maxStreamChars = MAX_STREAM_CHARS } = {}) {
+    const normalized = preNormalized ? docs : normalizeDocs(docs);
+    // Bound the stream before splitting/encoding: an over-budget corpus
+    // casts from a deterministic sample instead of OOMing the WebView.
+    const { docs: clean, castSample } = sampleForStream(normalized, maxStreamChars);
+    this.castSample = castSample;
     const { train, val } = splitDocs(clean, this.valFraction);
     this.documentCounts = { total: clean.length, train: train.length, validation: val.length };
     // Phase E balancing: boost minority sources by integer weight copies
@@ -909,12 +1032,22 @@ export class DeviceTrainer {
         }));
       }
     }
-    const trainStream = this._buildStream(trainDocs, { expandWeights: true, shuffle: true });
+    const totalDocs = clean.length || 1;
+    const report = (done) => onProgress?.({ stage: "stream", ratio: Math.min(1, done / totalDocs) });
+    const trainStream = await this._buildStream(trainDocs, {
+      expandWeights: true,
+      shuffle: true,
+      onDoc: (done) => report(done),
+    });
     this.tokens = trainStream.ids;
     this.targetOk = trainStream.targetOk;
     this.sourceTokens = trainStream.sourceTokens || {};
     if (val.length) {
-      const valStream = this._buildStream(val, { expandWeights: false, shuffle: false });
+      const valStream = await this._buildStream(val, {
+        expandWeights: false,
+        shuffle: false,
+        onDoc: (done) => report(train.length + done),
+      });
       this.valTokens = valStream.ids;
       this.valTargetOk = valStream.targetOk;
       this.valSourceTokens = valStream.sourceTokens || {};
@@ -924,9 +1057,14 @@ export class DeviceTrainer {
       this.valSourceTokens = {};
     }
     if (clean.length) {
+      // Precompute each row's JSON once: stringifying inside the sort
+      // comparator made large validation sets quadratic-ish in string
+      // building. Keys (and therefore the order) are unchanged.
       const signatureRows = val
         .map((d) => [d.hash, d.text.length, d.weight, d.kind, d.meta?.threadId || ""])
-        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+        .map((row) => ({ row, key: JSON.stringify(row) }))
+        .sort((a, b) => a.key.localeCompare(b.key))
+        .map(({ row }) => row);
       const signatureBody = JSON.stringify({
         streamFormat: this.streamFormat,
         docBoundaryMask: this.docBoundaryMask,
@@ -962,11 +1100,12 @@ export class DeviceTrainer {
     this._epochQueue = [];
     this.lastValLoss = null;
     this.lastValPpl = null;
+    report(clean.length);
     return { trainDocs: train.length, valDocs: val.length, documents: clean.length };
   }
 
-  refreshDocs(docs) {
-    return this.setDocs(docs);
+  refreshDocs(docs, opts) {
+    return this.setDocs(docs, opts);
   }
 
   /** Backward-compatible: plain texts, duplicates become weights. */
@@ -1006,18 +1145,26 @@ export class DeviceTrainer {
     return lr;
   }
 
-  /** Training stream + targetOk, repeated if shorter than one window. */
+  /** Training stream + targetOk, repeated if shorter than one window. Always typed. */
   _tiled() {
     const block = this.cfg.blockSize;
-    let toks = this.tokens;
+    let toks = this.tokens instanceof Uint32Array ? this.tokens : Uint32Array.from(this.tokens || []);
     let ok =
       this.targetOk && this.targetOk.length === toks.length
-        ? this.targetOk
-        : new Array(toks.length).fill(1);
+        ? this.targetOk instanceof Uint8Array
+          ? this.targetOk
+          : Uint8Array.from(this.targetOk)
+        : new Uint8Array(toks.length).fill(1);
     if (toks.length < block + 2) {
       const reps = Math.ceil((block + 2) / Math.max(toks.length, 1)) + 1;
-      toks = Array.from({ length: reps }, () => toks).flat();
-      ok = Array.from({ length: reps }, () => ok).flat();
+      const tiledToks = new Uint32Array(toks.length * reps);
+      const tiledOk = new Uint8Array(ok.length * reps);
+      for (let r = 0; r < reps; r++) {
+        tiledToks.set(toks, r * toks.length);
+        tiledOk.set(ok, r * ok.length);
+      }
+      toks = tiledToks;
+      ok = tiledOk;
     }
     return { toks, ok };
   }
@@ -1056,29 +1203,40 @@ export class DeviceTrainer {
 
   _batchFromStarts(toks, starts, targetOk = null) {
     const block = this.cfg.blockSize;
-    const x = starts.map((i) => toks.slice(i, i + block));
-    const y = starts.map((i) => toks.slice(i + 1, i + 1 + block));
+    // Streams are typed arrays, and tf.tensor2d does not flatten nested
+    // typed rows (it counts each row as one value) — assemble flat typed
+    // buffers instead. Views (subarray) keep this allocation-light.
+    const rows = starts.length;
+    const view = (arr, i) =>
+      typeof arr.subarray === "function" ? arr.subarray(i, i + block) : arr.slice(i, i + block);
+    const xRows = starts.map((i) => view(toks, i));
+    const xFlat = new Int32Array(rows * block);
+    const yFlat = new Int32Array(rows * block);
+    starts.forEach((i, r) => {
+      xFlat.set(xRows[r], r * block);
+      yFlat.set(view(toks, i + 1), r * block);
+    });
     let wt = null;
-    let trainableTargets = starts.length * block;
+    let trainableTargets = rows * block;
     if (this.maskBoundaryLoss && targetOk) {
-      const w = [];
+      const wFlat = new Float32Array(rows * block);
       let anyMasked = false;
       let targetCount = 0;
-      for (const i of starts) {
-        const row = targetOk.slice(i + 1, i + 1 + block);
+      starts.forEach((i, r) => {
+        const row = view(targetOk, i + 1);
         if (!anyMasked && row.includes(0)) anyMasked = true;
         targetCount += row.reduce((sum, ok) => sum + (ok ? 1 : 0), 0);
-        w.push(row);
-      }
+        wFlat.set(row, r * block);
+      });
       if (anyMasked) {
-        wt = tf.tensor2d(w, [starts.length, block], "float32");
+        wt = tf.tensor2d(wFlat, [rows, block], "float32");
         trainableTargets = targetCount;
       }
     }
-    const mt = this.docBoundaryMask ? this._boundaryMask(x) : null;
+    const mt = this.docBoundaryMask ? this._boundaryMask(xRows) : null;
     return {
-      xt: tf.tensor2d(x, [starts.length, block], "int32"),
-      yt: tf.tensor2d(y, [starts.length, block], "int32"),
+      xt: tf.tensor2d(xFlat, [rows, block], "int32"),
+      yt: tf.tensor2d(yFlat, [rows, block], "int32"),
       wt,
       mt,
       trainableTargets,
@@ -1354,6 +1512,11 @@ export class DeviceTrainer {
       tokens: this.tokens ? this.tokens.length : 0,
       corpus_tokens: this.tokens ? this.tokens.length : 0,
       val_tokens: this.valTokens ? this.valTokens.length : 0,
+      cast_sampled: !!this.castSample?.sampled,
+      cast_sample_documents: this.castSample?.documents ?? 0,
+      cast_corpus_documents: this.castSample?.corpusDocuments ?? 0,
+      cast_sample_chars: this.castSample?.chars ?? 0,
+      cast_corpus_chars: this.castSample?.corpusChars ?? 0,
       documents: this.documentCounts.total,
       train_documents: this.documentCounts.train,
       validation_documents: this.documentCounts.validation,

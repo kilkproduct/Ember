@@ -315,6 +315,53 @@ export class Store {
     }
   }
 
+  /**
+   * Corpus size without retaining a single document: a cursor pass that
+   * only sums counts. Casting used stats() (which materializes EVERY
+   * document's full text) just to learn these two numbers — on a
+   * FineWeb-scale corpus that alone could OOM the WebView.
+   */
+  async corpusTotals() {
+    let documents = 0;
+    let characters = 0;
+    for await (const rows of this.iterateDocs()) {
+      for (const d of rows) {
+        documents += 1;
+        characters += d.chars || (d.text || "").length;
+      }
+    }
+    return { documents, characters };
+  }
+
+  /**
+   * Load at most `maxChars` of document text for one cast/stream build.
+   * Documents are visited in store-key order (ids are random, so this is
+   * effectively a uniform sample of an over-budget corpus, stable for a
+   * given corpus); lessons are always kept. Reports the corpus totals
+   * alongside what was kept so callers can say a sample was used.
+   */
+  async loadDocsBounded(maxChars) {
+    const docs = [];
+    let documents = 0;
+    let characters = 0;
+    let keptChars = 0;
+    let sampled = false;
+    for await (const rows of this.iterateDocs()) {
+      for (const d of rows) {
+        documents += 1;
+        const c = d.chars || (d.text || "").length;
+        characters += c;
+        if (d.kind === "lesson" || keptChars + c <= maxChars || !docs.length) {
+          docs.push(d);
+          keptChars += c;
+        } else {
+          sampled = true;
+        }
+      }
+    }
+    return { docs, documents, characters, keptChars, sampled };
+  }
+
   async stats() {
     const docs = (await this.allDocs()) || [];
     const by_source = {};

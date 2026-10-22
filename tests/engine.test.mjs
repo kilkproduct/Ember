@@ -196,3 +196,55 @@ test("setWeights rejects wrong layer counts and leaves weights untouched on fail
   const after = Array.from(await trainer.model.wte.data());
   assert.deepEqual(after, before, "a failed setWeights must not partially apply");
 });
+
+test("cast builds typed token streams and reports monotone progress", async () => {
+  const docs = Array.from({ length: 40 }, (_, i) => ({
+    text: `document number ${i} talks about cats and warm sun and singapore rain. `.repeat(4),
+    source: "test",
+  }));
+  const trainer = new DeviceTrainer();
+  const seen = [];
+  await trainer.initDocs(docs, CFG, 3e-3, { onProgress: (p) => seen.push(p) });
+  assert.ok(trainer.tokens instanceof Uint32Array, "train stream must be a Uint32Array");
+  assert.ok(trainer.targetOk instanceof Uint8Array, "target flags must be a Uint8Array");
+  assert.equal(trainer.targetOk.length, trainer.tokens.length);
+  if (trainer.valTokens) assert.ok(trainer.valTokens instanceof Uint32Array);
+  assert.ok(seen.some((p) => p.stage === "tokenizer"));
+  assert.ok(seen.some((p) => p.stage === "stream"));
+  const ratios = seen.map((p) => p.ratio);
+  assert.ok(ratios.every((r, i) => i === 0 || r >= ratios[i - 1]), `progress must be monotone: ${ratios}`);
+  assert.equal(ratios[ratios.length - 1], 1);
+  // and it still trains end to end over the typed stream
+  const { loss } = await trainer.trainStep(2);
+  assert.ok(Number.isFinite(loss));
+});
+
+test("an over-budget corpus casts from a bounded sample and always keeps lessons", async () => {
+  const filler = Array.from({ length: 60 }, (_, i) => ({
+    text: `filler page ${i} ${"ordinary words about weather and bread and buses. ".repeat(10)}`,
+    source: "test",
+  }));
+  const lesson = {
+    text: "### Prompt:\nWhat is the secret word?\n\n### Response:\nThe secret word is kumquat.",
+    kind: "lesson",
+    weight: 4,
+  };
+  const totalChars = [...filler, lesson].reduce((s, d) => s + d.text.length, 0);
+  const budget = Math.floor(totalChars / 4);
+  const trainer = new DeviceTrainer();
+  await trainer.initDocs([...filler, lesson], CFG, 3e-3, { maxStreamChars: budget });
+  assert.equal(trainer.castSample.sampled, true);
+  assert.equal(trainer.castSample.corpusDocuments, 61);
+  assert.ok(trainer.castSample.documents < 61, "the sample must keep fewer documents than the corpus");
+  assert.ok(trainer.castSample.corpusChars > budget);
+  const longest = Math.max(...filler.map((d) => d.text.length));
+  assert.ok(
+    trainer.castSample.chars <= budget + longest,
+    `kept ${trainer.castSample.chars} chars should be within budget ${budget} (+ one straddling doc)`
+  );
+  const decoded = trainer.tokenizer.decode(trainer.tokens);
+  assert.ok(decoded.includes("kumquat"), "the lesson must survive sampling into the train stream");
+  const st = trainer.status();
+  assert.equal(st.cast_sampled, true);
+  assert.equal(st.cast_corpus_documents, 61);
+});

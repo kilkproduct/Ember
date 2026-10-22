@@ -17,6 +17,7 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -39,6 +40,7 @@ import com.kilkproduct.ember.ui.components.SectionHeading
 import com.kilkproduct.ember.ui.components.StatTile
 import com.kilkproduct.ember.ui.components.ChoiceRow
 import com.kilkproduct.ember.ui.theme.EmberWarning
+import kotlin.math.roundToInt
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -299,7 +301,7 @@ fun VesselScreen(
                 Spacer(Modifier.height(12.dp))
                 Button(
                     onClick = { vm.requestCast() },
-                    enabled = !casting && !otherWork && !corpusEmpty &&
+                    enabled = !casting && !otherWork && !corpusEmpty && estimate?.blocked != true &&
                         layers != null && heads != null && embd != null && !headsMismatch,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
@@ -310,10 +312,30 @@ fun VesselScreen(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                         Spacer(Modifier.width(8.dp))
-                        Text("Casting…")
+                        val pct = model.castProgress?.let { (it * 100).roundToInt() }
+                        Text(if (pct != null) "Casting… $pct%" else "Casting…")
                     } else {
                         Text(if (model.ready) "Cast new vessel (replaces weights)" else "Cast vessel from corpus")
                     }
+                }
+                if (casting && model.castProgress != null) {
+                    Spacer(Modifier.height(10.dp))
+                    LinearProgressIndicator(
+                        progress = { model.castProgress.toFloat().coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth().height(6.dp),
+                    )
+                    Text(
+                        text = when (model.castStage) {
+                            "corpus" -> "Counting the corpus…"
+                            "tokenizer" -> "Learning the tokenizer…"
+                            "model" -> "Building the model…"
+                            "stream" -> "Tokenizing documents into the training stream…"
+                            else -> "Casting…"
+                        },
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
                 }
                 if (otherWork) {
                     Text(

@@ -32,6 +32,7 @@ import {
   EmberNet,
   estimateParams,
   estimateTrainBytes,
+  MAX_STREAM_CHARS,
   initBackend,
   validateModelConfig,
   formatLessonPrompt,
@@ -75,6 +76,7 @@ const state = {
   initPromise: null,
   initError: null,
   casting: false,
+  castProgress: null, // {stage, ratio} while a vessel cast is running
   generating: false,
   training: {
     running: false,
@@ -223,15 +225,18 @@ function requireStore() {
 
 async function corpusSummary() {
   const store = requireStore();
-  const stats = await store.stats();
+  const totals = await store.corpusTotals();
   const st = state.trainer.status();
   const ratio =
-    st.ready && stats.characters > 0
-      ? Math.min(1, Math.max(0.05, (st.corpus_tokens + st.val_tokens) / stats.characters))
+    st.ready && totals.characters > 0
+      ? Math.min(1, Math.max(0.05, (st.corpus_tokens + st.val_tokens) / totals.characters))
       : 0.3;
-  const health = stats.documents
-    ? corpusHealth(stats.docs || [], { tokensPerChar: ratio })
-    : {
+  if (!totals.documents) {
+    return {
+      documents: 0,
+      characters: 0,
+      bySource: {},
+      health: {
         documents: 0,
         characters: 0,
         estTokens: 0,
@@ -246,12 +251,85 @@ async function corpusSummary() {
         nearDuplicatePairs: 0,
         nonAsciiRatio: 0,
         issues: [],
-      };
+      },
+    };
+  }
+  if (totals.characters <= MAX_STREAM_CHARS) {
+    const stats = await store.stats();
+    return {
+      documents: stats.documents,
+      characters: stats.characters,
+      bySource: stats.by_source || {},
+      health: corpusHealth(stats.docs || [], { tokensPerChar: ratio }),
+    };
+  }
+  // Very large corpus: stats()+corpusHealth() would materialize every
+  // document's full text (and this runs after every cast/import). Stream
+  // exact aggregates instead — same health shape, no retained texts;
+  // only the near-duplicate scan is skipped at this scale.
+  return corpusSummaryStreaming(store, totals, ratio);
+}
+
+async function corpusSummaryStreaming(store, totals, tokensPerChar) {
+  const lengths = [];
+  const bySource = {};
+  const hashCounts = new Map();
+  let nonAscii = 0;
+  let sampled = 0;
+  let sampledDocs = 0;
+  for await (const rows of store.iterateDocs()) {
+    for (const d of rows) {
+      const text = d.text || "";
+      lengths.push(d.chars || text.length);
+      bySource[d.source] = (bySource[d.source] || 0) + 1;
+      const h = d.thash ?? d.chash;
+      if (h != null) hashCounts.set(h, (hashCounts.get(h) || 0) + 1);
+      if (sampledDocs < 50) {
+        const t = text.slice(0, 2000);
+        sampled += t.length;
+        for (let i = 0; i < t.length; i++) if (t.charCodeAt(i) > 127) nonAscii += 1;
+        sampledDocs += 1;
+      }
+    }
+  }
+  lengths.sort((a, b) => a - b);
+  const percentile = (p) =>
+    lengths.length ? lengths[Math.min(lengths.length - 1, Math.floor(p * lengths.length))] : 0;
+  let exactDuplicateDocs = 0;
+  for (const n of hashCounts.values()) exactDuplicateDocs += n - 1;
+  const tinyDocs = lengths.filter((n) => n < 200).length;
+  const hugeDocs = lengths.filter((n) => n > 40000).length;
+  const issues = [];
+  if (exactDuplicateDocs) {
+    issues.push(`${exactDuplicateDocs} exact duplicate${exactDuplicateDocs > 1 ? "s" : ""} — the same text trains multiple times for nothing`);
+  }
+  if (tinyDocs) {
+    issues.push(`${tinyDocs} tiny document${tinyDocs > 1 ? "s" : ""} (<200 chars) — mostly noise at this model size`);
+  }
+  if (hugeDocs) {
+    issues.push(`${hugeDocs} very long document${hugeDocs > 1 ? "s" : ""} (>40k chars) — fine, but they dominate the token mix`);
+  }
+  issues.push("Near-duplicate scan skipped on very large corpora (health shown from streaming aggregates).");
   return {
-    documents: stats.documents,
-    characters: stats.characters,
-    bySource: stats.by_source || {},
-    health,
+    documents: totals.documents,
+    characters: totals.characters,
+    bySource,
+    health: {
+      documents: totals.documents,
+      characters: totals.characters,
+      estTokens: Math.round(totals.characters * tokensPerChar),
+      medianChars: percentile(0.5),
+      p25Chars: percentile(0.25),
+      p75Chars: percentile(0.75),
+      maxChars: lengths.length ? lengths[lengths.length - 1] : 0,
+      tinyDocs,
+      hugeDocs,
+      exactDuplicateDocs,
+      exactGroups: [],
+      nearDuplicatePairs: null,
+      nonAsciiRatio: sampled ? Math.round((nonAscii / sampled) * 1000) / 1000 : 0,
+      issues,
+    },
   };
 }
 
@@ -310,6 +388,13 @@ function modelStatus() {
     config: st.config,
     lastRun: st.last_run,
     backend: state.backend,
+    castProgress: state.castProgress?.ratio ?? null,
+    castStage: state.castProgress?.stage ?? "",
+    castSampled: st.cast_sampled,
+    castSampleDocuments: st.cast_sample_documents,
+    castCorpusDocuments: st.cast_corpus_documents,
+    castSampleChars: st.cast_sample_chars,
+    castCorpusChars: st.cast_corpus_chars,
   };
 }
 
@@ -1456,7 +1541,7 @@ async function commitImport(params = {}) {
   if (!entry || entry.kind !== "documents") throw new Error("No validated document import is pending. Choose a file again.");
   const docs = entry.docs;
   state.importCancel.delete(token);
-  const before = (await store.stats()).documents;
+  const before = (await store.corpusTotals()).documents;
   let processed = 0;
   let errors = 0;
   let cancelled = false;
@@ -1481,7 +1566,7 @@ async function commitImport(params = {}) {
       await yieldToLoop();
     }
   }
-  const afterStats = await store.stats();
+  const afterStats = await store.corpusTotals();
   state.pendingFiles.delete(token);
   state.importCancel.delete(token);
   await emitCorpusChanged();
@@ -1527,18 +1612,42 @@ function vesselConfig(raw = {}) {
   });
 }
 
-function estimateVessel(params = {}) {
+async function estimateVessel(params = {}) {
   const cfg = vesselConfig(params.config || {});
   const paramsCount = estimateParams(cfg);
   const trainBytes = estimateTrainBytes(cfg);
+  let totals = { documents: 0, characters: 0 };
+  try {
+    totals = await requireStore().corpusTotals();
+  } catch {
+    /* store not ready yet: corpus side of the estimate is simply unknown */
+  }
+  const castChars = Math.min(totals.characters, MAX_STREAM_CHARS);
+  const estTokens = Math.round(castChars * 0.3); // rough chars/token for English BPE
+  const streamBytes = estTokens * 5; // Uint32 token ids + Uint8 target flags
+  const blocked = trainBytes / 1048576 > 768;
+  const warnings = [];
+  if (blocked) {
+    warnings.push(
+      `${(trainBytes / 1048576).toFixed(0)} MB of weights, gradients, and Adam moments already exceed a rough 768 MB phone budget; activations add more. Casting this configuration will be refused — shrink the vessel.`
+    );
+  }
+  if (totals.characters > MAX_STREAM_CHARS) {
+    warnings.push(
+      `Your corpus is ${(totals.characters / 1048576).toFixed(0)}M characters; a phone-safe ${(MAX_STREAM_CHARS / 1048576).toFixed(0)}M-character sample (~${(estTokens / 1e6).toFixed(1)}M tokens) will be cast so the app does not run out of memory. Lessons are always included.`
+    );
+  }
   return {
     params: paramsCount,
     trainBytes,
     vocabSize: cfg.vocabSize,
-    warning:
-      trainBytes / 1048576 > 768
-        ? `${(trainBytes / 1048576).toFixed(0)} MB of weights, gradients, and Adam moments already exceed a rough 768 MB phone budget; activations add more.`
-        : null,
+    corpusDocuments: totals.documents,
+    corpusChars: totals.characters,
+    castChars,
+    estTokens,
+    streamBytes,
+    blocked,
+    warning: warnings.length ? warnings.join(" ") : null,
   };
 }
 
@@ -1548,12 +1657,36 @@ async function castVessel(params = {}) {
   if (state.generating) throw new Error("Wait for the current generation to finish before casting.");
   if (state.casting) throw new Error("A vessel is already being cast.");
   state.casting = true;
+  state.castProgress = { stage: "corpus", ratio: 0 };
   try {
     const cfg = vesselConfig(params.config || {});
     const lr = state.trainer.setLr(Number(params.lr) || 3e-4);
     const store = requireStore();
-    const stats = await store.stats();
-    if (!stats.documents) throw new Error("No corpus documents. Add fuel before casting a vessel.");
+    // Never stats() here: it materializes every document's full text,
+    // which by itself could OOM the WebView on a FineWeb-scale corpus.
+    const totals = await store.corpusTotals();
+    if (!totals.documents) throw new Error("No corpus documents. Add fuel before casting a vessel.");
+    const trainBytes = estimateTrainBytes(cfg);
+    if (trainBytes / 1048576 > 768) {
+      throw new Error(
+        `This vessel needs ${(trainBytes / 1048576).toFixed(0)} MB for weights, gradients, and Adam moments — over a rough 768 MB phone budget (activations add more), and casting it would crash the app. Shrink the vessel (fewer layers/width/vocab) and cast again.`
+      );
+    }
+    const loaded = await store.loadDocsBounded(MAX_STREAM_CHARS);
+    if (loaded.sampled) {
+      logTrain(
+        `corpus is ${(loaded.characters / 1048576).toFixed(0)}M chars across ${loaded.documents} documents — casting a phone-safe ${(loaded.keptChars / 1048576).toFixed(0)}M-char sample (${loaded.docs.length} documents, lessons included) so the cast cannot run out of memory`
+      );
+    }
+    let lastProgressPost = 0;
+    const onProgress = (progress) => {
+      state.castProgress = progress;
+      const now = Date.now();
+      if (now - lastProgressPost >= 200 || progress.ratio >= 1) {
+        lastProgressPost = now;
+        postEvent("model.castProgress", modelStatus());
+      }
+    };
     const tokenizerType = params.tokenizer === "legacy" ? "legacy" : "byte-bpe";
     const switchingTok =
       state.trainer.ready &&
@@ -1570,19 +1703,21 @@ async function castVessel(params = {}) {
       }
     }
     logTrain(`casting ${cfg.nLayer}L/${cfg.nHead}H/${cfg.nEmbd}D · ctx ${cfg.blockSize} · vocab cap ${cfg.vocabSize} · ${tokenizerType}`);
-    await state.trainer.initDocs(stats.docs, cfg, lr, { tokenizerType, streamFormat: 2 });
+    await state.trainer.initDocs(loaded.docs, cfg, lr, { tokenizerType, streamFormat: 2, onProgress });
     state.losses = [];
     state.validations = [];
     state.samples = [];
     state.lastGeneration = "";
     const st = state.trainer.status();
     logTrain(
-      `cast ${st.n_params} params on ${state.backend} · ${st.tokenizer_type} tokenizer · vocab ${st.vocab_size} · ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out` : ""}`
+      `cast ${st.n_params} params on ${state.backend} · ${st.tokenizer_type} tokenizer · vocab ${st.vocab_size} · ${st.corpus_tokens} train tokens${st.val_tokens ? ` + ${st.val_tokens} held out` : ""}${st.cast_sampled ? ` · sampled cast: ${st.cast_sample_documents}/${st.cast_corpus_documents} documents (${(st.cast_sample_chars / 1048576).toFixed(1)}M/${(st.cast_corpus_chars / 1048576).toFixed(0)}M chars)` : ""}`
     );
+    state.castProgress = null; // final snapshot must not show a stale progress bar
     postEvent("model.cast", modelStatus());
     return { model: modelStatus(), corpus: await corpusSummary() };
   } finally {
     state.casting = false;
+    state.castProgress = null;
   }
 }
 
@@ -1622,12 +1757,15 @@ async function startTraining(opts = {}, source = "manual") {
   state.training.starting = true;
   try {
     const store = requireStore();
-    const stats = await store.stats();
-    if (!stats.documents) throw new Error("The training corpus is empty. Add fuel before firing.");
+    const totals = await store.corpusTotals();
+    if (!totals.documents) throw new Error("The training corpus is empty. Add fuel before firing.");
     applyTrainingOptions(opts);
     state.samplePrompt = String(opts.samplePrompt || "");
     state.trainer.setLr(lr);
-    state.trainer.refreshDocs(stats.docs || []);
+    // Bounded reload: rebuilding the stream must never materialize a
+    // corpus larger than the phone-safe cast budget.
+    const loaded = await store.loadDocsBounded(MAX_STREAM_CHARS);
+    await state.trainer.refreshDocs(loaded.docs);
     const startStep = state.trainer.step;
     const until = startStep + steps;
     state.trainer.setSchedule(until);
@@ -1965,8 +2103,8 @@ async function applyBrain(raw, { name = null, saveCheckpoint = true } = {}) {
       }
     }
   }
-  const stats = await requireStore().stats();
-  state.trainer.refreshDocs(stats.docs || []);
+  const loaded = await requireStore().loadDocsBounded(MAX_STREAM_CHARS);
+  await state.trainer.refreshDocs(loaded.docs);
   state.losses = [];
   state.validations = [];
   state.samples = [];
