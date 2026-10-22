@@ -466,7 +466,12 @@ class EmberEngine private constructor(private val app: Application) {
      * which is what used to cap imports at a few hundred megabytes.
      */
     private fun serveImport(path: String, request: WebResourceRequest? = null): WebResourceResponse {
-        val token = path.trimStart('/').substringBefore('/').substringBefore('?')
+        // `path` is either the full URL path ("/__ember_file__/<token>", from
+        // shouldInterceptRequest) or just the suffix after the registered
+        // prefix ("<token>", from WebViewAssetLoader.PathHandler.handle).
+        // importTokenFromPath handles both; see its doc for the 404 this
+        // distinction caused when only the suffix shape was handled.
+        val token = importTokenFromPath(path)
         val file = importFileFor(token)
         if (file == null || !file.exists()) {
             return WebResourceResponse(
@@ -687,3 +692,31 @@ class EmberEngine private constructor(private val app: Application) {
         }
     }
 }
+
+/**
+ * Extract the staged-file token from a request path.
+ *
+ * [EmberEngine.serveImport] is reached two ways, and they disagree about the
+ * path shape:
+ *
+ *  - `WebViewClient.shouldInterceptRequest` passes the full URL path:
+ *    `"/__ember_file__/<token>"`.
+ *  - `WebViewAssetLoader.PathHandler.handle` passes only the suffix after
+ *    the registered prefix: `"<token>"`.
+ *
+ * The token is generated as a bare hex UUID, so it is always the final path
+ * segment and can never contain a slash, `?` or `#`. Taking the last segment
+ * (after dropping any query/fragment) therefore handles both call sites.
+ *
+ * Regression: this used to take the *first* segment
+ * (`trimStart('/').substringBefore('/')`), which is `"__ember_file__"` for
+ * the full-path call site. That is not a staged token, so every file the
+ * engine fetched — Parquet or otherwise — answered 404 and the import
+ * failed with "The selected file is no longer available (HTTP 404)".
+ * Covered by `ImportTokenFromPathTest`.
+ */
+fun importTokenFromPath(path: String): String =
+    path.substringBefore('?')
+        .substringBefore('#')
+        .trimEnd('/')
+        .substringAfterLast('/')

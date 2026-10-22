@@ -612,6 +612,31 @@ test("a paused import can be resumed after the runtime forgets its job", async (
   }
 });
 
+test("Android staged-file server reads the token from the full URL path", () => {
+  // Regression guard for a bug the in-memory fetch mock above cannot see:
+  // EmberEngine.shouldInterceptRequest calls serveImport with the FULL URL
+  // path ("/__ember_file__/<token>"), while WebViewAssetLoader's PathHandler
+  // calls it with only the suffix ("<token>"). serveImport once took the
+  // FIRST path segment, so every intercepted fetch looked up the token
+  // "__ember_file__", found no staged file, and returned 404 — every import
+  // in the APK failed with "The selected file is no longer available
+  // (HTTP 404)". The Kotlin side is covered for real by
+  // ImportTokenFromPathTest (run in CI via testDebugUnitTest); this keeps
+  // the contract visible from the JS suite too.
+  const kotlin = fs.readFileSync(
+    new URL("../android/app/src/main/java/com/kilkproduct/ember/backend/EmberEngine.kt", import.meta.url),
+    "utf8"
+  );
+  assert.match(kotlin, /fun importTokenFromPath\(path: String\)/);
+  assert.match(kotlin, /val token = importTokenFromPath\(path\)/);
+  assert.ok(
+    !/val token = path\.trimStart\('\/'\)\.substringBefore\('\/'\)/.test(kotlin),
+    "first-segment token parsing is back: full URL paths would 404 every staged import"
+  );
+  // The fetch mocks below mirror the fixed server: the token is the LAST
+  // URL segment, which is what `/__ember_file__/<token>` carries.
+});
+
 test("a staged file served with byte ranges imports without buffering it", async () => {
   // This is the WebView path in the APK: EmberEngine answers Range requests
   // with 206, so the importer seeks (Parquet footers, archive directories)

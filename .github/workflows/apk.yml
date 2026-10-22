@@ -30,11 +30,11 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
-      - name: Assemble debug APK
+      - name: Test and assemble debug APK
         working-directory: android
         run: |
           set -o pipefail
-          gradle assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
+          gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
       # On failure, collect the compiler errors into one annotation so they are
       # readable without downloading the full Gradle log.
       - name: Summarize build errors
