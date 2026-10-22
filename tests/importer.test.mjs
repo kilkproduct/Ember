@@ -232,6 +232,52 @@ test("Parquet without a text column and truncated Parquet fail with clear reason
   assert.ok(truncated && /truncated/i.test(truncated[0]), truncated?.[0]);
 });
 
+test("Parquet is detected from seek reads even when the streamed head is mangled", async () => {
+  // Regression: container detection sniffed only the streamed head. On
+  // Android the streamed fetch of a staged file can deliver a first chunk
+  // that does not match the file, while every random-access read (the
+  // transport Parquet actually uses) is exact — so a good .parquet was
+  // refused as "binary data". Detection must use the seek reads.
+  await reset();
+  const bytes = fixture("articles_snappy.parquet");
+  class MangledStreamSource extends MemorySource {
+    async *stream(start = 0) {
+      const mangled = this.bytes.slice();
+      mangled.fill(0, 0, Math.min(8192, mangled.length));
+      yield* new MemorySource(mangled).stream(start);
+    }
+  }
+  const source = new MangledStreamSource(bytes, { name: "articles_snappy.parquet" });
+  const plan = await planImport({ source, name: "articles_snappy.parquet" });
+  assert.equal(plan.dataFormat, "parquet");
+  const sink = createCorpusSink(store, {});
+  const summary = await runImport({ source, plan, sink });
+  assert.equal(summary.outcome, "completed");
+  assert.equal(summary.documents, 5);
+});
+
+test("encrypted Parquet (PARE) is refused by name, not as generic binary", async () => {
+  await reset();
+  const bytes = new Uint8Array(1024);
+  bytes.set([0x50, 0x41, 0x52, 0x45], 0); // "PARE"
+  bytes.set([0x50, 0x41, 0x52, 0x45], bytes.length - 4);
+  await assert.rejects(() => runBytes(bytes, "secret.parquet"), /encrypted/i);
+});
+
+test("a binary file named .parquet reports the bytes it actually starts with", async () => {
+  await reset();
+  const bytes = Uint8Array.from({ length: 4096 }, (_, i) => (i * 37) % 251);
+  let message = "";
+  try {
+    await runBytes(bytes, "fake.parquet");
+  } catch (error) {
+    message = error.message;
+  }
+  assert.match(message, /binary data/);
+  assert.match(message, /First bytes: 00 25 4a/);
+  assert.match(message, /PAR1/);
+});
+
 test("truncated or corrupted compressed files are rejected, never half-imported", async () => {
   await reset();
   const cases = [

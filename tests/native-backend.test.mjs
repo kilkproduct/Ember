@@ -724,3 +724,41 @@ test("a runtime whose seeks break past offset 0 falls back to buffering", async 
     globalThis.fetch = original;
   }
 });
+
+test("a staged Parquet whose streamed head is mangled still imports via seek reads", async () => {
+  // Device regression: range reads exact, but the plain streamed fetch
+  // delivered a first chunk that was not the file's first bytes, so
+  // detection never saw PAR1 and a good .parquet was refused as "binary
+  // data". Container detection now sniffs the seek-read head, and the
+  // Parquet reader only ever uses seek reads.
+  const body = fixtureBody("articles_snappy.parquet");
+  const mangled = body.slice();
+  mangled.fill(0, 0, Math.min(8192, mangled.length));
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const header = init?.headers?.Range;
+    if (!header) return new Response(mangled, { status: 200 });
+    const [startText, endText] = String(header).replace("bytes=", "").split("-");
+    const start = Number(startText);
+    const end = endText ? Number(endText) : body.length - 1;
+    return new Response(body.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${body.length}` },
+    });
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", {
+      token: "tok-mangled-stream",
+      name: "articles_snappy.parquet",
+      size: body.length,
+    });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-mangled-stream" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

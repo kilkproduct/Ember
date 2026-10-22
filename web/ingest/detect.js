@@ -134,6 +134,15 @@ export function sniffContainer(head, { isTopLevel = false, totalSize = null, tai
     return { kind: "archive", format: "tar" };
   }
 
+  if (startsWith(head, [0x50, 0x41, 0x52, 0x45])) {
+    // Parquet modular encryption replaces the PAR1 magic with PARE.
+    return {
+      kind: "refused",
+      format: "Encrypted Parquet",
+      note: "This Parquet file is encrypted (it starts with PARE, not PAR1), and Ember cannot decrypt it. Re-save it without encryption.",
+    };
+  }
+
   if (startsWith(head, [0x50, 0x41, 0x52, 0x31])) {
     // Parquet starts and ends with "PAR1". When the tail is visible and the
     // second magic is missing, the file is truncated — say so instead of
