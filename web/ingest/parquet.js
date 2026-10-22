@@ -85,6 +85,36 @@ function assertCodecs(codecs) {
   }
 }
 
+const PAR1 = [0x50, 0x41, 0x52, 0x31];
+
+function isPar1(bytes, atEnd = false) {
+  if (bytes.length < 4) return false;
+  const offset = atEnd ? bytes.length - 4 : 0;
+  return PAR1.every((byte, i) => bytes[offset + i] === byte);
+}
+
+/**
+ * Failure-only check for the truncated-download signature: the file
+ * starts with the Parquet magic but does not end with it. A complete
+ * Parquet file always ends `...PAR1` (footer length + magic), while an
+ * interrupted download keeps the header and loses the footer — e.g. a
+ * FineWeb shard whose copy on the phone was ~417 MB of the real
+ * 575 MB, which otherwise failed with the cryptic
+ * "parquet file invalid (footer != PAR1)".
+ */
+async function looksTruncated(source) {
+  try {
+    const size = source.size;
+    if (!Number.isFinite(size) || size < 4) return false;
+    const head = new Uint8Array(await source.slice(0, 4));
+    if (!isPar1(head)) return false;
+    const tail = new Uint8Array(await source.slice(Math.max(0, size - 4), size));
+    return !isPar1(tail, true);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Failure-only diagnostic: when metadata parsing fails, read the exact
  * same metadata region twice and compare. The answer changes the
@@ -165,6 +195,14 @@ export async function inspectParquet({ source, limits, sampleRows = 200 }) {
   try {
     metadata = await parquetMetadataAsync(file);
   } catch (error) {
+    if (await looksTruncated(source)) {
+      throw new ImportError(
+        "This file starts like a Parquet file but does not end with the Parquet footer (PAR1), " +
+          `so it is almost certainly an incomplete download (this copy is ${source.size} bytes). ` +
+          "Download the complete file and try again.",
+        { code: "truncated-parquet", stage: "reading Parquet metadata" }
+      );
+    }
     const verdict = await rereadVerdict(source);
     const combined = verdict ? new Error(`${error?.message || error}.${verdict}`) : error;
     throw wrapParquetError(combined, "reading Parquet metadata");

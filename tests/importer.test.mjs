@@ -514,3 +514,26 @@ test("a metadata failure on changing bytes blames the reads", async () => {
   };
   await assert.rejects(inspectParquet({ source, limits: {} }), /reads of this file are unreliable/);
 });
+
+test("a Parquet file missing its footer is named an incomplete download", async () => {
+  // The on-device FineWeb case: the big shards imported, but the
+  // 014 shard "around 417 MB" did not — the real 014_00000.parquet is
+  // 574,962,194 bytes, so that copy was a partial download. It used to
+  // fail as "parquet file invalid (footer != PAR1)"; the user deserves
+  // to be told to re-download, with this copy's byte count.
+  const complete = fixture("articles_snappy.parquet");
+  const bytes = complete.slice(0, Math.floor(complete.length * 0.73));
+  const source = {
+    seekable: true,
+    size: bytes.length,
+    async slice(start, end) {
+      return bytes.slice(start, end).buffer;
+    },
+  };
+  await assert.rejects(inspectParquet({ source, limits: {} }), (error) => {
+    assert.equal(error.code, "truncated-parquet");
+    assert.match(error.message, /incomplete download/);
+    assert.match(error.message, new RegExp(`${bytes.length} bytes`));
+    return true;
+  });
+});
