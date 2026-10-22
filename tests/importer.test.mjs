@@ -19,6 +19,7 @@ import { createCorpusSink } from "../web/ingest/sink.js";
 import { createControl, planImport, runImport } from "../web/ingest/pipeline.js";
 import { MemorySource } from "../web/ingest/source.js";
 import { crc32 } from "../web/ingest/checksum.js";
+import { inspectParquet } from "../web/ingest/parquet.js";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
@@ -467,4 +468,49 @@ test("progress reports real byte and document counts", async () => {
   const last = events[events.length - 1];
   assert.ok(last.documents >= 5);
   assert.ok(last.bytesRead > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Metadata-failure verdict (inspectParquet's rereadVerdict): when the
+// Parquet metadata does not parse, Ember re-reads the identical region
+// twice and reports whether the reads are even self-consistent — the
+// difference between "our read path is lying" and "your copy of the
+// file is damaged". Added after a 2.1 GB FineWeb shard failed with a
+// bare thrift error that could not discriminate the two.
+
+function parquetMetadataStart(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return bytes.length - 8 - view.getUint32(bytes.length - 8, true);
+}
+
+test("a metadata failure on stable bytes blames the file", async () => {
+  const bytes = fixture("articles_snappy.parquet").slice();
+  bytes[parquetMetadataStart(bytes)] = 0xff; // first field header: unknown type 15
+  const source = {
+    seekable: true,
+    size: bytes.length,
+    async slice(start, end) {
+      return bytes.slice(start, end).buffer;
+    },
+  };
+  await assert.rejects(inspectParquet({ source, limits: {} }), /read back identically twice/);
+});
+
+test("a metadata failure on changing bytes blames the reads", async () => {
+  const bytes = fixture("articles_snappy.parquet").slice();
+  const metaStart = parquetMetadataStart(bytes);
+  let flips = 0;
+  const source = {
+    seekable: true,
+    size: bytes.length,
+    async slice(start, end) {
+      const copy = bytes.slice(start, end);
+      if (start <= metaStart && metaStart < end) {
+        // Both values corrupt the parse, alternating per read.
+        copy[metaStart - start] = flips++ % 2 === 0 ? 0xff : 0xfe;
+      }
+      return copy.buffer;
+    },
+  };
+  await assert.rejects(inspectParquet({ source, limits: {} }), /reads of this file are unreliable/);
 });

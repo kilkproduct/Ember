@@ -85,6 +85,50 @@ function assertCodecs(codecs) {
   }
 }
 
+/**
+ * Failure-only diagnostic: when metadata parsing fails, read the exact
+ * same metadata region twice and compare. The answer changes the
+ * prescription completely:
+ *
+ * - reads differ  -> the read path (or the staged copy) is not giving
+ *   back the file's bytes; parsing was never the problem;
+ * - reads identical -> the bytes being parsed are stable, so the
+ *   file's own metadata really doesn't parse (e.g. a spliced or
+ *   truncated download) and re-obtaining the file is the fix.
+ *
+ * Costs two extra reads of one metadata region, only on failure.
+ * Returns a sentence to append to the error, or "" when the check
+ * itself cannot be done.
+ */
+async function rereadVerdict(source) {
+  try {
+    const size = source.size;
+    if (!Number.isFinite(size) || size < 12) return "";
+    const tail = new DataView(await source.slice(size - 8, size));
+    const metadataLength = tail.getUint32(0, true);
+    // Real metadata is at most tens of MB; anything bigger means the
+    // length field itself is garbage and slicing it would be absurd.
+    if (!metadataLength || metadataLength > Math.min(size - 8, 64 * 1024 * 1024)) return "";
+    const from = size - 8 - metadataLength;
+    const a = new Uint8Array(await source.slice(from, size - 8));
+    const b = new Uint8Array(await source.slice(from, size - 8));
+    if (a.length !== b.length) {
+      return " Re-reading the same metadata returned a different length, so reads of this file are unreliable.";
+    }
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) {
+        return ` Re-reading the same metadata gave different bytes (first difference ${i} bytes in), so reads of this file are unreliable.`;
+      }
+    }
+    return (
+      " The metadata bytes read back identically twice, so this file's own metadata does not parse — " +
+      "the file itself may be damaged (for example a spliced or partial download); re-downloading it may help."
+    );
+  } catch {
+    return "";
+  }
+}
+
 function wrapParquetError(error, stage = "reading Parquet data") {
   if (error instanceof ImportError) return error;
   const message = String(error?.message || error);
@@ -121,7 +165,9 @@ export async function inspectParquet({ source, limits, sampleRows = 200 }) {
   try {
     metadata = await parquetMetadataAsync(file);
   } catch (error) {
-    throw wrapParquetError(error, "reading Parquet metadata");
+    const verdict = await rereadVerdict(source);
+    const combined = verdict ? new Error(`${error?.message || error}.${verdict}`) : error;
+    throw wrapParquetError(combined, "reading Parquet metadata");
   }
   const schema = flattenSchema(parquetSchema(metadata));
   const codecs = codecOf(metadata);

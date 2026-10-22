@@ -137,7 +137,9 @@ function readElement(reader, type) {
     return uuid
   }
   default:
-    throw new Error(`thrift unhandled type: ${type}`)
+    // Include the offset: on a desync this locates where parsing left
+    // the rails instead of leaving a bare type number to guess from.
+    throw new Error(`thrift unhandled type: ${type} at offset ${reader.offset}`)
   }
 }
 
@@ -236,7 +238,13 @@ function readFieldBegin(reader, lastFid) {
     // add delta to last field id
     fid = lastFid + delta
   } else {
-    throw new Error('non-delta field id not supported')
+    // Long form: the field id follows as a zigzag i16. Writers must use
+    // it when the id jump exceeds 15 or fields are out of order — e.g.
+    // a union whose only member has id 16+ (a VARIANT logical type) or
+    // a sparse struct written late in the format's evolution. (Ember
+    // patch: upstream throws "non-delta field id not supported" here,
+    // which surfaced verbatim on a real-world file.)
+    fid = readZigZag(reader)
   }
   return [getCompactType(type), fid, fid]
 }

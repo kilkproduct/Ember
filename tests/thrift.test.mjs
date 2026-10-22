@@ -71,3 +71,37 @@ test("thrift decoder nests SET/MAP inside structs and lists", () => {
   assert.deepEqual(value.field_1, { field_1: [5n] });
   assert.deepEqual(value.field_2, [{ ab: 3 }]);
 });
+
+test("thrift decoder reads long-form (non-delta) field ids", () => {
+  // Regression test for "non-delta field id not supported" on a real
+  // file. When the field-id jump exceeds 15, or fields are out of
+  // order, the header byte carries delta 0 and the id follows as a
+  // zigzag i16 varint (1->2, 20->40, 3->6, 300->600 = D8 04).
+  const bytes = [
+    0x15, 0x0e, // field 1 (delta), I32 = 7
+    0x05, 0x28, 0x12, // field 20 (jump of 19), I32 = 9
+    0x05, 0x06, 0x16, // field 3 (out of order), I32 = 11
+    0x05, 0xd8, 0x04, 0x02, // field 300, I32 = 1
+    0x00, // STOP
+  ];
+  const value = deserializeTCompactProtocol(readerFor(bytes));
+  assert.equal(value.field_1, 7);
+  assert.equal(value.field_20, 9);
+  assert.equal(value.field_3, 11);
+  assert.equal(value.field_300, 1);
+});
+
+test("thrift decoder reads a union member with field id 16", () => {
+  // The shape of newer parquet LogicalType unions (VARIANT is field
+  // 16): the union's only member cannot be reached by a 4-bit delta
+  // from field 0, so even a minimal struct requires the long form.
+  const bytes = [
+    0x1c, // field 1, STRUCT
+    0x0c, 0x20, //   field 16 (long form), STRUCT
+    0x00, //     STOP (empty member struct)
+    0x00, //   STOP (union)
+    0x00, // STOP (outer)
+  ];
+  const value = deserializeTCompactProtocol(readerFor(bytes));
+  assert.deepEqual(value.field_1, { field_16: {} });
+});
