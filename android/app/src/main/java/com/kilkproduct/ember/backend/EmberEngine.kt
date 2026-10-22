@@ -778,9 +778,13 @@ fun importTokenFromPath(path: String): String =
  */
 fun readFileRange(file: File, start: Long, length: Int): ByteArray? {
     if (start < 0 || length < 0) return null
-    if (length == 0 || start >= file.length()) return ByteArray(0)
+    if (length == 0) return ByteArray(0)
     return try {
+        // Opening first is what makes a missing file an error (null)
+        // rather than a fake EOF: File.length() is 0 for nonexistent
+        // files, which would otherwise masquerade as "start >= size".
         FileInputStream(file).use { input ->
+            if (start >= input.channel.size()) return@use ByteArray(0)
             input.channel.position(start)
             val buffer = ByteArray(length)
             var read = 0
