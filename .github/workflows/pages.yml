@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
+        with:
+          # Enable Pages (build via GitHub Actions) if the repository has
+          # not switched it on yet; needs the pages: write permission
+          # granted above.
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: web
