@@ -856,3 +856,43 @@ test("a bridge read failure mid-inspect reports the byte offset", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("a bridge that truncates large payloads still imports exactly", async () => {
+  // On a real device, large reads of a 2.1 GB FineWeb shard came back
+  // from the WebView bridge short while small reads (header, footer)
+  // were intact; the truncated buffer reached hyparquet silently and
+  // the import died as "thrift unhandled type: 10". The bridge mock
+  // below returns at most 997 bytes of any request (a prefix, like a
+  // capped bridge string). The reader must ask for the remainder, and
+  // HttpSource must never hand a short buffer to a parser.
+  const body = fixtureBody("articles_snappy.parquet");
+  const originalFetch = globalThis.fetch;
+  const CAP = 997;
+  let maxRequest = 0;
+  globalThis.fetch = async (url, ...args) => {
+    if (String(url).includes("__ember_file__")) {
+      throw new TypeError("fetch must not be used for staged files when the bridge reader exists");
+    }
+    return originalFetch(url, ...args);
+  };
+  globalThis.EmberNative.stagedFileLength = (token) => (token === "tok-trunc" ? body.length : -1);
+  globalThis.EmberNative.readStagedRange = (token, start, length) => {
+    if (token !== "tok-trunc" || start < 0 || length < 0) return null;
+    maxRequest = Math.max(maxRequest, length);
+    return Buffer.from(body.subarray(start, start + Math.min(length, CAP))).toString("base64");
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-trunc", name: "000_00000.parquet" });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-trunc" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+    assert.ok(maxRequest > 0 && maxRequest <= 256 * 1024, `bridge requests stay small (max ${maxRequest})`);
+  } finally {
+    delete globalThis.EmberNative.stagedFileLength;
+    delete globalThis.EmberNative.readStagedRange;
+    globalThis.fetch = originalFetch;
+  }
+});

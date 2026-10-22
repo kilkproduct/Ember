@@ -921,7 +921,16 @@ function stagedRangeReader(url) {
   };
 }
 
-const BRIDGE_RANGE_CHUNK = 4 * 1024 * 1024;
+// One bridge payload stays small on purpose: 256 KiB of binary is a
+// ~350k-character base64 string, far below the message-size limits some
+// WebView bridge implementations impose on returned strings. The first
+// version used 4 MiB chunks (~5.6M characters); on a real device a
+// large read of a 2.1 GB FineWeb shard came back short, and the import
+// died deep inside the Parquet parser ("thrift unhandled type: 10")
+// because the short buffer was handed over silently. Reads are now
+// length-validated in HttpSource.slice, and the loop below treats a
+// short chunk as "the bridge caps payloads here", never as EOF.
+const BRIDGE_RANGE_CHUNK = 256 * 1024;
 
 /**
  * Byte length of a staged file from the native bridge, or null when the
@@ -945,10 +954,12 @@ function bridgedStagedLength(token) {
  * HttpSource only needs a function returning the exact requested
  * bytes; this one never touches fetch(), the WebView's Range handling,
  * or any service worker — the layers that have repeatedly corrupted or
- * refused staged-file reads. A short chunk means EOF (return what we
- * have; callers validate the total). A null/throw is a real error
- * worth surfacing, not a reason to silently fall back to the transport
- * that is known to lie.
+ * refused staged-file reads. Only an EMPTY chunk means EOF: a non-empty
+ * short chunk means the bridge truncated the payload, so the loop
+ * asks for the remainder (shrinking its request size to match) instead
+ * of returning a silently truncated buffer. A null/throw is a real
+ * error worth surfacing, not a reason to silently fall back to the
+ * transport that is known to lie.
  */
 function bridgedRangeReader(token) {
   return async (start, length) => {
@@ -959,22 +970,22 @@ function bridgedRangeReader(token) {
     if (length <= 0) return new Uint8Array(0);
     const out = new Uint8Array(length);
     let offset = 0;
+    let chunkSize = BRIDGE_RANGE_CHUNK;
     while (offset < length) {
-      const request = Math.min(BRIDGE_RANGE_CHUNK, length - offset);
-      let encoded;
+      const request = Math.min(chunkSize, length - offset);
+      let chunk;
       try {
-        encoded = native.readStagedRange(token, start + offset, request);
+        const encoded = native.readStagedRange(token, start + offset, request);
+        if (encoded == null) {
+          throw new Error("the file is no longer available");
+        }
+        chunk = encoded ? base64ToBytes(encoded) : new Uint8Array(0);
       } catch (error) {
         throw new Error(
           `Reading the picked file failed at byte ${start + offset}: ${error?.message || String(error)}`,
         );
       }
-      if (encoded == null) {
-        throw new Error(
-          `Reading the picked file failed at byte ${start + offset}: the file is no longer available.`,
-        );
-      }
-      const chunk = encoded ? base64ToBytes(encoded) : new Uint8Array(0);
+      if (!chunk.length) break; // genuine EOF
       if (chunk.length > request) {
         // A misbehaving bridge must not smuggle extra bytes past us.
         out.set(chunk.subarray(0, request), offset);
@@ -983,7 +994,11 @@ function bridgedRangeReader(token) {
       }
       out.set(chunk, offset);
       offset += chunk.length;
-      if (chunk.length < request) break; // EOF
+      if (chunk.length < request) {
+        // The bridge handed back less than asked for without being at
+        // EOF (payload cap): match its size and ask for the remainder.
+        chunkSize = chunk.length;
+      }
     }
     return out.subarray(0, offset);
   };

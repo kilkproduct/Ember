@@ -93,10 +93,12 @@ class EmberEngine private constructor(private val app: Application) {
 
         /**
          * Largest single range served over the JavaScript bridge. The JS
-         * side chunks bigger reads into 4 MiB calls; this cap only bounds
-         * a single bridge payload if a caller asks for more.
+         * side chunks bigger reads into 256 KiB calls (some WebView
+         * bridge implementations truncate very large returned strings);
+         * this cap only bounds a single bridge payload if a caller asks
+         * for more.
          */
-        private const val MAX_BRIDGE_RANGE_BYTES = 8 * 1024 * 1024
+        private const val MAX_BRIDGE_RANGE_BYTES = 1024 * 1024
 
         @Volatile
         private var instance: EmberEngine? = null
