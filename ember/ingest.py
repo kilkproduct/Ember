@@ -753,6 +753,7 @@ class ImportManager:
             job.cancel_flag = False
             job.pause_flag = False
             start_offset = job.records
+            self._persist_manifest()  # Recover even if killed before the first batch.
 
         if job.path is not None:
             if job.data_format == "parquet":

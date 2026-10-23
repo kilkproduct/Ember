@@ -114,6 +114,10 @@ class EmberEngine private constructor(private val app: Application) {
     /** Serializes interpreter start/restart so they can never overlap. */
     private val lifecycle = Mutex()
 
+    /** Serialize JNI generation and Python native model validation as one
+     * memory-owning operation. Cancellation RPCs intentionally bypass this. */
+    private val modelOperations = Mutex()
+
     private val _events = MutableSharedFlow<EngineEvent>(extraBufferCapacity = 1024)
     val events: SharedFlow<EngineEvent> = _events.asSharedFlow()
 
@@ -274,70 +278,76 @@ class EmberEngine private constructor(private val app: Application) {
         // Route text generation to the native llama.cpp engine. Python only
         // prepares the prompt and reports which GGUF model to load.
         if (method == "gen.run") {
-            generationCancelled.set(false)
-            return withTimeout(timeoutMs) {
-                val prep = withContext(Dispatchers.IO) { invokePythonRpc("gen.prepare", params) }
-                prep.optJSONObject("modelError")?.let { failure ->
-                    throw EmberBackendException(
-                        failure.optString("error").ifBlank { "No GGUF model is available for inference." }
+            return modelOperations.withLock {
+                generationCancelled.set(false)
+                withTimeout(timeoutMs) {
+                    val prep = withContext(Dispatchers.IO) { invokePythonRpc("gen.prepare", params) }
+                    prep.optJSONObject("modelError")?.let { failure ->
+                        throw EmberBackendException(
+                            failure.optString("error").ifBlank { "No GGUF model is available for inference." }
+                        )
+                    }
+                    if (generationCancelled.get()) return@withTimeout GenerationOutcome(
+                        ok = true, stoppedBy = "cancelled").toJson()
+                    val formattedPrompt = prep.optString("formattedPrompt", params.optString("prompt", ""))
+                    val modelPath = prep.optString("modelPath", "")
+                    if (modelPath.isBlank()) {
+                        throw EmberBackendException(
+                            "No GGUF model is available. Cast a vessel and fire, or import a .gguf model."
+                        )
+                    }
+                    val ctxFromPrepare = prep.optJSONObject("inference")?.optJSONObject("model")?.optInt("nCtx") ?: 0
+                    val settings = EngineSettings(
+                        nCtx = (params.optInt("nCtx", 0).takeIf { it > 0 } ?: ctxFromPrepare.takeIf { it > 0 } ?: 512)
+                            .coerceIn(64, 8192),
+                        nBatch = params.optInt("nBatch", 256).coerceIn(16, 2048),
+                        nUbatch = params.optInt("nUbatch",64).coerceIn(1,2048),
+                        nThreads = params.optInt("nThreads", 0).coerceIn(0, 8),
+                        nGpuLayers = params.optInt("nGpuLayers", 0).coerceIn(0, 999),
                     )
+                    val requestId = params.optString("requestId", java.util.UUID.randomUUID().toString())
+                    val descriptor = withContext(Dispatchers.IO) { inference.loadModel(modelPath, settings) }
+                    _events.tryEmit(EngineEvent("inference.loaded", descriptor.toJson()))
+                    if (generationCancelled.get()) return@withTimeout GenerationOutcome(
+                        ok = true, stoppedBy = "cancelled").toJson()
+                    val outcome = inference.generate(
+                        prompt = formattedPrompt,
+                        settings = GenerationSettings(
+                            maxTokens = params.optInt("maxNew", 128).coerceIn(0, 4096),
+                            temperature = params.optDouble("temperature", 0.8),
+                            topK = params.optInt("topK", 40).coerceIn(0, 1000),
+                            topP = params.optDouble("topP", 0.95),
+                            repeatPenalty = params.optDouble("repetition", 1.1),
+                            repeatLastN = params.optInt("repeatLastN", 64).coerceIn(0, 1024),
+                            seed = GenerationSettings.seedFrom(params.optString("seed", "")),
+                            stopOnEos = params.optBoolean("stopOnBoundary", true),
+                            prependBos = params.optBoolean("prependBos", true),
+                        ),
+                    ) { piece, tokenId, generated ->
+                        _generationTokens.tryEmit(GenerationToken(requestId, piece, tokenId, generated))
+                        !generationCancelled.get()
+                    }
+                    if (!outcome.ok && outcome.error != null && !outcome.cancelled) {
+                        throw EmberBackendException(outcome.error)
+                    }
+                    outcome.toJson().put("requestId", requestId)
                 }
-                if (generationCancelled.get()) return@withTimeout GenerationOutcome(
-                    ok = true, stoppedBy = "cancelled").toJson()
-                val formattedPrompt = prep.optString("formattedPrompt", params.optString("prompt", ""))
-                val modelPath = prep.optString("modelPath", "")
-                if (modelPath.isBlank()) {
-                    throw EmberBackendException(
-                        "No GGUF model is available. Cast a vessel and fire, or import a .gguf model."
-                    )
-                }
-                val ctxFromPrepare = prep.optJSONObject("inference")?.optJSONObject("model")?.optInt("nCtx") ?: 0
-                val settings = EngineSettings(
-                    nCtx = (params.optInt("nCtx", 0).takeIf { it > 0 } ?: ctxFromPrepare.takeIf { it > 0 } ?: 512)
-                        .coerceIn(64, 8192),
-                    nBatch = params.optInt("nBatch", 256).coerceIn(16, 2048),
-                    nUbatch = params.optInt("nUbatch",64).coerceIn(1,2048),
-                    nThreads = params.optInt("nThreads", 0).coerceIn(0, 8),
-                    nGpuLayers = params.optInt("nGpuLayers", 0).coerceIn(0, 999),
-                )
-                val requestId = params.optString("requestId", java.util.UUID.randomUUID().toString())
-                val descriptor = withContext(Dispatchers.IO) { inference.loadModel(modelPath, settings) }
-                _events.tryEmit(EngineEvent("inference.loaded", descriptor.toJson()))
-                if (generationCancelled.get()) return@withTimeout GenerationOutcome(
-                    ok = true, stoppedBy = "cancelled").toJson()
-                val outcome = inference.generate(
-                    prompt = formattedPrompt,
-                    settings = GenerationSettings(
-                        maxTokens = params.optInt("maxNew", 128).coerceIn(0, 4096),
-                        temperature = params.optDouble("temperature", 0.8),
-                        topK = params.optInt("topK", 40).coerceIn(0, 1000),
-                        topP = params.optDouble("topP", 0.95),
-                        repeatPenalty = params.optDouble("repetition", 1.1),
-                        repeatLastN = params.optInt("repeatLastN", 64).coerceIn(0, 1024),
-                        seed = GenerationSettings.seedFrom(params.optString("seed", "")),
-                        stopOnEos = params.optBoolean("stopOnBoundary", true),
-                        prependBos = params.optBoolean("prependBos", true),
-                    ),
-                ) { piece, tokenId, generated ->
-                    _generationTokens.tryEmit(GenerationToken(requestId, piece, tokenId, generated))
-                    !generationCancelled.get()
-                }
-                if (!outcome.ok && outcome.error != null && !outcome.cancelled) {
-                    throw EmberBackendException(outcome.error)
-                }
-                outcome.toJson().put("requestId", requestId)
             }
         }
 
-        // The Python validator and JNI generator share a library, not an engine
-        // handle. Release the JNI model before native import validation so two
-        // copies do not compete for mobile memory.
-        if (method in setOf("model.unload", "model.registerExternal", "model.importGguf")) {
-            withContext(Dispatchers.IO) { inference.unload() }
-        }
+        val validatesModel = method in setOf("model.unload", "model.registerExternal", "model.importGguf")
         val result = try {
             withTimeout(timeoutMs) {
-                withContext(Dispatchers.IO) {
+                if (validatesModel) {
+                    modelOperations.withLock {
+                        withContext(Dispatchers.IO) {
+                            // JNI and Python share a library, not an engine
+                            // handle. Never keep both models resident here.
+                            inference.unload()
+                            invokePythonRpc(method, params)
+                        }
+                    }
+                } else withContext(Dispatchers.IO) {
                     invokePythonRpc(method, params)
                 }
             }

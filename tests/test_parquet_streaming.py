@@ -119,3 +119,17 @@ def test_page_bounded_not_row_group_bounded(tmp_path):
         assert sum(1 for _ in reader.rows())==12000
     _,peak=tracemalloc.get_traced_memory();tracemalloc.stop()
     assert peak<4*1024*1024,peak
+
+
+def test_running_manifest_is_durable_before_first_batch(tmp_path, monkeypatch):
+    p=write(tmp_path/'interrupt.parquet',[{'text':'An uncommitted first document.'}])
+    c=Corpus(tmp_path/'corpus');m=ImportManager(c);m.stage_path('one',p)
+    def killed_before_processing(*args):
+        # Simulate process death before the normal import try/finally can run.
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(m,'_commit_parquet',killed_before_processing)
+    with pytest.raises(KeyboardInterrupt):m.commit('one')
+    recovered=ImportManager(c)
+    assert recovered._jobs['one'].status=='paused'
+    assert recovered._jobs['one'].records==0
+    assert recovered.resume('one')['accepted']==1
