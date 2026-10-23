@@ -686,15 +686,18 @@ data class ImportProgress(
     val failed: Int = 0,
     val bytesRead: Long = 0,
     val sourceBytes: Long = 0,
+    val byteBasis: String = "source",
     val entries: Int = 0,
     val message: String = "",
     val elapsedMs: Long = 0,
 ) {
+    val progressFraction: Float
+        get()=if(stage!="completed" && (byteBasis=="decompressed" || percent<=0)) Float.NaN else percent/100f
     val stageLabel: String
         get() = when (stage) {
             "opening" -> "Opening the file"
             "reading" -> "Reading records"
-            "committing" -> "Writing documents"
+            "committing" -> if(byteBasis=="decompressed") "Parsing decompressed records · total unknown" else "Writing documents · source bytes read"
             "finalizing" -> "Finishing up"
             "paused" -> "Paused"
             "cancelled" -> "Stopped"
@@ -718,7 +721,7 @@ data class ImportProgress(
             return ImportProgress(
                 token = json.stringOr("token"),
                 processed = documents,
-                total = if (reportedTotal > 0) reportedTotal else records.coerceAtLeast(documents),
+                total = if (json.has("total")) reportedTotal else records.coerceAtLeast(documents),
                 percent = json.intOr("percent"),
                 stage = json.stringOr("stage", "reading"),
                 records = records,
@@ -726,7 +729,7 @@ data class ImportProgress(
                 skipped = json.intOr("skipped"),
                 failed = json.intOr("failed"),
                 bytesRead = json.longOr("bytesRead"),
-                sourceBytes = json.longOr("sourceBytes"),
+                sourceBytes = json.longOr("sourceBytes"),byteBasis=json.stringOr("byteBasis","source"),
                 entries = json.intOr("entries"),
                 message = json.stringOr("message"),
                 elapsedMs = json.longOr("elapsedMs"),

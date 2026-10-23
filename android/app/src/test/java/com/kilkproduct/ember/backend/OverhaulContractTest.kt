@@ -27,6 +27,12 @@ class OverhaulContractTest {
             assertTrue(VesselEstimator.estimate(cfg,4).trainBytes>e.trainBytes)
         }
     }
+    @Test fun compressedImportNeverUsesCompressedSizeAsDecompressedTotal() {
+        val p=ImportProgress.fromJson(org.json.JSONObject().put("total",0).put("records",100)
+            .put("documents",90).put("byteBasis","decompressed").put("bytesRead",100000).put("sourceBytes",1000))
+        assertEquals(0,p.total);assertTrue(p.progressFraction.isNaN())
+        assertTrue(p.stageLabel.isNotBlank())
+    }
     @Test fun largeVocabAndExplicitFFNIncreaseRealEstimate() {
         val cfg=ModelConfig(2,2,64,64,1500,0.0,4.0)
         val e=VesselEstimator.estimate(cfg)
