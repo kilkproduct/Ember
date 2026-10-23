@@ -42,8 +42,6 @@ set(LLAMA_BUILD_TOOLS     OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_MTMD      OFF CACHE BOOL "" FORCE)
 # Inference is local-only: no TLS, no HTTP client, no model downloads.
 set(LLAMA_OPENSSL         OFF CACHE BOOL "" FORCE)
-set(LLAMA_CURL            OFF CACHE BOOL "" FORCE)
-set(LLAMA_USE_CURL        OFF CACHE BOOL "" FORCE)
 # Static so everything is folded into libember_llama.so.
 set(BUILD_SHARED_LIBS     OFF CACHE BOOL "" FORCE)
 # ggml options from llama.cpp docs/android.md: these are required for
@@ -59,6 +57,14 @@ set(GGML_SYCL             OFF CACHE BOOL "" FORCE)
 set(GGML_CCACHE           OFF CACHE BOOL "" FORCE)
 # CPU inference is the supported path on Android; GPU backends stay opt-in.
 set(GGML_CPU              ON  CACHE BOOL "" FORCE)
+
+if (ANDROID AND ANDROID_ABI STREQUAL "x86_64")
+    # Android x86_64 guarantees SSE4.2, not AVX/AVX2/FMA. A universal emulator
+    # APK must not crash with SIGILL on older hosts.
+    foreach(feature AVX AVX2 AVX512 FMA F16C BMI2)
+        set(GGML_${feature} OFF CACHE BOOL "" FORCE)
+    endforeach()
+endif()
 
 add_subdirectory("${EMBER_LLAMA_CPP_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
 

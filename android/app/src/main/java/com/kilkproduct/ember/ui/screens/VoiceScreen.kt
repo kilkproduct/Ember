@@ -452,7 +452,7 @@ fun VoiceScreen(
                             if (!entry.selected && entry.valid != false) {
                                 TextButton(
                                     onClick = { if (entry.trained) vm.selectTrainedModel() else vm.selectLibraryModel(entry.path) },
-                                    enabled = !ui.modelBusy,
+                                    enabled = !ui.modelBusy && !generating && !ui.trainingActive,
                                 ) { Text("Use") }
                             }
                         }
@@ -466,22 +466,22 @@ fun VoiceScreen(
                         FilterChip(
                             selected = ui.quantization == id,
                             onClick = { vm.setQuantization(id) },
-                            enabled = !ui.modelBusy && ui.status.model.ready,
+                            enabled = !ui.modelBusy && !generating && !ui.trainingActive && ui.status.model.ready,
                             label = { Text(label, style = MaterialTheme.typography.labelMedium) },
                         )
                     }
                 }
                 Spacer(Modifier.height(10.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onImportModel, enabled = !ui.modelBusy && !generating) { Text("Import GGUF model") }
+                    Button(onClick = onImportModel, enabled = !ui.modelBusy && !generating && !ui.trainingActive && !generating) { Text("Import GGUF model") }
                     TextButton(onClick = { vm.repo.exportGguf() }, enabled = ui.modelReady && !ui.exportBusy) { Text("Export GGUF") }
-                    TextButton(onClick = { vm.validateModel() }, enabled = !ui.modelBusy) { Text("Validate") }
-                    TextButton(onClick = { vm.refreshModels() }, enabled = !ui.modelBusy) { Text("Refresh") }
+                    TextButton(onClick = { vm.validateModel() }, enabled = !ui.modelBusy && !generating && !ui.trainingActive) { Text("Validate") }
+                    TextButton(onClick = { vm.refreshModels() }, enabled = !ui.modelBusy && !generating && !ui.trainingActive) { Text("Refresh") }
                     TextButton(
                         onClick = { vm.unloadModel() },
-                        enabled = !ui.modelBusy && ui.loadedModel?.loaded == true,
+                        enabled = !ui.modelBusy && !generating && !ui.trainingActive && ui.loadedModel?.loaded == true,
                     ) { Text("Unload") }
-                    TextButton(onClick = { vm.selectTrainedModel() }, enabled = !ui.modelBusy) {
+                    TextButton(onClick = { vm.selectTrainedModel() }, enabled = !ui.modelBusy && !generating && !ui.trainingActive) {
                         Text("Use trained model")
                     }
                 }
