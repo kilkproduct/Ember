@@ -569,7 +569,7 @@ def _dtype_nbytes(dtype: int, dims: Sequence[int]) -> int:
     return numel//block*size
 
 
-def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> GgufHeader:
+def read_gguf_header(path: str | Path) -> GgufHeader:
     """Parse a GGUF header (metadata + tensor table) without loading weights."""
     p = Path(path)
     if not p.exists():
@@ -578,7 +578,10 @@ def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> 
     if size < 24:
         raise GgufExportError(f"{p.name} is too small to be a GGUF model ({size} bytes)")
     with open(p, "rb") as fh:
-        head = mmap.mmap(fh.fileno(), length=min(size,max_bytes), access=mmap.ACCESS_READ)
+        # Map the file, not an arbitrary prefix. Large tokenizer metadata may
+        # legitimately place the tensor table beyond 64 MiB; mapping does not
+        # read the weight bytes into the Python heap.
+        head = mmap.mmap(fh.fileno(), length=0, access=mmap.ACCESS_READ)
 
     try:
         magic = struct.unpack_from("<I", head, 0)[0]

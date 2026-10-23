@@ -28,7 +28,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from ._parquet import decompress_zstd, iter_parquet_rows
+from ._parquet import decompress_zstd, iter_parquet_rows, ParquetFile
 from .corpus import Corpus, clean_document_text
 from .dataset import normalize_split
 from .model import BRAIN_KIND, BRAIN_VERSION, FORMAT_MAGIC
@@ -602,6 +602,8 @@ class _ImportJob:
     status: str = "staged"  # staged | running | paused | cancelled | completed | failed
     data_format: str = "text"
     resume_records: int = 0
+    identity: list[int] = field(default_factory=list)
+    rejected: int = 0
     accepted: int = 0
     merged: int = 0
     skipped: int = 0
@@ -645,6 +647,8 @@ class ImportManager:
                 name=str(row.get("name") or (p.name if p else "import")),
                 mime=str(row.get("mime") or ""),
                 status=status,
+                identity=row.get("identity", []),
+                rejected=int(row.get("rejected", 0)),
                 data_format=str(row.get("dataFormat") or "text"),
                 accepted=int(row.get("documents") or row.get("accepted") or 0),
                 merged=int(row.get("merged") or 0),
@@ -660,8 +664,22 @@ class ImportManager:
         p = Path(path)
         if not p.exists():
             raise ValueError(f"Staged file does not exist: {p}")
-        stream=_stream_source(p,name or p.name)
-        if stream:
+        with p.open("rb") as source:
+            is_parquet = source.read(4) == b"PAR1" or (name or p.name).lower().endswith(".parquet")
+        stream=None if is_parquet else _stream_source(p,name or p.name)
+        if is_parquet:
+            with ParquetFile(p) as reader:
+                self._parquet_text_column(reader)
+                preview={"token":token,"name":name or p.name,"bytes":p.stat().st_size,
+                         "format":"parquet","kind":"documents","mime":mime,"entries":1,
+                         "documents":[],"warnings":[],"compression":[],"archive":[],
+                         "fields":[{"label":"Columns","value":", ".join(reader.column_names)},
+                                   {"label":"Rows","value":str(reader.num_rows)}],
+                         "message":"Parquet schema validated; ready for streaming import.",
+                         "resumable":True,"columns":reader.column_names,
+                         "records":reader.num_rows,"rowGroups":len(reader.row_groups),
+                         "notes":["Footer-only preview; rows are validated during import."]}
+        elif stream:
             opener,fmt,encoding,codec,sample=stream
             # Preview is explicitly sampled; never scan or count the entire file.
             if fmt=="jsonl" and b"\n" in sample:sample=sample[:sample.rfind(b"\n")+1]
@@ -681,6 +699,7 @@ class ImportManager:
                 name=name or p.name,
                 mime=mime,
                 data_format=preview.get("format", "text"),
+                identity=self._file_identity(p),
             )
             self._jobs[token] = job
             self._persist_manifest()
@@ -724,12 +743,18 @@ class ImportManager:
                 raise ValueError(
                     f"Staged import file '{job.name}' is no longer cached on disk. Re-select the file to import."
                 )
+            if job.status == "running":
+                raise ValueError("This import is already running")
+            if job.path is not None and job.identity and self._file_identity(job.path) != job.identity:
+                raise ValueError("Staged file changed since preview; select it again before resuming")
             job.status = "running"
             job.cancel_flag = False
             job.pause_flag = False
             start_offset = job.records
 
         if job.path is not None:
+            if job.data_format == "parquet":
+                return self._commit_parquet(job,on_progress,t0)
             stream=_stream_source(job.path,job.name)
             if stream:return self._commit_streaming(job,stream,on_progress,t0)
             if job.path.stat().st_size>MAX_DECOMPRESSED_BYTES:raise ValueError("Use streaming JSONL/CSV for datasets beyond the bounded parser limit")
@@ -848,6 +873,95 @@ class ImportManager:
             "format": job.data_format,
             "warnings": [],
         }
+
+    @staticmethod
+    def _file_identity(path):
+        stat=path.stat()
+        return [stat.st_dev,stat.st_ino,stat.st_size,stat.st_mtime_ns]
+
+    @staticmethod
+    def _parquet_text_column(reader):
+        for key in TEXT_KEYS:
+            if key in reader.column_names:
+                return key
+        raise ValueError("Parquet schema requires a flat UTF-8 text column (text, body, content, article, etc.); "
+                         f"available string columns: {reader.column_names}")
+
+    def _commit_parquet(self,job,on_progress,t0):
+        start=job.records
+        seen=0
+        batch=[]
+        pending_rejected=0
+        last_report=0.
+        batch_chars=0
+        reader=None
+        rows=None
+        def report(final=False):
+            nonlocal last_report
+            now=time.perf_counter()
+            if on_progress and (final or now-last_report>=.15):
+                last_report=now
+                on_progress({"token":job.token,"name":job.name,"stage":job.status,
+                    "format":"parquet","processed":job.records,"records":job.records,
+                    "total":reader.num_rows,"percent":100 if job.status=="completed" else
+                        min(99,int(100*job.records/max(1,reader.num_rows))),
+                    "documents":job.accepted,"documentsSaved":job.accepted+job.merged,
+                    "merged":job.merged,"skipped":job.skipped,"rejected":job.rejected,
+                    "rowGroupsProcessed":reader.row_groups_processed,"rowGroups":len(reader.row_groups),
+                    "bytesRead":reader.bytes_read,"byteBasis":"projected pages and footer (includes resume replay)",
+                    "sourceBytes":job.path.stat().st_size,"entries":1,
+                    "elapsedMs":int((now-t0)*1000),
+                    "documentsPerSecond":max(0,job.records-start)/max(.001,now-t0)})
+        def flush():
+            nonlocal pending_rejected,batch_chars
+            if batch:
+                counts=self.corpus.add_many(batch)
+                job.accepted+=counts["accepted"];job.merged+=counts["merged"];job.skipped+=counts["skipped"]
+                batch.clear()
+            job.rejected+=pending_rejected;pending_rejected=0;batch_chars=0
+            job.records=seen
+            job.updated_at=int(time.time()*1000)
+            with self._lock:self._persist_manifest()
+            report()
+        try:
+            with ParquetFile(job.path) as reader:
+                text_column=self._parquet_text_column(reader)
+                rows=reader.rows()
+                try:
+                    for obj in rows:
+                        if job.cancel_flag or job.pause_flag:break
+                        seen+=1
+                        if seen<=start:continue
+                        text=obj.get(text_column)
+                        if not isinstance(text,str) or not text.strip():
+                            pending_rejected+=1
+                        else:
+                            # Never let metadata/URLs become document text for a null text cell.
+                            doc=_extract_record_doc({**obj,"text":text},f"{job.name} #{seen}",f"import:{Path(job.name).stem[:60]}")
+                            doc["meta"]={**doc["meta"],**{k:v for k,v in obj.items() if k!=text_column and v is not None},
+                                         "sourceFile":job.name,"record":seen,"format":"parquet"}
+                            batch.append(doc);batch_chars+=len(text)
+                        # Bound transactions by both records and payload, not only row count.
+                        if seen-job.records>=100 or batch_chars>=1024*1024:flush()
+                    if not job.cancel_flag:flush()
+                    job.status="cancelled" if job.cancel_flag else "paused" if job.pause_flag else "completed"
+                    report(True)
+                finally:
+                    rows.close()
+                result={"outcome":job.status,"format":"parquet","records":job.records,
+                        "documents":job.accepted,"accepted":job.accepted,"merged":job.merged,
+                        "skipped":job.skipped,"rejected":job.rejected,"malformed":0,"failed":0,
+                        "failedEntries":0,"resumeRecords":start,"bytesRead":reader.bytes_read,
+                        "rowGroupsProcessed":reader.row_groups_processed,"warnings":[],
+                        "elapsedMs":int((time.perf_counter()-t0)*1000)}
+        except Exception:
+            job.status="failed"
+            # Previously committed batches remain durable and the cursor never advances
+            # over a failed transaction. Partial success is visible in the manifest.
+            raise
+        finally:
+            with self._lock:self._persist_manifest()
+        return result
 
     def _commit_streaming(self,job,stream,on_progress,t0):
         opener,fmt,encoding,codec,sample=stream
@@ -986,6 +1100,8 @@ class ImportManager:
                 "skipped": j.skipped,
                 "malformed": j.malformed,
                 "records": j.records,
+                "identity": j.identity,
+                "rejected": j.rejected,
                 "updatedAt": j.updated_at,
                 "resumable": j.path is not None and j.path.exists(),
             }

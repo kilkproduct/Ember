@@ -690,11 +690,17 @@ data class ImportProgress(
     val entries: Int = 0,
     val message: String = "",
     val elapsedMs: Long = 0,
+    val rejected: Int = 0,
+    val rowGroupsProcessed: Int = 0,
+    val rowGroups: Int = 0,
+    val documentsPerSecond: Double = 0.0,
 ) {
     val progressFraction: Float
         get()=if(stage!="completed" && (byteBasis=="decompressed" || percent<=0)) Float.NaN else percent/100f
     val stageLabel: String
         get() = when (stage) {
+            "staging" -> "Copying into resumable storage"
+            "running" -> "Reading Parquet pages and saving documents"
             "opening" -> "Opening the file"
             "reading" -> "Reading records"
             "committing" -> if(byteBasis=="decompressed") "Parsing decompressed records · total unknown" else if(total==0) "Writing documents · source bytes read" else "Writing documents"
@@ -733,6 +739,10 @@ data class ImportProgress(
                 entries = json.intOr("entries"),
                 message = json.stringOr("message"),
                 elapsedMs = json.longOr("elapsedMs"),
+                rejected = json.intOr("rejected"),
+                rowGroupsProcessed = json.intOr("rowGroupsProcessed"),
+                rowGroups = json.intOr("rowGroups"),
+                documentsPerSecond = json.optDouble("documentsPerSecond", 0.0),
             )
         }
     }

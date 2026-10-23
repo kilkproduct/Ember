@@ -463,7 +463,10 @@ class EmberRepository private constructor(
         val data = event.data
         when (event.name) {
             "model.importProgress" -> if(data!=null) {
-                _state.update {it.copy(modelImportDetail="Library copy ${Formats.bytes(data.longOr("bytesCopied"))} / ${Formats.bytes(data.longOr("totalBytes"))}")}
+                val detail = if (data.has("loadProgress")) {
+                    "Native model validation ${(data.optDouble("loadProgress", 0.0) * 100).toInt()}%"
+                } else "Library copy ${Formats.bytes(data.longOr("bytesCopied"))} / ${Formats.bytes(data.longOr("totalBytes"))}"
+                _state.update {it.copy(modelImportDetail=detail)}
             }
             "inference.loaded" -> if (data != null) {
                 _state.update { it.copy(loadedModel = ModelDescriptor.fromJson(data), inferenceError = null) }
@@ -998,6 +1001,8 @@ class EmberRepository private constructor(
     // File import
     // ---------------------------------------------------------------------
 
+    private var datasetStagingJob: Job? = null
+
     fun inspectImport(uri: Uri) {
         if (!gate.tryStart(Ops.IMPORT_INSPECT)) return
         markBusy(Ops.IMPORT_INSPECT, true)
@@ -1014,12 +1019,18 @@ class EmberRepository private constructor(
                 importResult = null,
             )
         }
-        scope.launch {
+        datasetStagingJob = scope.launch {
             var token: String? = null
             try {
                 val name = withContext(Dispatchers.IO) { Files.displayName(app, uri) }
                 val mime = withContext(Dispatchers.IO) { Files.mimeType(app, uri) }
-                val staged = withContext(Dispatchers.IO) { engine.stageImport(uri, name, mime) }
+                val staged = withContext(Dispatchers.IO) {
+                    val taskContext=coroutineContext
+                    engine.stageImport(uri, name, mime, checkCancelled={taskContext.ensureActive()}, onProgress={bytes ->
+                        _state.update {it.copy(importProgress=ImportProgress(token="",stage="staging",bytesRead=bytes,
+                            message="Copying selected document into resumable app storage"))}
+                    })
+                }
                 token = staged.token
                 currentImportToken = staged.token
                 currentImportKind = null
@@ -1034,6 +1045,8 @@ class EmberRepository private constructor(
                 currentImportKind = preview.kind
                 _state.update { it.copy(importPreview = preview, importError = null) }
             } catch (e: CancellationException) {
+                token?.let { engine.releaseImport(it) }
+                _state.update {it.copy(importProgress=null,importCancelling=false)}
                 throw e
             } catch (t: Throwable) {
                 val message = t.message ?: "That file could not be inspected."
@@ -1334,6 +1347,10 @@ class EmberRepository private constructor(
     }
 
     fun cancelImport() {
+        if (currentImportToken == null && datasetStagingJob?.isActive == true) {
+            datasetStagingJob?.cancel()
+            return
+        }
         val token = currentImportToken ?: return
         _state.update { it.copy(importCancelling = true) }
         scope.launch {
@@ -1682,7 +1699,7 @@ class EmberRepository private constructor(
                         for (i in 0 until entries.length()) if(entries.getJSONObject(i).optString("uri")!=uri.toString()) saved.put(entries.getJSONObject(i))
                         saved.put(JSONObject().put("uri",uri.toString()).put("name",name))
                         prefs.edit().putString("models",saved.toString()).apply()
-                        _state.update { state -> state.copy(modelImportDetail="Registered external model · no model copy · native validation on first load") }
+                        _state.update { state -> state.copy(modelImportDetail="Registered external model · no model copy · native model and context validated") }
                     }
                 } catch(t: Throwable) {
                     if(t is CancellationException) throw t
@@ -1693,7 +1710,7 @@ class EmberRepository private constructor(
                     val mime=withContext(Dispatchers.IO) { Files.mimeType(app,uri) }
                     val staged=withContext(Dispatchers.IO) {
                         val taskContext=coroutineContext
-                        engine.stageImport(uri,name,mime,maxBytes=16L*1024*1024*1024,
+                        engine.stageImport(uri,name,mime,maxBytes=Long.MAX_VALUE,
                             checkCancelled={taskContext.ensureActive()},onProgress={bytes ->
                                 _state.update { it.copy(modelImportDetail="Copied ${Formats.bytes(bytes)} · validation pending") }
                             })

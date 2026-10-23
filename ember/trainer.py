@@ -1035,7 +1035,16 @@ class Trainer:
         # URI permission, reopening after restart and revocation are Android duties.
         if not str(path).startswith("/proc/self/fd/"): raise ValueError("external models require an Android-owned file descriptor")
         info=validate_gguf_file(path)
-        entry={**info,"name":name,"libraryName":name,"storage":"external","uri":uri,"path":path}
+        self._model_import_cancel.clear()
+        engine=get_engine()
+        self._engine_model_path=""
+        try:
+            engine.load_model(path,EngineConfig(),on_progress=lambda value:
+                self._emit("model.importProgress",{"loadProgress":value,"stage":"native-validation"}))
+            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+        finally:
+            engine.unload()
+        entry={**info,"nativeValidated":True,"name":name,"libraryName":name,"storage":"external","uri":uri,"path":path}
         self.external_models[uri]=entry
         if select or self.corpus.get_kv("inference:selected_external")==uri:
             self._imported_gguf=Path(path)
@@ -1137,7 +1146,8 @@ class Trainer:
         self._model_import_cancel.clear()
         tmp=None
         try:
-            engine.load_model(src, EngineConfig())
+            engine.load_model(src, EngineConfig(),on_progress=lambda value:
+                self._emit("model.importProgress",{"loadProgress":value,"stage":"native-validation"}))
             if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
             target_name = (name or src.stem or "imported-model")
             if target_name.lower().endswith(".gguf"):target_name=target_name[:-5]

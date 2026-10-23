@@ -1,0 +1,58 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+_________________ test_metadata_beyond_old_64_mib_prefix_loads _________________
+
+tmp_path = PosixPath('/tmp/pytest-of-user/pytest-6/test_metadata_beyond_old_64_mi0')
+
+    def test_metadata_beyond_old_64_mib_prefix_loads(tmp_path):
+        source=fixture(tmp_path/'small.gguf')
+        original=source.read_bytes()
+        # Insert a valid, ignored metadata string. Its serialized size is aligned so
+        # tensor offsets and the pre-existing data padding remain correct.
+        size=65*1024*1024
+        key=b'fixture.padding'
+        prefix=struct.pack('<Q',len(key))+key+struct.pack('<I',8)
+        length=size-len(prefix)-8
+        p=tmp_path/'large-header.gguf'
+        header=bytearray(original[:24])
+        struct.pack_into('<Q',header,16,struct.unpack_from('<Q',header,16)[0]+1)
+        with p.open('wb') as f:
+            f.write(header);f.write(prefix);f.write(struct.pack('<Q',length))
+            block=b'x'*(1024*1024)
+            while length:
+                part=min(len(block),length);f.write(block[:part]);length-=part
+            f.write(original[24:])
+>       assert validate_gguf_file(p)['arch']=='llama'
+               ^^^^^^^^^^^^^^^^^^^^^
+
+tests/test_gguf_loading_regressions.py:36: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ember/gguf_export.py:856: in validate_gguf_file
+    return dict(_cached_validation(str(p),st.st_size,st.st_mtime_ns,st.st_dev,st.st_ino))
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ember/gguf_export.py:850: in _cached_validation
+    return _validate_gguf_file(path)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+ember/gguf_export.py:738: in _validate_gguf_file
+    header = read_gguf_header(p)
+             ^^^^^^^^^^^^^^^^^^^
+ember/gguf_export.py:646: in read_gguf_header
+    metadata[key] = read_val(vtype)
+                    ^^^^^^^^^^^^^^^
+ember/gguf_export.py:629: in read_val
+    return read_str()
+           ^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+    def read_str() -> str:
+        nonlocal off
+        (ln,) = struct.unpack_from("<Q", head, off)
+        off += 8
+        if off + ln > len(head):
+>           raise GgufExportError("truncated GGUF string")
+E           ember.gguf_export.GgufExportError: truncated GGUF string
+
+ember/gguf_export.py:605: GgufExportError
+=========================== short test summary info ============================
+FAILED tests/test_gguf_loading_regressions.py::test_metadata_beyond_old_64_mib_prefix_loads
+1 failed in 0.24s

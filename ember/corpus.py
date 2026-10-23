@@ -217,8 +217,6 @@ class Corpus:
         cleaned = clean_document_text(text, strip_html=strip_html)
         if not cleaned:
             raise ValueError("Document text is empty after cleaning.")
-        if len(cleaned) > MAX_DOC_CHARS:
-            cleaned = cleaned[:MAX_DOC_CHARS]
 
         safe_title = (str(title or "").strip()[:240]) or "untitled"
         safe_source = (str(source or "manual").strip()[:80]) or "manual"
@@ -307,8 +305,6 @@ class Corpus:
                     if not cleaned:
                         skipped += 1
                         continue
-                    if len(cleaned) > MAX_DOC_CHARS:
-                        cleaned = cleaned[:MAX_DOC_CHARS]
                     title = (str(raw.get("title") or "").strip()[:240]) or cleaned[:60].splitlines()[0][:60] or "untitled"
                     source = (str(raw.get("source") or "import").strip()[:80]) or "import"
                     url = str(raw.get("url") or "").strip()[:1024]

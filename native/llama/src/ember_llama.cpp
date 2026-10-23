@@ -85,12 +85,19 @@ bool g_backend_ok = false;
 std::mutex g_log_mu;
 std::deque<std::string> g_logs;
 constexpr size_t kMaxLogs = 60;
+// Error details from the upstream loader on the calling thread. Keep the
+// actual tensor/tokenizer/backend failure, not just a generic wrapper error.
+thread_local std::string g_load_errors;
 
 void llama_log_sink(enum ggml_log_level level, const char* text, void* /*user*/) {
     if (!text) return;
     std::string line(text);
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
     if (line.empty()) return;
+    if (level == GGML_LOG_LEVEL_ERROR) {
+        g_load_errors += line + "\n";
+        if (g_load_errors.size() > 8192) g_load_errors.erase(0, g_load_errors.size()-8192);
+    }
     std::lock_guard<std::mutex> lock(g_log_mu);
     g_logs.emplace_back(line);
     if (g_logs.size() > kMaxLogs) {
@@ -365,6 +372,7 @@ EMBER_API int ember_llama_load(
     engine->cancel.store(false, std::memory_order_relaxed);
     release_locked(engine);
     engine->clear_error();
+    g_load_errors.clear();
 
     // Validate the file exists before handing it to llama.cpp so the message is
     // honest and local ("file missing") instead of a generic load failure.
@@ -436,7 +444,7 @@ EMBER_API int ember_llama_load(
             engine->set_error(EMBER_LLAMA_ERR_MODEL_INVALID,
                               std::string("llama.cpp could not load this local model") +
                               ". The file may be corrupt, truncated, quantized in an unsupported way, "
-                              "or use an architecture this build does not include.");
+                              "or use an architecture this build does not include. Upstream: " + g_load_errors);
         }
         return engine->code;
     }

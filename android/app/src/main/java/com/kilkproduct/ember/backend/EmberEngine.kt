@@ -68,7 +68,7 @@ class EmberEngine private constructor(private val app: Application) {
 
     companion object {
         private const val TAG = "EmberEngine"
-        private const val MAX_IMPORT_BYTES = 8L * 1024 * 1024 * 1024
+        private const val MAX_IMPORT_BYTES = Long.MAX_VALUE
         private const val MIN_FREE_BYTES = 64L * 1024 * 1024
 
         @Volatile
@@ -329,7 +329,12 @@ class EmberEngine private constructor(private val app: Application) {
             }
         }
 
-        if (method == "model.unload") withContext(Dispatchers.IO) { inference.unload() }
+        // The Python validator and JNI generator share a library, not an engine
+        // handle. Release the JNI model before native import validation so two
+        // copies do not compete for mobile memory.
+        if (method in setOf("model.unload", "model.registerExternal", "model.importGguf")) {
+            withContext(Dispatchers.IO) { inference.unload() }
+        }
         val result = try {
             withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {
