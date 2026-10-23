@@ -1557,8 +1557,12 @@ class EmberRepository private constructor(
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
+                // Loading a new model may have released the previous context.
+                // Never leave an old "loaded" descriptor after a native failure.
+                val actualModel=withContext(Dispatchers.IO) {engine.inference.modelDescriptor()}
                 _state.update {
                     it.copy(
+                        loadedModel = actualModel,
                         generating = false,
                         generationError = t.message ?: "Generation failed.",
                     )
