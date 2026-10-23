@@ -156,3 +156,11 @@ Latest local suite: **99 passed**, with two visible overflow warnings from the
 deliberate runaway-learning-rate test. Actual native F32 and Q8_0 fixtures, each
 trained four steps, both pass the C++ lifecycle/generation suite. CLI and Android
 CI verification results are reported separately when executed.
+
+Final additional host checks: **102 Python tests passed**. Three trained native
+parity tests exercise KV-head counts 1/2/4, tied and untied heads, FFN width 96,
+multiple RoPE bases and RMS epsilon 1e-6. The command-line pipeline was actually
+run on eight synthetic documents for five steps, exported Q8_0 (61,568 bytes),
+loaded it in llama.cpp and generated eight tokens. Repetitive output from this
+tiny fixture is expected and is not evidence of general language capability.
+CLI exposes accumulation, weight decay and explicit scheduler/RNG resumption.

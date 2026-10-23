@@ -20,6 +20,9 @@ def main():
     p.add_argument('--steps',type=int,default=100)
     p.add_argument('--batch',type=int,default=2)
     p.add_argument('--lr',type=float,default=3e-4)
+    p.add_argument('--gradient-accumulation',type=int,default=1)
+    p.add_argument('--weight-decay',type=float,default=.01)
+    p.add_argument('--resume-schedule',action='store_true',help='Continue checkpoint scheduler and batch RNG instead of a fresh run schedule')
     p.add_argument('--seed',type=int,default=42)
     p.add_argument('--max-train-tokens',type=int,default=3000000)
     p.add_argument('--max-val-tokens',type=int,default=250000)
@@ -44,7 +47,7 @@ def main():
             if a.config:cfg.update(json.loads(a.config.read_text()))
             b.dispatch('vessel.cast',{'config':cfg,'seed':a.seed})
         print(json.dumps({'preparation':b.trainer.status()},ensure_ascii=False),flush=True)
-        run=b.dispatch('train.sync',{'steps':a.steps,'batch':a.batch,'lr':a.lr,'every':0,'validateEvery':50})
+        run=b.dispatch('train.sync',{'steps':a.steps,'batch':a.batch,'lr':a.lr,'every':0,'validateEvery':50,'gradientAccumulation':a.gradient_accumulation,'weightDecay':a.weight_decay,'resumeSchedule':a.resume_schedule})
         b.trainer.save_checkpoint('cli-latest')
         from .gguf_export import export_gguf
         report=export_gguf(a.export,b.trainer.cfg,b.trainer.model.params,b.trainer.tokenizer,

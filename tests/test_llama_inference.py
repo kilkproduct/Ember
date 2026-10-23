@@ -151,3 +151,26 @@ def test_real_checkpoint_conversion_cli(fixture, tmp_path):
     report = json.loads(proc.stdout)
     assert report['sourceStep'] == 12 and report['quantization'] == 'q8_0'
     assert report['nativeValidation']['loaded'] and report['nativeValidation']['arch'] == 'llama'
+
+
+@pytest.mark.parametrize('kv,tied,theta',[(1,False,10000.),(2,True,500000.),(4,False,100000.)])
+def test_configurable_gqa_untied_output_and_rope_agree_with_native(tmp_path,kv,tied,theta):
+    tok=train_bpe(TEXTS,vocab_size=320)
+    model=GPT(ModelConfig(n_layer=1,n_head=4,n_kv_head=kv,n_embd=64,block_size=32,
+        vocab_size=tok.vocab_size,intermediate_size=96,tie_embeddings=tied,
+        rope_theta=theta,norm_eps=1e-6),seed=41)
+    # Train weights before checking converter/native agreement.
+    from ember.optim import AdamW
+    opt=AdamW(model.params,lr=.002)
+    ids=[tok.bos_id]+tok.encode('hello world!')
+    x=np.array([ids[:-1]],np.int32);y=np.array([ids[1:]],np.int32)
+    for _ in range(3):model.forward(x,targets=y);opt.step(model.backward())
+    path=tmp_path/'configured.gguf';export_gguf(path,model.cfg,model.params,tok)
+    engine=LlamaCppEngine()
+    try:
+        engine.load_model(path,EngineConfig(n_ctx=32,n_threads=2))
+        native=engine.forward_logits(ids)
+        expected=model.forward_logits(np.array([ids],np.int32))[0,-1]
+        np.testing.assert_allclose(native,expected,atol=2e-4,rtol=2e-4)
+        assert engine.generate('hello',GenParams(max_tokens=4,temperature=0,stop_on_eos=False)).new_tokens==4
+    finally:engine.close()

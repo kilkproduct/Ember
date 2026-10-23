@@ -96,7 +96,7 @@ class EmberBackend:
         # Automatically restore active.emb + active.tok.json (+ active.opt.npz) across app restarts
         if self.trainer.active_model_path.exists() and self.trainer.active_tokenizer_path.exists():
             try:
-                from .model import GPT, load_model
+                from .model import Llama, load_model
                 from .optim import AdamW
                 from .tokenizer import BPETokenizer
 
@@ -104,7 +104,7 @@ class EmberBackend:
                 tok = BPETokenizer.from_dict(meta["tokenizer"]) if meta.get("tokenizer") else BPETokenizer.load(self.trainer.active_tokenizer_path)
                 self.trainer.cfg = cfg
                 self.trainer.tokenizer = tok
-                self.trainer.model = GPT(cfg, params=params)
+                self.trainer.model = Llama(cfg, params=params)
                 self.trainer.optimizer = AdamW(self.trainer.model.params, lr=3e-4)
                 opt_name=meta.get("optimizer_file")
                 if opt_name:

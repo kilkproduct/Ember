@@ -61,6 +61,11 @@ class ModelConfig:
         return sum(int(np.prod(shape)) for _,shape in tensor_specs(self))
 
     def validate(self) -> None:
+        for name in ("n_layer","n_head","n_embd","n_kv_head","block_size","vocab_size"):
+            if not isinstance(getattr(self,name),int): raise ValueError(f"{name} must be an integer")
+        if self.intermediate_size is not None and (not isinstance(self.intermediate_size,int) or self.intermediate_size<1):
+            raise ValueError("intermediate_size must be a positive integer")
+        if not np.isfinite(self.ffn_mult) or self.ffn_mult<=0: raise ValueError("ffn_mult must be positive and finite")
         if self.n_kv_head < 1 or self.n_head % self.n_kv_head:
             raise ValueError("n_head must be a multiple of n_kv_head (GQA)")
         if self.n_head < 1 or self.n_embd % self.n_head or self.head_dim % 2:
@@ -119,6 +124,7 @@ class ModelConfig:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ModelConfig":
+        if data.get("dtype", "float32") != "float32": raise ValueError("unsupported checkpoint dtype (expected float32)")
         version = int(data.get("format", FORMAT_VERSION))
         if version != FORMAT_VERSION:
             raise ValueError(

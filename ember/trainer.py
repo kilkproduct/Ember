@@ -24,7 +24,7 @@ from .dataset import (
 from .model import (
     BRAIN_KIND,
     BRAIN_VERSION,
-    GPT,
+    Llama,
     ModelConfig,
     check_params,
     load_model,
@@ -85,6 +85,8 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
                             n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head", 1))),
                             rope_theta=float(cfg_in.get("ropeTheta", cfg_in.get("rope_theta",500000))),
                             intermediate_size=cfg_in.get("intermediate_size"),
+                            tie_embeddings=bool(cfg_in.get("tie_embeddings",True)),
+                            norm_eps=float(cfg_in.get("norm_eps",1e-5)),
                             dropout=float(cfg_in.get("dropout",0)),
                             bias=bool(cfg_in.get("bias",False)),
                             training_dtype=str(cfg_in.get("training_dtype","float32")),
@@ -118,7 +120,7 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
 
 
 class Trainer:
-    """Owns the active GPT model, tokenizer, training streams, optimizer & checkpoints."""
+    """Owns the active Llama model, tokenizer, training streams, optimizer & checkpoints."""
 
     def __init__(
         self,
@@ -142,7 +144,7 @@ class Trainer:
         self._train_thread: threading.Thread | None = None
 
         self.cfg: ModelConfig | None = None
-        self.model: GPT | None = None
+        self.model: Llama | None = None
         self.tokenizer: BPETokenizer | None = None
         self.optimizer: AdamW | None = None
         self.train_stream: TokenStream | None = None
@@ -503,7 +505,7 @@ class Trainer:
                 ffn_mult=ffn_mult,
                 dropout=dropout,
             )
-            gpt = GPT(cfg, seed=seed)
+            gpt = Llama(cfg, seed=seed)
             opt = AdamW(gpt.params, lr=base_lr)
 
             with self._lock:
@@ -514,6 +516,8 @@ class Trainer:
                 self.train_stream = t_stream
                 self.val_stream = v_stream
                 self._stream_corpus_revision = rev
+                self.schedule_state = {}
+                self.batcher_state = {}
                 self.step = 0
                 self.best_loss = None
                 self.val_loss = None
@@ -537,7 +541,7 @@ class Trainer:
                 self._sync_active_files()
 
             self._log(
-                f"Cast v3 vessel: {cfg.n_layer}L/{cfg.n_head}H/{cfg.n_embd}D ctx={cfg.block_size} "
+                f"Cast EMB4 Llama vessel: {cfg.n_layer}L/{cfg.n_head}H/{cfg.n_embd}D ctx={cfg.block_size} "
                 f"vocab={cfg.vocab_size} ({cfg.n_params:,} params, {t_stream.n_tokens:,} train tokens, "
                 f"{v_stream.n_tokens:,} val tokens)."
             )
@@ -1253,7 +1257,7 @@ class Trainer:
         with self._lock:
             self.cfg = cfg
             self.tokenizer = tok
-            self.model = GPT(cfg, params=params)
+            self.model = Llama(cfg, params=params)
             self.optimizer = AdamW(self.model.params, lr=3e-4)
             opt_name = meta.get("optimizer_file")
             if opt_name:
@@ -1404,7 +1408,7 @@ class Trainer:
         with self._lock:
             self.cfg = cfg
             self.tokenizer = tok
-            self.model = GPT(cfg, params=params)
+            self.model = Llama(cfg, params=params)
             self.optimizer = AdamW(self.model.params, lr=3e-4)
             self.step = int(meta.get("step", 0))
             self.best_loss = None
@@ -1461,14 +1465,14 @@ class Trainer:
                 res = self.corpus.add_many([d for d in docs if isinstance(d, dict)])
                 recovered = res["accepted"]
             suffix = (
-                f" Imported {recovered} embedded training document(s) into Fuel so you can cast a fresh v3 vessel immediately."
+                f" Imported {recovered} embedded training document(s) into Fuel so you can cast a fresh EMB4 Llama vessel immediately."
                 if recovered
-                else " Your existing Fuel corpus was preserved untouched — cast a new v3 vessel to train."
+                else " Your existing Fuel corpus was preserved untouched — cast a new EMB4 Llama vessel to train."
             )
             raise ValueError(
                 f"Incompatible legacy brain format ({fmt_str or 'legacy'} v{version or 1}): "
                 "weights trained with the deprecated TensorFlow.js engine use a different schema and tokenizer "
-                f"from Ember v3 (Python + native C++).{suffix}"
+                f"from Ember EMB4 (Llama + llama.cpp).{suffix}"
             )
 
         cfg = ModelConfig.from_dict(data["config"])
@@ -1492,7 +1496,7 @@ class Trainer:
         with self._lock:
             self.cfg = cfg
             self.tokenizer = tok
-            self.model = GPT(cfg, params=params)
+            self.model = Llama(cfg, params=params)
             self.optimizer = AdamW(self.model.params, lr=3e-4)
             self.step = int(tstate.get("step", data.get("step", 0)))
             self.best_loss = tstate.get("best_loss")
