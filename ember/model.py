@@ -15,8 +15,9 @@ Architecture (pre-LN decoder-only transformer, identical to ``native/``):
     logits = x @ wte.T            # tied embeddings
 
 All weights are little-endian float32, row-major, stored in the order returned
-by :func:`ember.spec.tensor_specs`.  ``native/src/model.cpp`` loads exactly
-that layout.
+by :func:`ember.spec.tensor_specs`.  This format is Ember's *training*
+checkpoint; inference runs from the GGUF export produced by
+:mod:`ember.gguf_export` (see ``docs/llama-cpp-migration.md``).
 """
 
 from __future__ import annotations

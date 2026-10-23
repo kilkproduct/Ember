@@ -50,7 +50,7 @@ SPECIAL_NAMES = {v: k for k, v in SPECIAL_TOKENS.items()}
 
 TOKENIZER_TYPE = "byte-bpe"
 TOKENIZER_FORMAT = "ember-bpe"
-TOKENIZER_VERSION = 3
+TOKENIZER_VERSION = 4
 
 # Byte classes used by the pre-tokenizer.  These are byte-level on purpose:
 # the base vocabulary is the 256 possible UTF-8 bytes, so Unicode and emoji

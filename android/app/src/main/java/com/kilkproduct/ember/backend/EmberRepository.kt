@@ -63,6 +63,12 @@ object Ops {
     const val FORAGE_START = "forage.start"
     const val FORAGE_STOP = "forage.stop"
     const val FORAGE_LOAD = "forage.load"
+    const val GEN_CANCEL = "gen.cancel"
+    const val MODEL_IMPORT = "model.import"
+    const val MODEL_SELECT = "model.select"
+    const val MODEL_UNLOAD = "model.unload"
+    const val MODEL_VALIDATE = "model.validate"
+    const val MODEL_QUANTIZE = "model.quantize"
 
     fun teacher(id: String) = "teacher.$id"
     fun teacherAsk(id: String) = "teacher.ask.$id"
@@ -124,6 +130,20 @@ data class UiState(
     val notifyTraining: Boolean = true,
     val notifyTeacher: Boolean = true,
     val keepScreenOn: Boolean = true,
+    // --- llama.cpp inference state -------------------------------------
+    val inferenceBackend: String = "llama.cpp",
+    val inferenceAvailable: Boolean = false,
+    val inferenceDiagnostics: String = "",
+    val inferenceError: String? = null,
+    val loadedModel: ModelDescriptor? = null,
+    val libraryModels: List<LibraryModel> = emptyList(),
+    val modelSource: String = "trained",
+    val streamingText: String = "",
+    val streamingTokens: Int = 0,
+    val streamingRequestId: String? = null,
+    val modelBusy: Boolean = false,
+    val contextLength: Int = 512,
+    val quantization: String = "f32",
 ) {
     val trainingActive: Boolean
         get() = status.training.running || status.training.starting
@@ -133,6 +153,51 @@ data class UiState(
         get() = trainingActive || foragingActive
     val modelReady: Boolean
         get() = status.model.ready
+
+    /** A GGUF model llama.cpp can run: either the trained export or an imported file. */
+    val inferenceReady: Boolean
+        get() = inferenceAvailable && libraryModels.any { it.valid == true } || loadedModel?.loaded == true
+}
+
+/** One entry in the on-device GGUF model library (`files/ember_v3/models/library`). */
+data class LibraryModel(
+    val name: String,
+    val path: String,
+    val bytes: Long,
+    val mtime: Long,
+    val selected: Boolean,
+    val valid: Boolean?,
+    val error: String?,
+    val arch: String = "",
+    val contextLength: Int = 0,
+    val vocabSize: Int = 0,
+    val blockCount: Int = 0,
+    val embeddingLength: Int = 0,
+    val emberFormat: String = "",
+    val quantizedTensors: Int = 0,
+    val trained: Boolean = false,
+    val step: Long = 0,
+) {
+    companion object {
+        fun fromJson(json: JSONObject) = LibraryModel(
+            name = json.optString("name", "model"),
+            path = json.optString("path", ""),
+            bytes = json.optLong("bytes", 0),
+            mtime = json.optLong("mtime", 0),
+            selected = json.optBoolean("selected", false),
+            valid = if (json.isNull("valid")) null else json.optBoolean("valid"),
+            error = if (json.isNull("error")) null else json.optString("error"),
+            arch = json.optString("arch", ""),
+            contextLength = json.optInt("contextLength", 0),
+            vocabSize = json.optInt("vocabSize", 0),
+            blockCount = json.optInt("blockCount", 0),
+            embeddingLength = json.optInt("embeddingLength", 0),
+            emberFormat = json.optString("emberFormat", ""),
+            quantizedTensors = json.optInt("quantizedTensors", 0),
+            trained = json.optBoolean("trained", false),
+            step = json.optLong("step", 0),
+        )
+    }
 }
 
 /**
@@ -215,6 +280,19 @@ class EmberRepository private constructor(
                 addNotice(NoticeLevel.ERROR, "Export failed", message)
             }
         }
+        scope.launch {
+            engine.generationTokens.collect { token ->
+                val current = _state.value.streamingRequestId
+                if (current != null && current == token.requestId) {
+                    _state.update {
+                        it.copy(
+                            streamingText = it.streamingText + token.piece,
+                            streamingTokens = token.generated,
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private fun initialize() {
@@ -231,10 +309,15 @@ class EmberRepository private constructor(
                         runtime = info.stringOr("runtime"),
                         tfVersion = info.stringOr("tfVersion", "—"),
                         webViewVersion = EmberEngine.nativeRuntimeLabel(),
+                        inferenceBackend = info.stringOr("inferenceBackend", "llama.cpp"),
+                        inferenceAvailable = info.boolOr("nativeAvailable", false),
+                        inferenceDiagnostics = info.stringOr("nativeInfo"),
+                        inferenceError = info.stringOrNull("error") ?: info.stringOrNull("nativeError"),
                     )
                 }
                 val statusJson = engine.call("status", timeoutMs = 120_000)
                 applyStatus(EmberStatus.fromJson(statusJson))
+                applyInferenceStatus(statusJson)
                 loadTeachersNow()
                 loadGithubSettingsNow()
                 // The Fuel screen starts with a real first page instead of an
@@ -304,6 +387,7 @@ class EmberRepository private constructor(
             try {
                 val json = engine.call("status", timeoutMs = 120_000)
                 applyStatus(EmberStatus.fromJson(json))
+                applyInferenceStatus(json)
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -313,6 +397,32 @@ class EmberRepository private constructor(
             } finally {
                 gate.finish(Ops.STATUS)
             }
+        }
+    }
+
+    /** Reads the `inference` + `models` blocks the Python backend adds to status. */
+    private fun applyInferenceStatus(statusJson: JSONObject) {
+        val inference = statusJson.optJSONObject("inference")
+        val models = statusJson.optJSONArray("models")
+        val rows = if (models == null) {
+            emptyList()
+        } else {
+            (0 until models.length()).mapNotNull { models.optJSONObject(it) }.map(LibraryModel::fromJson)
+        }
+        val model = inference?.optJSONObject("model")
+        _state.update {
+            it.copy(
+                inferenceAvailable = inference?.optBoolean("available", it.inferenceAvailable) ?: it.inferenceAvailable,
+                inferenceError = if (inference != null && !inference.isNull("error")) {
+                    inference.optString("error")
+                } else {
+                    it.inferenceError
+                },
+                modelSource = inference?.optString("source", it.modelSource) ?: it.modelSource,
+                quantization = inference?.optString("quantization", it.quantization) ?: it.quantization,
+                loadedModel = model?.let(ModelDescriptor::fromJson) ?: it.loadedModel,
+                libraryModels = rows.ifEmpty { it.libraryModels },
+            )
         }
     }
 
@@ -1359,10 +1469,20 @@ class EmberRepository private constructor(
     fun generate(options: GenerationOptions) {
         if (!gate.tryStart(Ops.GENERATE)) return
         markBusy(Ops.GENERATE, true)
-        _state.update { it.copy(generating = true, generationError = null) }
+        val requestId = java.util.UUID.randomUUID().toString()
+        _state.update {
+            it.copy(
+                generating = true,
+                generationError = null,
+                streamingText = "",
+                streamingTokens = 0,
+                streamingRequestId = requestId,
+            )
+        }
         scope.launch {
             try {
                 val params = JSONObject()
+                    .put("requestId", requestId)
                     .put("prompt", options.prompt)
                     .put("maxNew", options.maxNew)
                     .put("temperature", options.temperature)
@@ -1374,14 +1494,30 @@ class EmberRepository private constructor(
                     .put("task", options.task)
                     .put("lang", options.language)
                     .put("stopOnBoundary", options.stopOnBoundary)
-                val result = GenerationResult.fromJson(engine.call("gen.run", params, timeoutMs = 900_000))
+                    .put("nCtx", options.contextLength)
+                val json = engine.call("gen.run", params, timeoutMs = 900_000)
+                val result = GenerationResult.fromJson(json)
+                val streamed = _state.value.streamingText
                 _state.update {
                     it.copy(
-                        lastGeneration = result,
+                        // Prefer the streamed text when the native path produced it:
+                        // it is what the user watched appear token by token.
+                        lastGeneration = if (result.text.isBlank() && streamed.isNotBlank()) {
+                            result.copy(text = streamed)
+                        } else {
+                            result
+                        },
                         generating = false,
-                        generationError = result.warning,
+                        generationError = result.warning ?: json.stringOrNull("error"),
                     )
                 }
+                if (result.text.isBlank() && streamed.isBlank() && result.warning == null) {
+                    val stopped = json.stringOr("stoppedBy", "length")
+                    if (stopped == "cancelled") {
+                        addNotice(NoticeLevel.INFO, "Generation stopped", "Cancelled before any token was produced.")
+                    }
+                }
+                refreshStatus()
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -1393,6 +1529,8 @@ class EmberRepository private constructor(
                 }
                 addNotice(NoticeLevel.ERROR, "Generation failed", t.message ?: "Unknown error")
             } finally {
+                // Never leave the screen stuck in a streaming/loading state.
+                _state.update { it.copy(generating = false, streamingRequestId = null) }
                 markBusy(Ops.GENERATE, false)
                 gate.finish(Ops.GENERATE)
             }
@@ -1401,6 +1539,181 @@ class EmberRepository private constructor(
 
     fun cancelGeneration() {
         engine.cancelGeneration()
+    }
+
+    // ---------------------------------------------------------------------
+    // GGUF model library (llama.cpp)
+    // ---------------------------------------------------------------------
+
+    /** Refresh the on-device model library and the loaded-model descriptor. */
+    fun refreshModels() {
+        scope.launch {
+            try {
+                val json = engine.call("model.list", JSONObject(), timeoutMs = 60_000)
+                val rows = json.arrayOrEmpty("models").objects().map(LibraryModel::fromJson)
+                _state.update { it.copy(libraryModels = rows) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                _state.update { it.copy(inferenceError = t.message ?: "Could not read the model library.") }
+            }
+        }
+    }
+
+    /**
+     * Import a user-selected GGUF file through the Storage Access Framework.
+     *
+     * The file is copied into app-private storage first (so it survives the URI
+     * permission expiring), then validated structurally before it is selected.
+     */
+    fun importModel(uri: Uri) {
+        if (!gate.tryStart(Ops.MODEL_IMPORT)) return
+        markBusy(Ops.MODEL_IMPORT, true)
+        _state.update { it.copy(modelBusy = true, inferenceError = null) }
+        scope.launch {
+            var token: String? = null
+            try {
+                val name = withContext(Dispatchers.IO) { Files.displayName(app, uri) }
+                val mime = withContext(Dispatchers.IO) { Files.mimeType(app, uri) }
+                val staged = withContext(Dispatchers.IO) { engine.stageImport(uri, name, mime) }
+                token = staged.token
+                val result = engine.call(
+                    "model.importGguf",
+                    JSONObject().put("token", staged.token).put("name", name).put("select", true),
+                    timeoutMs = 600_000,
+                )
+                addNotice(
+                    NoticeLevel.SUCCESS,
+                    "Model imported",
+                    "${result.stringOr("name", name)} · ${result.stringOr("arch", "?")} · " +
+                        "ctx ${result.intOr("contextLength")} · vocab ${result.intOr("vocabSize")} · " +
+                        Formats.bytes(result.longOr("bytes")),
+                )
+                _state.update {
+                    it.copy(
+                        loadedModel = ModelDescriptor(
+                            loaded = true,
+                            path = result.stringOr("path"),
+                            arch = result.stringOr("arch"),
+                            name = result.stringOr("libraryName", result.stringOr("name")),
+                            emberFormat = result.stringOr("emberFormat"),
+                            vocabSize = result.intOr("vocabSize"),
+                            nCtxTrain = result.intOr("contextLength"),
+                            nCtx = result.intOr("contextLength"),
+                            modelBytes = result.longOr("bytes"),
+                        ),
+                        contextLength = result.intOr("contextLength").coerceAtLeast(64),
+                        modelSource = "imported",
+                        inferenceError = null,
+                    )
+                }
+                refreshModels()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                val message = t.message ?: "That model could not be imported."
+                _state.update { it.copy(inferenceError = message) }
+                addNotice(NoticeLevel.ERROR, "Model import failed", message)
+            } finally {
+                token?.let { runCatching { engine.releaseImport(it) } }
+                _state.update { it.copy(modelBusy = false) }
+                markBusy(Ops.MODEL_IMPORT, false)
+                gate.finish(Ops.MODEL_IMPORT)
+            }
+        }
+    }
+
+    /** Select the trained `active.gguf` (path = null) or a library model. */
+    fun selectModel(path: String?) {
+        if (!gate.tryStart(Ops.MODEL_SELECT)) return
+        markBusy(Ops.MODEL_SELECT, true)
+        _state.update { it.copy(modelBusy = true) }
+        scope.launch {
+            try {
+                val params = JSONObject()
+                if (!path.isNullOrBlank()) params.put("path", path)
+                val result = engine.call("model.select", params, timeoutMs = 300_000)
+                _state.update {
+                    it.copy(
+                        modelSource = if (path.isNullOrBlank()) "trained" else "imported",
+                        contextLength = result.intOr("contextLength").takeIf { c -> c > 0 } ?: it.contextLength,
+                        libraryModels = result.arrayOrEmpty("models").objects().map(LibraryModel::fromJson)
+                            .ifEmpty { it.libraryModels },
+                        inferenceError = null,
+                    )
+                }
+                addNotice(
+                    NoticeLevel.INFO,
+                    if (path.isNullOrBlank()) "Using the model trained on this device" else "Model selected",
+                    result.stringOr("name", "").ifBlank { result.stringOr("selected", "") },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                _state.update { it.copy(inferenceError = t.message ?: "Could not select that model.") }
+                addNotice(NoticeLevel.ERROR, "Model selection failed", t.message ?: "Unknown error")
+            } finally {
+                _state.update { it.copy(modelBusy = false) }
+                markBusy(Ops.MODEL_SELECT, false)
+                gate.finish(Ops.MODEL_SELECT)
+            }
+        }
+    }
+
+    /** Release native model memory (the files stay on disk). */
+    fun unloadModel() {
+        launchOperation(Ops.MODEL_UNLOAD, "Could not unload the model") {
+            engine.call("model.unload", JSONObject(), timeoutMs = 60_000)
+            _state.update { it.copy(loadedModel = null) }
+            addNotice(NoticeLevel.INFO, "Model unloaded", "Native memory was released. The next generation reloads it.")
+        }
+    }
+
+    /** Structural validation of the model inference would use. */
+    fun validateModel() {
+        launchOperation(Ops.MODEL_VALIDATE, "Model validation failed") {
+            val result = engine.call("model.validate", JSONObject(), timeoutMs = 300_000)
+            if (result.boolOr("valid", false)) {
+                addNotice(
+                    NoticeLevel.SUCCESS,
+                    "Model is valid",
+                    "${result.stringOr("arch")} · ctx ${result.intOr("contextLength")} · " +
+                        "${result.intOr("blockCount")} blocks · vocab ${result.intOr("vocabSize")} · " +
+                        "${result.intOr("tensorCount")} tensors · ${Formats.bytes(result.longOr("bytes"))}",
+                )
+            } else {
+                val message = result.stringOr("error", "This file is not a usable GGUF model.")
+                _state.update { it.copy(inferenceError = message) }
+                addNotice(NoticeLevel.ERROR, "Model is not usable", message)
+            }
+        }
+    }
+
+    /** Re-export the trained model at another quantization (`f32` or `q8_0`). */
+    fun setQuantization(quantization: String) {
+        launchOperation(Ops.MODEL_QUANTIZE, "Could not change quantization") {
+            val result = engine.call(
+                "model.setQuantization",
+                JSONObject().put("quantization", quantization),
+                timeoutMs = 600_000,
+            )
+            _state.update { it.copy(quantization = result.stringOr("quantization", quantization)) }
+            applyInferenceStatus(JSONObject().put("inference", result.optJSONObject("inference")))
+            addNotice(
+                NoticeLevel.SUCCESS,
+                "Quantization set to ${quantization.uppercase()}",
+                if (quantization == "q8_0") {
+                    "Weight matrices are stored as 8-bit blocks; embeddings and biases stay float32."
+                } else {
+                    "All tensors are stored as float32 (largest file, no quantization loss)."
+                },
+            )
+            refreshModels()
+        }
+    }
+
+    fun setContextLength(nCtx: Int) {
+        _state.update { it.copy(contextLength = nCtx.coerceIn(64, 8192)) }
     }
 
     // ---------------------------------------------------------------------

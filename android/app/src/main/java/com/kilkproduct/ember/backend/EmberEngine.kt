@@ -32,9 +32,17 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
-class EmberBackendException(message: String) : Exception(message)
+open class EmberBackendException(message: String) : Exception(message)
 
 data class EngineEvent(val name: String, val data: JSONObject?)
+
+/** One streamed piece of generated text, tagged with the request that produced it. */
+data class GenerationToken(
+    val requestId: String,
+    val piece: String,
+    val tokenId: Int,
+    val generated: Int,
+)
 
 data class StagedImport(
     val token: String,
@@ -47,12 +55,14 @@ data class StagedImport(
 /**
  * App-scoped coordinator bridging Jetpack Compose UI to:
  *  1. The embedded Python backend (`ember.backend` via Chaquopy) for corpus management,
- *     multi-format dataset ingestion, byte-level BPE training, GPT training & validation,
- *     checkpointing, cloud teachers, foraging, and GitHub sync.
- *  2. The compiled native C++17 inference library (`libember_infer.so` via [NativeInference])
- *     for real on-device model loading, forward passes, KV caching, and token generation.
+ *     multi-format dataset ingestion, byte-level BPE tokenizer training, NumPy GPT
+ *     training & validation, checkpoints, GGUF export, foraging and GitHub sync.
+ *  2. The native **llama.cpp** inference engine (`libember_llama.so` via
+ *     [LlamaCppInferenceEngine]) for on-device GGUF model loading, tokenization,
+ *     prompt evaluation, sampling and streaming decoding.
  *
- * No WebView or JavaScript ML engine is created or used anywhere in the Android app.
+ * Generation is local and offline: no WebView, no JavaScript engine, no server
+ * process and no network call is involved in producing text.
  */
 class EmberEngine private constructor(private val app: Application) {
 
@@ -70,7 +80,7 @@ class EmberEngine private constructor(private val app: Application) {
             }
         }
 
-        fun nativeRuntimeLabel(): String = NativeInference.runtimeDescription()
+        fun nativeRuntimeLabel(): String = LlamaInference.runtimeDescription()
     }
 
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -78,7 +88,12 @@ class EmberEngine private constructor(private val app: Application) {
     private val importMimes = ConcurrentHashMap<String, String>()
     private val importNames = ConcurrentHashMap<String, String>()
 
-    val nativeInference = NativeInference()
+    /** The one production inference backend: llama.cpp through JNI. */
+    val inference: InferenceEngine = LlamaCppInferenceEngine()
+
+    /** Streamed generation pieces, so the Voice screen can render as tokens arrive. */
+    private val _generationTokens = MutableSharedFlow<GenerationToken>(extraBufferCapacity = 256)
+    val generationTokens: SharedFlow<GenerationToken> = _generationTokens.asSharedFlow()
 
     @Volatile
     private var pyModule: PyObject? = null
@@ -154,7 +169,7 @@ class EmberEngine private constructor(private val app: Application) {
         withContext(Dispatchers.IO) {
             cleanupCaches()
             try {
-                NativeInference.ensureLibraryLoaded()
+                LlamaInference.ensureLibraryLoaded()
                 if (!Python.isStarted()) {
                     Python.start(AndroidPlatform(app))
                 }
@@ -199,7 +214,7 @@ class EmberEngine private constructor(private val app: Application) {
             lifecycle.withLock {
                 val previous = pyModule
                 pyModule = null
-                nativeInference.close()
+                inference.release()
                 try {
                     previous?.callAttr("shutdown_android")
                 } catch (_: Throwable) {
@@ -215,7 +230,7 @@ class EmberEngine private constructor(private val app: Application) {
     }
 
     fun cancelGeneration() {
-        nativeInference.cancel()
+        inference.cancel()
     }
 
     suspend fun awaitReady(timeoutMs: Long = 90_000) {
@@ -236,8 +251,10 @@ class EmberEngine private constructor(private val app: Application) {
     /**
      * Dispatch a backend RPC off the UI thread.
      *
-     * - `gen.run` prepares task prompts in Python and runs actual model execution
-     *   in compiled C++ via [NativeInference.generate] over JNI.
+     * - `gen.run` prepares the task prompt in Python, then runs tokenization,
+     *   prompt evaluation, sampling and decoding in **llama.cpp** through
+     *   [InferenceEngine.generate] (JNI → `libember_llama.so`). Pieces are streamed
+     *   to [generationTokens] as they are decoded.
      * - Staged file tokens are automatically resolved to their local `File` path.
      * - Export operations emit a [PendingExport] directly from `cacheDir/exports/`.
      */
@@ -252,30 +269,54 @@ class EmberEngine private constructor(private val app: Application) {
             }
         }
 
-        // Route actual text generation directly through compiled native C++ inference
+        // Route text generation to the native llama.cpp engine. Python only
+        // prepares the prompt and reports which GGUF model to load.
         if (method == "gen.run") {
             return withTimeout(timeoutMs) {
-                // gen.prepare runs Python (corpus retrieval + an atomic active.emb
-                // rewrite), so it must never execute on the caller's UI thread.
                 val prep = withContext(Dispatchers.IO) { invokePythonRpc("gen.prepare", params) }
+                prep.optJSONObject("modelError")?.let { failure ->
+                    throw EmberBackendException(
+                        failure.optString("error").ifBlank { "No GGUF model is available for inference." }
+                    )
+                }
                 val formattedPrompt = prep.optString("formattedPrompt", params.optString("prompt", ""))
-                val modelPath = prep.optString("modelPath", activeModelPath)
-                val tokPath = prep.optString("tokenizerPath", activeTokPath)
-                val seedStr = params.optString("seed", "").trim()
-                val seedVal = seedStr.toLongOrNull() ?: (System.nanoTime() and 0x7FFFFFFFL)
-
-                nativeInference.generate(
-                    modelPath = modelPath,
-                    tokPath = tokPath,
-                    formattedPrompt = formattedPrompt,
-                    maxNewTokens = params.optInt("maxNew", 80),
-                    temperature = params.optDouble("temperature", 0.9),
-                    topK = params.optInt("topK", 40),
-                    topP = params.optDouble("topP", 0.95),
-                    repetitionPenalty = params.optDouble("repetition", 1.15),
-                    seed = seedVal,
-                    stopOnEos = params.optBoolean("stopOnBoundary", true),
+                val modelPath = prep.optString("modelPath", "")
+                if (modelPath.isBlank()) {
+                    throw EmberBackendException(
+                        "No GGUF model is available. Cast a vessel and fire, or import a .gguf model."
+                    )
+                }
+                val ctxFromPrepare = prep.optJSONObject("inference")?.optJSONObject("model")?.optInt("nCtx") ?: 0
+                val settings = EngineSettings(
+                    nCtx = (params.optInt("nCtx", 0).takeIf { it > 0 } ?: ctxFromPrepare.takeIf { it > 0 } ?: 512)
+                        .coerceIn(64, 8192),
+                    nBatch = params.optInt("nBatch", 256).coerceIn(16, 2048),
+                    nThreads = params.optInt("nThreads", 0).coerceIn(0, 8),
+                    nGpuLayers = params.optInt("nGpuLayers", 0).coerceIn(0, 999),
                 )
+                val requestId = params.optString("requestId", java.util.UUID.randomUUID().toString())
+                withContext(Dispatchers.IO) { inference.loadModel(modelPath, settings) }
+                val outcome = inference.generate(
+                    prompt = formattedPrompt,
+                    settings = GenerationSettings(
+                        maxTokens = params.optInt("maxNew", 128).coerceIn(0, 4096),
+                        temperature = params.optDouble("temperature", 0.8),
+                        topK = params.optInt("topK", 40).coerceIn(0, 1000),
+                        topP = params.optDouble("topP", 0.95),
+                        repeatPenalty = params.optDouble("repetition", 1.1),
+                        repeatLastN = params.optInt("repeatLastN", 64).coerceIn(0, 1024),
+                        seed = GenerationSettings.seedFrom(params.optString("seed", "")),
+                        stopOnEos = params.optBoolean("stopOnBoundary", true),
+                        prependBos = params.optBoolean("prependBos", true),
+                    ),
+                ) { piece, tokenId, generated ->
+                    _generationTokens.tryEmit(GenerationToken(requestId, piece, tokenId, generated))
+                    true
+                }
+                if (!outcome.ok && outcome.error != null && !outcome.cancelled) {
+                    throw EmberBackendException(outcome.error)
+                }
+                outcome.toJson().put("requestId", requestId)
             }
         }
 

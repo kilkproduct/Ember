@@ -33,14 +33,24 @@ android {
 
         externalNativeBuild {
             cmake {
-                arguments "-DEMBER_BUILD_TESTS=OFF"
+                // Builds native/llama: Ember's llama.cpp inference engine plus the
+                // JNI bridge, statically linking llama.cpp + ggml into one
+                // libember_llama.so per ABI. Options mirror llama.cpp's own
+                // docs/android.md cross-compilation guidance.
+                arguments "-DEMBER_BUILD_LLAMA_TESTS=OFF",
+                          "-DGGML_NATIVE=OFF",
+                          "-DGGML_OPENMP=OFF",
+                          "-DGGML_LLAMAFILE=OFF",
+                          "-DLLAMA_OPENSSL=OFF",
+                          "-DBUILD_SHARED_LIBS=OFF"
+                cppFlags "-std=c++17"
             }
         }
     }
 
     externalNativeBuild {
         cmake {
-            path file("../../native/CMakeLists.txt")
+            path file("../../native/llama/CMakeLists.txt")
             version "3.22.1"
         }
     }

@@ -362,7 +362,7 @@ def test_generation_payload_and_task_prompt_language_key(backend) -> None:
     for key in ("text", "meta", "newTokens", "tokensPerSec", "ms", "promptTokens", "seed", "warning"):
         assert key in res, f"GenerationResult.fromJson expects '{key}'"
     assert res["newTokens"] == 12
-    assert res["seed"] == 1234567890123, "seeds above 2^31 must survive so the UI can reproduce an answer"
+    assert res["seed"] == (1234567890123 & 0xFFFFFFFF), "report the actual uint32 seed used by llama.cpp"
     assert isinstance(res["text"], str)
 
     # Repeated identical requests must be bit-identical: a stale KV cache or a

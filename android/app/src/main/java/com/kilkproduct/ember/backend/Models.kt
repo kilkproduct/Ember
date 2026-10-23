@@ -1114,6 +1114,9 @@ data class GenerationOptions(
     val task: String = "continue",
     val language: String = "Spanish",
     val stopOnBoundary: Boolean = true,
+    /** llama.cpp context length; 0 keeps whatever the model was exported with. */
+    val contextLength: Int = 0,
+    val repeatLastN: Int = 64,
 )
 
 data class ForageOptions(

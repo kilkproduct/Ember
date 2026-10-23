@@ -7,6 +7,8 @@ on:
     paths:
       - "ember/**"
       - "native/**"
+      - "scripts/**"
+      - "third_party/**"
       - "android/**"
       - "web/**"
       - "tests/**"
@@ -48,29 +50,21 @@ jobs:
           python3 -m pip install --upgrade pip
           python3 -m pip install -r requirements.txt
 
-      - name: Build host C++ inference library and run native C++ tests (including ASan/UBSan)
-        run: |
-          cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build native/build -j
-          ./native/build/test_native
+      - name: Fetch pinned llama.cpp source (SHA-256 verified)
+        run: scripts/fetch-llama-cpp.sh
 
-          g++ -std=c++17 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Wall -Wextra -Werror \
-            -I native/include -I native/src \
-            native/src/bpe.cpp native/src/model.cpp native/src/engine.cpp native/src/jni_bridge.cpp native/tests/test_native.cpp \
-            -lpthread -o native/build/test_native_asan
-          ASAN_OPTIONS=detect_leaks=1 ./native/build/test_native_asan
-          rm -f native/build/test_native_asan
-
-      - name: Run native C++ tests under ThreadSanitizer (concurrency regression gate)
+      - name: Build llama.cpp + Ember JNI/C ABI wrapper and test real GGUF inference
         run: |
-          # The BPE encode cache is shared by the JNI generation thread and the
-          # Python ctypes bridge; an unguarded insert races and corrupts the hash
-          # table mid-generation. TSan must stay silent.
-          cmake -S native -B native/build-tsan -DCMAKE_BUILD_TYPE=Debug \
-            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -Wall -Wextra -Werror"
-          cmake --build native/build-tsan -j
-          TSAN_OPTIONS="halt_on_error=1" ./native/build-tsan/test_native
-          rm -rf native/build-tsan
+          set -euo pipefail
+          cmake -S native/llama -B native/build-llama -DCMAKE_BUILD_TYPE=Release -DEMBER_BUILD_LLAMA_TESTS=ON
+          cmake --build native/build-llama -j 2
+          export EMBER_LLAMA_LIB="$PWD/native/build-llama/libember_llama.so"
+          python3 scripts/make_test_gguf.py /tmp/test-f32.gguf --steps 4
+          python3 scripts/make_test_gguf.py /tmp/test-q8.gguf --quantize q8_0 --steps 4
+          printf 'EMB3 legacy incompatible checkpoint' > /tmp/not-gguf.emb
+          ./native/build-llama/test_llama_engine /tmp/test-f32.gguf /tmp/not-gguf.emb
+          ./native/build-llama/test_llama_engine /tmp/test-q8.gguf /tmp/not-gguf.emb
+          echo "EMBER_LLAMA_LIB=$EMBER_LLAMA_LIB" >> "$GITHUB_ENV"
 
       - name: Run Python backend & Python-to-C++ interoperability tests
         run: |
@@ -255,8 +249,8 @@ jobs:
 
           # 1. Verify compiled C++ NDK inference engine + Chaquopy CPython runtime across ABIs
           for f in \
-            lib/arm64-v8a/libember_infer.so \
-            lib/x86_64/libember_infer.so \
+            lib/arm64-v8a/libember_llama.so \
+            lib/x86_64/libember_llama.so \
             lib/arm64-v8a/libpython3.13.so \
             lib/x86_64/libpython3.13.so \
             lib/arm64-v8a/libchaquopy_java.so \
@@ -269,7 +263,7 @@ jobs:
           # 2. Verify our real Python backend package (ember/*) is compiled inside assets/chaquopy/app.imy
           unzip -p Ember-debug.apk assets/chaquopy/app.imy > /tmp/app.imy
           unzip -l /tmp/app.imy > /tmp/app-imy.txt
-          for pyc in ember/backend ember/model ember/trainer ember/tokenizer ember/corpus ember/ingest ember/dataset ember/optim ember/sampler ember/spec; do
+          for pyc in ember/backend ember/model ember/trainer ember/tokenizer ember/corpus ember/ingest ember/dataset ember/optim ember/inference ember/gguf_export ember/gpt2_tokenizer ember/spec; do
             grep -q "$pyc" /tmp/app-imy.txt || problems="$problems missing_py:$pyc"
           done
 

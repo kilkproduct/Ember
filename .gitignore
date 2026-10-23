@@ -21,3 +21,10 @@ android/.gradle/
 android/build/
 android/app/build/
 android/app/src/main/assets/www/
+
+# llama.cpp is fetched by scripts/fetch-llama-cpp.sh (pinned in third_party/llama.cpp.version)
+third_party/llama.cpp/
+third_party/.cache/
+
+native/build-llama/
+*.gguf

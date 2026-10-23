@@ -55,6 +55,7 @@ data class VesselForm(
 data class VoiceForm(
     val prompt: String = "",
     val maxNew: String = "80",
+    val contextLength: String = "512",
     val temperature: String = "0.9",
     val topK: String = "40",
     val topP: String = "0.95",
@@ -176,6 +177,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun resetVoiceDefaults() {
         voiceForm = voiceForm.copy(
             maxNew = "80",
+            contextLength = "512",
             temperature = "0.9",
             topK = "40",
             topP = "0.95",
@@ -330,7 +332,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val options = GenerationOptions(
             prompt = prompt,
-            maxNew = (f.maxNew.toIntOrNull() ?: 80).coerceIn(8, 300),
+            maxNew = (f.maxNew.toIntOrNull() ?: 80).coerceIn(1, 2048),
+            contextLength = (f.contextLength.toIntOrNull() ?: 0).coerceIn(0, 8192),
             temperature = (f.temperature.toDoubleOrNull() ?: 0.9).coerceIn(0.05, 2.0),
             topK = (f.topK.toIntOrNull() ?: 40).coerceIn(0, 200),
             topP = (f.topP.toDoubleOrNull() ?: 0.95).coerceIn(0.0, 1.0),
@@ -346,6 +349,34 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun cancelGeneration() {
         repo.cancelGeneration()
+    }
+
+    fun stopGeneration() {
+        repo.cancelGeneration()
+    }
+
+    fun setQuantization(quantization: String) {
+        repo.setQuantization(quantization)
+    }
+
+    fun selectTrainedModel() {
+        repo.selectModel(null)
+    }
+
+    fun selectLibraryModel(path: String) {
+        repo.selectModel(path)
+    }
+
+    fun unloadModel() {
+        repo.unloadModel()
+    }
+
+    fun validateModel() {
+        repo.validateModel()
+    }
+
+    fun refreshModels() {
+        repo.refreshModels()
     }
 
     fun teach() {

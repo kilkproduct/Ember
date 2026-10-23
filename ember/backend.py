@@ -15,7 +15,9 @@ import numpy as np
 
 from .corpus import Corpus
 from .forager import Forager
+from .gguf_export import EMBER_MODEL_FORMAT, GgufExportError, validate_gguf_file
 from .ingest import ImportManager
+from .inference import EngineConfig, InferenceError, get_engine
 from .model import FORMAT_MAGIC
 from .packs import get_pack
 from .teachers import WINDOWS, TeacherDesk, github_head, github_pull_brain, github_push_brain
@@ -111,11 +113,13 @@ class EmberBackend:
                         pass
                 self.trainer.step = int(meta.get("step", 0))
                 self.trainer.rebuild_streams_if_needed()
-                if self.trainer._native.available:
-                    try:
-                        self.trainer._native.load(self.trainer.active_model_path, self.trainer.active_tokenizer_path)
-                    except Exception:
-                        pass
+                # Restore the GGUF the native engine loads (weights come from
+                # active.emb, so the export is deterministic and cheap).
+                self.trainer.mark_gguf_dirty()
+                try:
+                    self.trainer.sync_gguf()
+                except GgufExportError:
+                    pass
                 self._handle_model_synced(self.trainer.active_model_path, self.trainer.active_tokenizer_path)
             except Exception:
                 pass
@@ -142,7 +146,12 @@ class EmberBackend:
         self.trainer.stop()
         self.forager.stop()
         self.teachers.stop_auto()
-        self.trainer._native.close()
+        # Release native model memory; the process-wide engine object stays alive
+        # so a later restart can reload without re-initializing llama.cpp.
+        try:
+            self.trainer.unload_engine_model()
+        except Exception:
+            pass
         self.corpus.close()
 
     # ------------------------------------------------------------------
@@ -170,6 +179,8 @@ class EmberBackend:
             },
             "casting": self.trainer.casting,
             "generating": False,
+            "inference": self.trainer.inference_status(),
+            "models": self.trainer.list_library_models(),
             "foraging": self.forager.status(),
             "teachers": {
                 "running": self.teachers.running,
@@ -222,13 +233,18 @@ class EmberBackend:
             return {"pong": True, "ready": True, "at": int(time.time() * 1000)}
 
         if method == "runtime.info":
+            engine = get_engine()
             return {
-                "backend": "python + c++",
-                "tried": ["python", "native-cpp"],
+                "backend": "python + llama.cpp",
+                "tried": ["python-numpy", "llama.cpp"],
                 "runtime": f"Python {platform.python_version()}",
                 "ready": True,
                 "tfVersion": f"NumPy {np.__version__}",
-                "nativeAvailable": self.trainer._native.available,
+                "inferenceBackend": "llama.cpp",
+                "nativeAvailable": engine.available(),
+                "nativeInfo": engine.backend_info(),
+                "nativeError": engine.load_error,
+                "modelFormat": EMBER_MODEL_FORMAT,
                 "app": "ember-v3",
             }
 
@@ -411,11 +427,25 @@ class EmberBackend:
                 language=lang,
                 subreddit=str(p.get("subreddit") or ""),
             )
-            mpath, tpath = self.trainer._sync_active_files()
+            try:
+                if self.trainer._imported_gguf is None:
+                    self.trainer.sync_gguf()
+                gguf_path = self.trainer.inference_model_path
+                if gguf_path is None:
+                    raise InferenceError("No GGUF model available. Cast a vessel or import GGUF.", code=-3, name="model-not-loaded")
+                validate_gguf_file(gguf_path)
+                model_path = str(gguf_path)
+                model_error = None
+            except InferenceError as exc:
+                model_path = ""
+                model_error = exc.to_dict()
             return {
                 "formattedPrompt": formatted,
-                "modelPath": str(mpath),
-                "tokenizerPath": str(tpath),
+                "modelPath": model_path,
+                "tokenizerPath": str(self.trainer.active_tokenizer_path),
+                "modelFormat": EMBER_MODEL_FORMAT,
+                "inference": self.trainer.inference_status(),
+                "modelError": model_error,
             }
 
         if method == "gen.run":
@@ -432,31 +462,118 @@ class EmberBackend:
             # Explicit zeros must be honoured: `p.get("maxNew") or 80` would turn a
             # deliberate "generate nothing" request into 80 tokens.
             max_new = p.get("maxNew")
-            res = self.trainer.generate_sample(
-                prompt=formatted,
+            try:
+                res = self.trainer.generate_sample(
+                    prompt=formatted,
                 max_new_tokens=max(0, int(max_new if max_new is not None else 80)),
                 temperature=float(p.get("temperature") if p.get("temperature") is not None else 0.9),
                 top_k=int(p.get("topK") if p.get("topK") is not None else 40),
                 top_p=float(p.get("topP") if p.get("topP") is not None else 0.95),
                 repetition_penalty=float(p.get("repetition") if p.get("repetition") is not None else 1.15),
-                seed=seed_val,
-                stop_on_eos=bool(p.get("stopOnBoundary", True)),
-            )
+                    seed=seed_val,
+                    stop_on_eos=bool(p.get("stopOnBoundary", True)),
+                )
+            except InferenceError as exc:
+                return {
+                    "text": "",
+                    "meta": "",
+                    "newTokens": 0,
+                    "tokensPerSec": 0.0,
+                    "ms": 0.0,
+                    "promptTokens": 0,
+                    "seed": None,
+                    "stoppedBy": "error",
+                    "warning": None,
+                    "ok": False,
+                    **exc.to_dict(),
+                }
             return {
+                "ok": res.ok,
                 "text": res.text,
-                "meta": f"{res.new_tokens} tokens · {res.tokens_per_sec:.1f} tok/s · seed {res.seed}",
+                "meta": f"{res.new_tokens} tokens · {res.tokens_per_sec:.1f} tok/s · seed {res.seed}"
+                        + (f" · {res.stopped_by}" if res.stopped_by not in ("length",) else ""),
                 "newTokens": res.new_tokens,
+                "tokenIds": res.token_ids,
                 "tokensPerSec": res.tokens_per_sec,
                 "ms": res.ms,
+                "promptMs": res.prompt_ms,
+                "genMs": res.gen_ms,
                 "promptTokens": res.prompt_tokens,
                 "seed": res.seed,
                 "stoppedBy": res.stopped_by,
                 "warning": res.warning,
+                "nCtx": res.n_ctx,
+                "error": res.error,
+                "errorCode": res.error_code,
+                "errorName": res.error_name,
+                "backend": "llama.cpp",
             }
 
         if method == "gen.cancel":
-            self.trainer._native.cancel()
+            get_engine().cancel()
             return {"cancelled": True}
+
+        # -- Native model management (llama.cpp / GGUF) -------------------
+        if method == "model.info":
+            engine = get_engine()
+            payload: dict[str, Any] = {"inference": self.trainer.inference_status()}
+            if engine.available() and engine.is_loaded():
+                payload["model"] = engine.model_info().to_dict()
+            if str(p.get("path") or ""):
+                try:
+                    payload["file"] = validate_gguf_file(str(p["path"]))
+                except Exception as exc:
+                    payload["file"] = {"valid": False, "error": str(exc)}
+            return payload
+
+        if method == "model.validate":
+            target = str(p.get("path") or "") or str(self.trainer.inference_model_path or "")
+            if not target:
+                raise ValueError("No model file to validate: cast and fire, or import a .gguf model.")
+            try:
+                return validate_gguf_file(target)
+            except Exception as exc:
+                return {"path": target, "valid": False, "error": str(exc)}
+
+        if method == "model.list":
+            return {"models": self.trainer.list_library_models(), "format": EMBER_MODEL_FORMAT}
+
+        if method == "model.select":
+            raw = p.get("path")
+            return self.trainer.select_model(None if raw in (None, "") else str(raw))
+
+        if method == "model.importGguf":
+            src = str(p.get("path") or "")
+            if not src:
+                raise ValueError("Missing staged model path for import.")
+            return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False)
+
+        if method == "model.exportGguf":
+            if not self.trainer.ready:
+                raise ValueError("Nothing to export — cast a vessel and fire first.")
+            quantization = str(p.get("quantization") or self.trainer.quantization or "f32")
+            name = str(p.get("name") or f"ember-step-{self.trainer.step}").strip() or f"ember-step-{self.trainer.step}"
+            if name.lower().endswith(".gguf"):
+                name = name[:-5]
+            gguf_path = self.trainer.sync_gguf(force=True, quantization=quantization)
+            if gguf_path is None:
+                raise ValueError("No trained vessel to export — cast and fire first.")
+            payload = self._write_export_file(f"{name}.gguf", Path(gguf_path).read_bytes(), kind="model")
+            payload["model"] = validate_gguf_file(gguf_path)
+            payload["quantization"] = quantization
+            return payload
+
+        if method == "model.unload":
+            return self.trainer.unload_engine_model()
+
+        if method == "model.setQuantization":
+            quantization = str(p.get("quantization") or "f32").strip().lower()
+            if quantization not in ("f32", "q8_0"):
+                raise ValueError("Quantization must be 'f32' or 'q8_0'.")
+            self.trainer.quantization = quantization
+            if self.trainer.ready:
+                self.trainer.sync_gguf(force=True)
+            return {"quantization": quantization, "inference": self.trainer.inference_status()}
 
         # -- Brain export/import & Checkpoints --------------------------
         if method == "brain.exportJson":

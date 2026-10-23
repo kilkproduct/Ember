@@ -39,6 +39,7 @@ import com.kilkproduct.ember.ui.components.EmberTextField
 import com.kilkproduct.ember.ui.components.EmptyState
 import com.kilkproduct.ember.ui.components.ErrorBanner
 import com.kilkproduct.ember.ui.components.InfoBanner
+import com.kilkproduct.ember.ui.components.KeyValueRow
 import com.kilkproduct.ember.ui.components.NumberStepper
 import com.kilkproduct.ember.ui.components.SectionHeading
 import com.kilkproduct.ember.ui.theme.EmberOrange
@@ -53,6 +54,7 @@ fun VoiceScreen(
     ui: UiState,
     vm: MainViewModel,
     onOpenVessel: () -> Unit = {},
+    onImportModel: () -> Unit = {},
 ) {
     val context = LocalContext.current
     val form = vm.voiceForm
@@ -131,6 +133,17 @@ fun VoiceScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    NumberStepper(
+                        label = "Context",
+                        value = form.contextLength,
+                        onValueChange = { value -> vm.updateVoice { it.copy(contextLength = value) } },
+                        step = 64.0,
+                        min = 64.0,
+                        max = 4096.0,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                        helper = "llama.cpp context length (clamped to the model)",
+                    )
                     NumberStepper(
                         label = "Top-k",
                         value = form.topK,
@@ -219,7 +232,7 @@ fun VoiceScreen(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Button(
                         onClick = { vm.generate() },
-                        enabled = !generating && ui.modelReady && !ui.status.training.running,
+                        enabled = !generating && (ui.modelReady || ui.inferenceReady) && !ui.status.training.running,
                     ) {
                         if (generating) {
                             CircularProgressIndicator(
@@ -235,7 +248,7 @@ fun VoiceScreen(
                     }
                     Spacer(Modifier.width(8.dp))
                     if (generating) {
-                        TextButton(onClick = { vm.cancelGeneration() }) {
+                        TextButton(onClick = { vm.stopGeneration() }) {
                             Text("Stop")
                         }
                     } else {
@@ -254,13 +267,50 @@ fun VoiceScreen(
         }
 
         item(key = "output") {
-            EmberCard(title = "Answer") {
+            EmberCard(
+                title = "Answer",
+                subtitle = if (generating) {
+                    "Streaming from llama.cpp · ${ui.streamingTokens} tokens"
+                } else {
+                    "Generated on this device by llama.cpp"
+                },
+            ) {
                 val error = ui.generationError
                 if (error != null) {
                     ErrorBanner(error)
                     Spacer(Modifier.height(10.dp))
                 }
-                if (last == null) {
+                if (generating && ui.streamingText.isNotEmpty()) {
+                    SelectionContainer {
+                        Surface(
+                            shape = MaterialTheme.shapes.medium,
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        ) {
+                            Column(modifier = Modifier.padding(14.dp)) {
+                                Text(
+                                    text = ui.streamingText,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                )
+                            }
+                        }
+                    }
+                    Spacer(Modifier.height(6.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.width(14.dp).height(14.dp),
+                            strokeWidth = 2.dp,
+                            color = EmberOrange,
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            text = "${ui.streamingTokens} tokens so far — Stop ends generation and keeps the text.",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else if (last == null) {
                     EmptyState(
                         title = "Nothing spoken yet",
                         body = "A tiny model on a phone rambles. Teach it a voice from the card below.",
@@ -341,6 +391,115 @@ fun VoiceScreen(
                         Spacer(Modifier.height(6.dp))
                         InfoBanner(last.warning, tone = EmberWarning)
                     }
+                }
+            }
+        }
+
+        item(key = "engine") {
+            EmberCard(
+                title = "Inference engine",
+                subtitle = "llama.cpp runs every generation locally. No API key, no server, no network.",
+            ) {
+                KeyValueRow("Backend", ui.inferenceBackend)
+                KeyValueRow("Native library", if (ui.inferenceAvailable) "loaded" else "unavailable")
+                val model = ui.loadedModel
+                if (model != null && model.loaded) {
+                    KeyValueRow("Model", model.name.ifBlank { model.path.substringAfterLast('/') })
+                    KeyValueRow("Architecture", "${model.arch} · ${model.emberFormat.ifBlank { "gguf" }}")
+                    KeyValueRow("Shape", "${model.vocabSize} vocab · ctx ${model.nCtx} · ${Formats.bytes(model.modelBytes)}")
+                } else {
+                    KeyValueRow("Model", if (ui.libraryModels.isEmpty()) "none loaded yet" else "not loaded")
+                }
+                KeyValueRow("Source", if (ui.modelSource == "imported") "imported file" else "trained on this device")
+                if (!ui.inferenceAvailable) {
+                    Spacer(Modifier.height(8.dp))
+                    ErrorBanner(
+                        ui.inferenceError ?: "The native llama.cpp engine is not available on this device.",
+                    )
+                } else if (ui.inferenceError != null) {
+                    Spacer(Modifier.height(8.dp))
+                    ErrorBanner(ui.inferenceError!!)
+                }
+
+                if (ui.libraryModels.isNotEmpty()) {
+                    Spacer(Modifier.height(10.dp))
+                    SectionHeading("Models on this device")
+                    ui.libraryModels.forEach { entry ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = entry.name + if (entry.selected) "  ·  in use" else "",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (entry.selected) EmberOrange else MaterialTheme.colorScheme.onSurface,
+                                )
+                                Text(
+                                    text = when {
+                                        entry.valid == false -> "not usable: ${entry.error ?: "invalid file"}"
+                                        else -> "${entry.arch.ifBlank { "gguf" }} · ctx ${entry.contextLength} · " +
+                                            "vocab ${entry.vocabSize} · ${Formats.bytes(entry.bytes)}"
+                                    },
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = if (entry.valid == false) {
+                                        MaterialTheme.colorScheme.error
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    },
+                                )
+                            }
+                            if (!entry.selected && entry.valid != false) {
+                                TextButton(
+                                    onClick = { if (entry.trained) vm.selectTrainedModel() else vm.selectLibraryModel(entry.path) },
+                                    enabled = !ui.modelBusy,
+                                ) { Text("Use") }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(Modifier.height(10.dp))
+                SectionHeading("Export quantization")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("f32" to "Float32", "q8_0" to "Q8_0 (smaller)").forEach { (id, label) ->
+                        FilterChip(
+                            selected = ui.quantization == id,
+                            onClick = { vm.setQuantization(id) },
+                            enabled = !ui.modelBusy && ui.status.model.ready,
+                            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onImportModel, enabled = !ui.modelBusy) { Text("Import GGUF model") }
+                    TextButton(onClick = { vm.validateModel() }, enabled = !ui.modelBusy) { Text("Validate") }
+                    TextButton(onClick = { vm.refreshModels() }, enabled = !ui.modelBusy) { Text("Refresh") }
+                    TextButton(
+                        onClick = { vm.unloadModel() },
+                        enabled = !ui.modelBusy && ui.loadedModel?.loaded == true,
+                    ) { Text("Unload") }
+                    TextButton(onClick = { vm.selectTrainedModel() }, enabled = !ui.modelBusy) {
+                        Text("Use trained model")
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    text = "Models live in app-private storage and survive restarts. Import copies the file, " +
+                        "validates its GGUF metadata and tensors, and only then selects it — a model is never " +
+                        "reported ready just because the file exists.",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (ui.inferenceDiagnostics.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        text = ui.inferenceDiagnostics,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                 }
             }
         }

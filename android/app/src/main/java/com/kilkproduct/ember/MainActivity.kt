@@ -189,6 +189,13 @@ private fun EmberApp(vm: MainViewModel) {
         }
     }
 
+    // GGUF model import: any file, validated after the copy into app storage.
+    val modelLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            vm.repo.importModel(uri)
+        }
+    }
+
     val notificationPermission = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -340,6 +347,7 @@ private fun EmberApp(vm: MainViewModel) {
                                             ui = ui,
                                             vm = vm,
                                             onOpenVessel = { tab = Tab.VESSEL.name },
+                                            onImportModel = { modelLauncher.launch(arrayOf("*/*")) },
                                         )
                                     }
                                 }
@@ -471,9 +479,9 @@ private fun EngineFailureScreen(message: String, onRetry: () -> Unit, onOpenSett
             )
             Spacer(Modifier.height(10.dp))
             EmptyState(
-                title = "Embedded Python + Native C++ Runtime",
-                body = "Ember runs training in embedded Python (NumPy) and executes text generation " +
-                    "in compiled native C++ (libember_infer.so) directly on this device.",
+                title = "Embedded Python + llama.cpp Runtime",
+                body = "Ember trains in embedded Python (NumPy) and generates text with llama.cpp " +
+                    "(libember_llama.so) from a local GGUF model — no network required.",
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 androidx.compose.material3.Button(onClick = onRetry) { Text("Restart engine") }
@@ -505,8 +513,8 @@ private fun EngineBootPane(onRetry: () -> Unit) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "Embedded Python, native C++ inference, and your saved corpus load on this device. " +
-                "The first start after an update can take a few seconds.",
+            text = "Embedded Python, the llama.cpp inference engine, and your saved corpus load on this " +
+                "device. The first start after an update can take a few seconds.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,

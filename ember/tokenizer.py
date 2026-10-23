@@ -5,9 +5,17 @@ merge is a concatenation of two existing tokens, so any UTF-8 text can always
 be encoded (no unknown tokens) and decoding is a byte concatenation followed by
 a UTF-8 decode.
 
-The pre-tokenizer (:func:`ember.spec.pretokenize`) and the merge loop are
-re-implemented byte-for-byte in ``native/src/bpe.cpp``; the two are compared by
-``tests/python/test_interop.py`` and ``native/tests``.
+Chunking uses the **classic GPT-2 pre-tokenizer** implemented in
+:mod:`ember.gpt2_tokenizer`, which is the pre-tokenizer llama.cpp applies for
+``tokenizer.ggml.pre = "gpt-2"``.  Training and inference therefore agree on
+token boundaries; ``tests/test_llama_inference.py`` verifies this against
+llama.cpp's own ``llama_tokenize`` on adversarial Unicode, punctuation,
+contraction and whitespace inputs.
+
+The vocabulary itself stays byte-level: ids 0..255 are raw UTF-8 bytes, so any
+text can always be encoded and decoding is byte concatenation.  When exporting
+to GGUF the byte tokens are re-expressed in the GPT-2 byte-encoder alphabet
+(see :func:`ember.gpt2_tokenizer.gguf_vocab_entries`).
 """
 
 from __future__ import annotations
@@ -29,8 +37,8 @@ from .spec import (
     TOKENIZER_FORMAT,
     TOKENIZER_TYPE,
     TOKENIZER_VERSION,
-    pretokenize,
 )
+from .gpt2_tokenizer import pretokenize_gpt2
 
 __all__ = ["BPETokenizer", "train_bpe", "count_chunks"]
 
@@ -45,7 +53,7 @@ def _bytes_to_token(raw: bytes) -> str:
 
 
 def count_chunks(text: str) -> int:
-    return len(pretokenize(text.encode("utf-8")))
+    return len(pretokenize_gpt2(text))
 
 
 def _chunk_counts(texts: Iterable[str], progress=None, total_hint: int = 0) -> Counter:
@@ -54,7 +62,8 @@ def _chunk_counts(texts: Iterable[str], progress=None, total_hint: int = 0) -> C
     for text in texts:
         if not text:
             continue
-        for chunk in pretokenize(text.encode("utf-8")):
+        for chunk_str in pretokenize_gpt2(text):
+            chunk = chunk_str.encode("utf-8")
             counts[tuple(chunk[i : i + 1] for i in range(len(chunk)))] += 1
         seen += 1
         if progress and (seen % 200 == 0):
@@ -169,13 +178,13 @@ class BPETokenizer:
         return ids
 
     def encode_bytes(self, data: bytes) -> list[int]:
-        out: list[int] = []
-        for chunk in pretokenize(data):
-            out.extend(self._encode_chunk(chunk))
-        return out
+        """Encode raw UTF-8 bytes using the GPT-2 chunker (lossy on invalid UTF-8)."""
+        return self.encode(data.decode("utf-8", errors="replace"))
 
     def encode(self, text: str, add_bos: bool = False, add_eos: bool = False) -> list[int]:
-        ids = self.encode_bytes(text.encode("utf-8"))
+        ids: list[int] = []
+        for chunk_str in pretokenize_gpt2(text):
+            ids.extend(self._encode_chunk(chunk_str.encode("utf-8")))
         if add_bos:
             ids = [SPECIAL_BOS] + ids
         if add_eos:
@@ -213,7 +222,7 @@ class BPETokenizer:
             "format": TOKENIZER_FORMAT,
             "version": TOKENIZER_VERSION,
             "type": TOKENIZER_TYPE,
-            "spec": "v3",
+            "spec": "gpt2-bpe-v4",
             "base": BASE_VOCAB,
             "specials": dict(SPECIAL_TOKENS),
             "vocab": list(self.vocab),

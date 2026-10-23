@@ -33,12 +33,9 @@ from .model import (
     model_to_dict,
     save_model,
 )
+from .gguf_export import EMBER_MODEL_FORMAT, GgufExportError, export_gguf, validate_gguf_file
+from .inference import EngineConfig, GenParams, Generation, InferenceError, get_engine
 from .optim import AdamW, LRSchedule, clip_grad_norm, grad_has_nan
-from .sampler import (
-    GenerationResult,
-    NativeInferenceBridge,
-    reference_generate,
-)
 from .spec import (
     PRESETS,
     TOKENIZER_TYPE,
@@ -142,8 +139,18 @@ class Trainer:
         self.val_stream: TokenStream | None = None
         self._stream_corpus_revision: int = -1
 
-        # Native C++ engine bridge for sample generation during training
-        self._native = NativeInferenceBridge()
+        # Inference is served by llama.cpp through ember.inference. The trainer
+        # owns the GGUF export that the engine loads; it never generates text in
+        # NumPy on a production path.
+        self.library_dir = self.models_dir / "library"
+        self.library_dir.mkdir(parents=True, exist_ok=True)
+        self._gguf_dirty: bool = True
+        self._gguf_step: int = -1
+        selected = self.corpus.get_kv("inference:selected_model")
+        self._imported_gguf: Path | None = Path(selected) if selected else None
+        self._engine_model_path: str = ""
+        self._engine_model_mtime: float = -1.0
+        self.quantization: str = "f32"
 
         # Persistent metrics & run state
         self.step: int = 0
@@ -197,6 +204,80 @@ class Trainer:
     def active_optimizer_path(self) -> Path:
         return self.models_dir / "active.opt.npz"
 
+    @property
+    def active_gguf_path(self) -> Path:
+        """GGUF model the native llama.cpp engine loads for the trained vessel."""
+        return self.models_dir / "active.gguf"
+
+    @property
+    def inference_model_path(self) -> Path | None:
+        """Model file inference should use: an imported GGUF wins over the trained one."""
+        if self._imported_gguf is not None:
+            return self._imported_gguf if self._imported_gguf.exists() else None
+        path = self.active_gguf_path
+        return path if path.exists() else None
+
+    def mark_gguf_dirty(self) -> None:
+        self._gguf_dirty = True
+
+    def sync_gguf(self, *, force: bool = False, quantization: str | None = None) -> Path | None:
+        """(Re)export `active.gguf` from the current trained weights.
+
+        Export happens when the weights changed (cast, a finished fire, a
+        checkpoint load, a brain import) — never per generated token.
+        """
+        if not self.ready or self.cfg is None or self.model is None or self.tokenizer is None:
+            return None
+        if quantization:
+            self.quantization = quantization
+        if not force and not self._gguf_dirty and self.active_gguf_path.exists():
+            return self.active_gguf_path
+        try:
+            export_gguf(
+                self.active_gguf_path,
+                self.cfg,
+                self.model.params,
+                self.tokenizer,
+                name="ember-active",
+                step=self.step,
+                quantization=self.quantization,
+            )
+        except GgufExportError:
+            raise
+        self._gguf_dirty = False
+        self._gguf_step = self.step
+        return self.active_gguf_path
+
+    def ensure_engine_model(self, config: EngineConfig | None = None) -> Path:
+        """Return the GGUF path inference should use, exporting/loading as needed.
+
+        Raises a structured :class:`~ember.inference.InferenceError` (never a
+        silent fallback) when there is no usable model.
+        """
+        engine = get_engine()
+        if not engine.available():
+            raise InferenceError(
+                engine.load_error
+                or "The native llama.cpp engine (libember_llama) is not available on this device.",
+                code=-2,
+                name="backend-not-initialized",
+            )
+        if self._imported_gguf is None:
+            self.sync_gguf()
+        path = self.inference_model_path
+        if path is None:
+            raise InferenceError(
+                "No GGUF model is available. Cast a vessel and fire, or import a .gguf model.",
+                code=-3,
+                name="model-not-loaded",
+            )
+        mtime = path.stat().st_mtime
+        if not engine.is_loaded() or self._engine_model_path != str(path) or mtime != self._engine_model_mtime:
+            engine.load_model(path, config)
+            self._engine_model_path = str(path)
+            self._engine_model_mtime = mtime
+        return path
+
     def _log(self, line: str) -> None:
         entry = {"at": int(time.time() * 1000), "line": str(line)}
         self.train_log.append(entry)
@@ -228,11 +309,9 @@ class Trainer:
                     self.optimizer.save_npz(self.active_optimizer_path)
                 except Exception:
                     pass
-            if self._native.available:
-                try:
-                    self._native.load(mpath, tpath)
-                except Exception:
-                    pass
+            # The GGUF used by llama.cpp is refreshed by sync_gguf() when the
+            # weights actually changed; generation reads inference_model_path.
+            self._gguf_dirty = True
         if self._on_model_synced is not None:
             try:
                 self._on_model_synced(mpath, tpath)
@@ -381,6 +460,8 @@ class Trainer:
                         self.active_optimizer_path.unlink()
                     except OSError:
                         pass
+                self._imported_gguf = None
+                self.mark_gguf_dirty()
                 self._sync_active_files()
 
             self._log(
@@ -680,9 +761,13 @@ class Trainer:
             try:
                 if self.ready and completed > 0:
                     try:
+                        self.mark_gguf_dirty()
                         self._sync_active_files()
-                    except Exception:
-                        pass
+                        # Refresh the GGUF the native engine loads so the next
+                        # generation uses the weights this run just produced.
+                        self.sync_gguf()
+                    except Exception as exc:
+                        self._log(f"! post-run model sync failed: {exc}")
                     self._write_autosave()
                 self._log(f"Fire {outcome} at step {self.step} (best loss {self.best_loss or 0.0:.4f}).")
                 done_payload = {
@@ -760,42 +845,199 @@ class Trainer:
         repetition_penalty: float = 1.15,
         seed: int | None = None,
         stop_on_eos: bool = True,
-    ) -> GenerationResult:
-        """Generate text via the native C++ inference bridge (or Python reference fallback)."""
-        with self._lock:
-            if not self.ready or self.model is None or self.tokenizer is None:
-                raise ValueError("Cast or load a vessel before generating text.")
-            self._sync_active_files()
+        on_token=None,
+        context_length: int | None = None,
+    ) -> Generation:
+        """Generate text with llama.cpp.
 
-        if self._native.available:
-            res = self._native.generate(
-                prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                seed=seed,
-                stop_on_eos=stop_on_eos,
-            )
-            self.gen_tps = res.tokens_per_sec
-            return res
-
+        There is no NumPy fallback: if the native engine or the model is
+        unavailable the caller gets a structured error it can show the user.
+        """
         with self._lock:
-            res = reference_generate(
-                self.model,
-                self.tokenizer,
-                prompt=prompt,
-                max_new_tokens=max_new_tokens,
-                temperature=temperature,
-                top_k=top_k,
-                top_p=top_p,
-                repetition_penalty=repetition_penalty,
-                seed=seed,
-                stop_on_eos=stop_on_eos,
-            )
-            self.gen_tps = res.tokens_per_sec
-            return res
+            if not self.ready and self._imported_gguf is None:
+                raise InferenceError(
+                    "Cast or load a vessel before generating text.", code=-3, name="model-not-loaded"
+                )
+        cfg = EngineConfig()
+        if context_length:
+            cfg.n_ctx = int(context_length)
+        elif self.cfg is not None:
+            cfg.n_ctx = max(64, min(4096, int(self.cfg.block_size)))
+        self.ensure_engine_model(cfg)
+
+        params = GenParams(
+            max_tokens=max(0, int(max_new_tokens)),
+            temperature=float(temperature),
+            top_k=int(top_k),
+            top_p=float(top_p),
+            repeat_penalty=float(repetition_penalty),
+            repeat_last_n=64,
+            seed=seed,
+            stop_on_eos=bool(stop_on_eos),
+            prepend_bos=True,
+        )
+        gen = get_engine().generate(prompt or "", params, on_token=on_token)
+        self.gen_tps = gen.tokens_per_sec
+        return gen
+
+    # ------------------------------------------------------------------
+    # GGUF model library (user-imported models)
+    # ------------------------------------------------------------------
+    def list_library_models(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for path in sorted(self.library_dir.glob("*.gguf")):
+            entry: dict[str, Any] = {
+                "name": path.stem,
+                "path": str(path),
+                "bytes": path.stat().st_size,
+                "mtime": int(path.stat().st_mtime * 1000),
+                "selected": self._imported_gguf == path,
+                "valid": None,
+                "error": None,
+            }
+            try:
+                info = validate_gguf_file(path)
+                entry.update(
+                    {
+                        "valid": True,
+                        "arch": info["arch"],
+                        "contextLength": info["contextLength"],
+                        "vocabSize": info["vocabSize"],
+                        "blockCount": info["blockCount"],
+                        "embeddingLength": info["embeddingLength"],
+                        "emberFormat": info["emberFormat"],
+                        "quantizedTensors": len(info["quantizedTensors"]),
+                    }
+                )
+            except Exception as exc:
+                entry["valid"] = False
+                entry["error"] = str(exc)
+            out.append(entry)
+        active = self.active_gguf_path
+        if active.exists():
+            entry = {
+                "name": "active (trained on this device)",
+                "path": str(active),
+                "bytes": active.stat().st_size,
+                "mtime": int(active.stat().st_mtime * 1000),
+                "selected": self._imported_gguf is None,
+                "valid": None,
+                "error": None,
+                "trained": True,
+                "step": self._gguf_step,
+            }
+            try:
+                info = validate_gguf_file(active)
+                entry.update(
+                    {
+                        "valid": True,
+                        "arch": info["arch"],
+                        "contextLength": info["contextLength"],
+                        "vocabSize": info["vocabSize"],
+                        "blockCount": info["blockCount"],
+                        "embeddingLength": info["embeddingLength"],
+                        "emberFormat": info["emberFormat"],
+                        "quantizedTensors": len(info["quantizedTensors"]),
+                    }
+                )
+            except Exception as exc:
+                entry["valid"] = False
+                entry["error"] = str(exc)
+            out.insert(0, entry)
+        return out
+
+    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True) -> dict[str, Any]:
+        """Copy a user-selected GGUF into the model library and validate it."""
+        src = Path(source)
+        if not src.exists():
+            raise InferenceError(f"Model file not found: {src}", code=-4, name="model-not-found")
+        info = validate_gguf_file(src)  # raises with a precise reason when invalid
+        target_name = (name or src.stem or "imported-model")
+        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
+        dest = self.library_dir / f"{safe}.gguf"
+        tmp = dest.with_suffix(".gguf.tmp")
+        with open(src, "rb") as fh_in, open(tmp, "wb") as fh_out:
+            while True:
+                chunk = fh_in.read(1024 * 1024)
+                if not chunk:
+                    break
+                fh_out.write(chunk)
+            fh_out.flush()
+            os.fsync(fh_out.fileno())
+        os.replace(tmp, dest)
+        # Re-validate the copy: the file must be complete on this device, not just
+        # at the source location.
+        info = validate_gguf_file(dest)
+        if select:
+            self.corpus.set_kv("inference:selected_model", str(dest))
+            self._imported_gguf = dest
+            self._engine_model_path = ""
+            self._engine_model_mtime = -1.0
+        payload = {"imported": True, **info}
+        payload["name"] = dest.stem          # library name wins over the metadata title
+        payload["libraryName"] = dest.stem
+        payload["path"] = str(dest)
+        payload["selected"] = bool(select)
+        return payload
+
+    def select_model(self, path: str | Path | None) -> dict[str, Any]:
+        """Select the trained `active.gguf` (path=None) or a library model."""
+        if path is None:
+            self._imported_gguf = None
+            self.sync_gguf(force=True)
+            selected = self.active_gguf_path
+        else:
+            candidate = Path(path)
+            if candidate.parent != self.library_dir:
+                raise InferenceError(
+                    "Only models in the Ember model library can be selected; import it first.",
+                    code=-4,
+                    name="model-not-found",
+                )
+            validate_gguf_file(candidate)
+            self._imported_gguf = candidate
+            selected = candidate
+        self.corpus.set_kv("inference:selected_model", str(self._imported_gguf) if self._imported_gguf else None)
+        self._engine_model_path = ""
+        self._engine_model_mtime = -1.0
+        return {
+            "selected": str(selected),
+            "models": self.list_library_models(),
+            **validate_gguf_file(selected),
+        }
+
+    def unload_engine_model(self) -> dict[str, Any]:
+        get_engine().unload()
+        self._engine_model_path = ""
+        self._engine_model_mtime = -1.0
+        return {"unloaded": True}
+
+    def inference_status(self) -> dict[str, Any]:
+        engine = get_engine()
+        info: dict[str, Any] = {
+            "backend": "llama.cpp",
+            "library": str(self.library_dir),
+            "activeGguf": str(self.active_gguf_path),
+            "modelFormat": EMBER_MODEL_FORMAT,
+            "quantization": self.quantization,
+        }
+        if not engine.available():
+            info.update({"available": False, "loaded": False, "error": engine.load_error})
+            return info
+        info["available"] = True
+        info["nativeInfo"] = engine.backend_info()
+        try:
+            loaded = engine.is_loaded()
+            info["loaded"] = loaded
+            if loaded:
+                info["model"] = engine.model_info().to_dict()
+        except InferenceError as exc:
+            info["loaded"] = False
+            info["error"] = str(exc)
+        selected = self.inference_model_path
+        info["selectedPath"] = str(selected) if selected else ""
+        info["source"] = "imported" if self._imported_gguf is not None else "trained"
+        return info
 
     # ------------------------------------------------------------------
     # Checkpoints (atomic .emb + .tok.json + .state.json + .opt.npz)
@@ -932,8 +1174,11 @@ class Trainer:
             self.losses = list(st.get("losses", []))
             self.validations = list(st.get("validations", []))
             self.last_run = st.get("last_run")
+            self._imported_gguf = None
+            self.mark_gguf_dirty()
             self.rebuild_streams_if_needed()
             self._sync_active_files()
+            self.sync_gguf(force=True)
         self._log(f"Loaded checkpoint '{name}' (step {self.step}).")
         cur = self.status()
         return {**cur, "model": cur, "corpus": self.corpus.summary()}
@@ -1073,8 +1318,11 @@ class Trainer:
             self.train_seconds = 0.0
             self.losses = []
             self.validations = []
+            self._imported_gguf = None
+            self.mark_gguf_dirty()
             self.rebuild_streams_if_needed()
             self._sync_active_files()
+            self.sync_gguf(force=True)
             ckpt_info = self.save_checkpoint(name) if save_checkpoint else None
 
         st = self.status()
@@ -1158,8 +1406,11 @@ class Trainer:
             self.train_seconds = float(tstate.get("train_seconds", 0.0))
             self.losses = list(tstate.get("losses", []))
             self.validations = list(tstate.get("validations", []))
+            self._imported_gguf = None
+            self.mark_gguf_dirty()
             self.rebuild_streams_if_needed()
             self._sync_active_files()
+            self.sync_gguf(force=True)
             ckpt_info = self.save_checkpoint(name) if save_checkpoint else None
 
         st = self.status()
