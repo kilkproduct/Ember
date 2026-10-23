@@ -323,6 +323,28 @@ def test_cancellation_stops_promptly_and_keeps_completed_weights(learnable_backe
     assert (be.trainer.ckpts_dir / "autosave.emb").exists(), "completed work must be checkpointed on stop"
 
 
+def test_douse_requested_immediately_after_fire_is_not_lost(learnable_backend) -> None:
+    """Regression: `train_sync` cleared the stop event on entry, so a Douse issued
+    between launching the worker thread and reaching that line was discarded and
+    the run trained to completion anyway."""
+    be = learnable_backend
+    started = be.dispatch(
+        "train.start", {"steps": 2000, "batch": 4, "lr": 3e-3, "every": 0, "validateEvery": 0}
+    )
+    assert started["started"] is True
+
+    # Stop immediately: the worker thread has not necessarily reached train_sync.
+    be.dispatch("train.stop")
+
+    deadline = time.time() + 60
+    while time.time() < deadline and (be.trainer.running or be.trainer.starting):
+        time.sleep(0.02)
+
+    assert be.trainer.running is False and be.trainer.starting is False, "training never stopped"
+    assert be.trainer.outcome == "doused", f"the stop request was lost (outcome={be.trainer.outcome})"
+    assert be.trainer.step < 2000, "the run trained to completion despite being doused"
+
+
 def test_repeated_generation_requests_stay_deterministic_and_finite(learnable_backend) -> None:
     be = learnable_backend
     be.dispatch("train.sync", {"steps": 20, "batch": 4, "lr": 3e-3, "every": 0, "validateEvery": 0})

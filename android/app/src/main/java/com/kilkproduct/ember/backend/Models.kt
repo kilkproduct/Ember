@@ -679,10 +679,13 @@ data class ImportProgress(
         fun fromJson(json: JSONObject): ImportProgress {
             val documents = json.intOr("documents")
             val records = json.intOr("records")
+            // The importer reports its own record estimate; only fall back to
+            // deriving a total when the payload does not carry one.
+            val reportedTotal = json.intOr("total")
             return ImportProgress(
                 token = json.stringOr("token"),
                 processed = documents,
-                total = records.coerceAtLeast(documents),
+                total = if (reportedTotal > 0) reportedTotal else records.coerceAtLeast(documents),
                 percent = json.intOr("percent"),
                 stage = json.stringOr("stage", "reading"),
                 records = records,

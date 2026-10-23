@@ -415,6 +415,14 @@ class EmberV3ContractTest {
         assertEquals(38, tick.percent)
         assertEquals("Writing documents", tick.stageLabel)
 
+        // Older payloads carry no estimate: the total is then derived from the
+        // record count so the sheet never divides by a missing denominator.
+        val derived = ImportProgress.fromJson(
+            JSONObject().put("token", "tok-b").put("documents", 40).put("records", 40).put("percent", 12)
+                .put("stage", "committing")
+        )
+        assertEquals(40, derived.total)
+
         val paused = ImportProgress.fromJson(JSONObject().put("token", "tok-a").put("percent", 38).put("stage", "paused"))
         assertEquals("Paused", paused.stageLabel)
         val done = ImportProgress.fromJson(JSONObject().put("token", "tok-a").put("percent", 100).put("stage", "completed"))

@@ -459,8 +459,20 @@ class Trainer:
         self._emit("train.autosave", info)
         return info
 
-    def train_sync(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
-        """Run ``steps`` synchronously (used inside the worker thread and direct tests)."""
+    def train_sync(
+        self,
+        options: dict[str, Any] | None = None,
+        *,
+        _clear_stop: bool = True,
+    ) -> dict[str, Any]:
+        """Run ``steps`` synchronously (used inside the worker thread and direct tests).
+
+        ``_clear_stop`` is False when the run was launched by
+        :meth:`start_background`: that method already cleared the event, and
+        clearing it again here would discard a Douse request issued in the window
+        between launching the thread and reaching this line, silently training to
+        completion after the user asked to stop.
+        """
         opts = options or {}
         if not self.ready or self.model is None or self.cfg is None or self.tokenizer is None:
             raise ValueError("Cast a vessel before starting training.")
@@ -506,8 +518,9 @@ class Trainer:
         start_step = self.step
         target_step = start_step + steps
         started_iso = datetime.now(timezone.utc).isoformat()
-        self._stop_event.clear()
-        self.stop_requested = False
+        if _clear_stop:
+            self._stop_event.clear()
+            self.stop_requested = False
         self.starting = False
         self.running = True
         self.until_step = target_step
@@ -640,7 +653,6 @@ class Trainer:
             self._log(f"! Training error: {exc}")
             raise
         finally:
-            self.running = False
             self.starting = False
             self.stop_requested = False
             self.outcome = outcome
@@ -660,25 +672,33 @@ class Trainer:
                 "validationEvery": val_every,
                 "outcome": outcome,
             }
-            if self.ready and completed > 0:
-                try:
-                    self._sync_active_files()
-                except Exception:
-                    pass
-                self._write_autosave()
-            self._log(f"Fire {outcome} at step {self.step} (best loss {self.best_loss or 0.0:.4f}).")
-            done_payload = {
-                "outcome": outcome,
-                "error": error_msg,
-                "step": self.step,
-                "completedSteps": completed,
-                "bestLoss": self.best_loss,
-                "bestValLoss": self.best_val_loss,
-                "model": self.status(),
-                "corpus": self.corpus.summary(),
-            }
-            self._emit("train.finished", done_payload)
-            self._emit("train.done", done_payload)
+            # `running` is cleared LAST. Consumers (the Compose repository, the
+            # web poller, tests) treat "not running" as "the run is over", so the
+            # autosave and terminal events must already be on their way out —
+            # otherwise a status poll can win the race and the completion notice
+            # never appears.
+            try:
+                if self.ready and completed > 0:
+                    try:
+                        self._sync_active_files()
+                    except Exception:
+                        pass
+                    self._write_autosave()
+                self._log(f"Fire {outcome} at step {self.step} (best loss {self.best_loss or 0.0:.4f}).")
+                done_payload = {
+                    "outcome": outcome,
+                    "error": error_msg,
+                    "step": self.step,
+                    "completedSteps": completed,
+                    "bestLoss": self.best_loss,
+                    "bestValLoss": self.best_val_loss,
+                    "model": self.status(),
+                    "corpus": self.corpus.summary(),
+                }
+                self._emit("train.finished", done_payload)
+                self._emit("train.done", done_payload)
+            finally:
+                self.running = False
 
         return self.last_run
 
@@ -698,22 +718,23 @@ class Trainer:
 
             def _run() -> None:
                 try:
-                    self.train_sync(opts)
+                    self.train_sync(opts, _clear_stop=False)
                 except Exception as exc:
-                    self.running = False
                     self.starting = False
-                    self._emit(
-                        "train.finished",
-                        {
+                    try:
+                        payload = {
                             "outcome": "failed",
                             "error": str(exc),
                             "step": self.step,
                             "completedSteps": 0,
                             "model": self.status(),
                             "corpus": self.corpus.summary(),
-                        },
-                    )
-                    self._emit("train.error", {"message": str(exc)})
+                        }
+                        self._emit("train.finished", payload)
+                        self._emit("train.done", payload)
+                        self._emit("train.error", {"message": str(exc)})
+                    finally:
+                        self.running = False
 
             t = threading.Thread(target=_run, name="ember-trainer", daemon=True)
             self._train_thread = t

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -26,17 +27,33 @@ from ember.teachers import TEACHER_DEFS
 
 
 class EventRecorder:
+    """Thread-safe capture of backend events.
+
+    Training, foraging and imports emit from worker threads, so every read takes
+    a snapshot under the lock: iterating a list another thread appends to is how
+    a contract test turns intermittently flaky.
+    """
+
     def __init__(self) -> None:
-        self.events: list[tuple[str, dict]] = []
+        self._lock = threading.Lock()
+        self._events: list[tuple[str, dict]] = []
         self.synced: list[tuple[str, str]] = []
 
     def on_event(self, name: str, payload: dict) -> None:
         # The real Chaquopy bridge serializes with json.dumps(ensure_ascii=False);
         # do the same here so non-serializable payloads fail the test.
-        self.events.append((name, json.loads(json.dumps(payload, ensure_ascii=False))))
+        record = (name, json.loads(json.dumps(payload, ensure_ascii=False)))
+        with self._lock:
+            self._events.append(record)
 
     def on_sync(self, model_path: str, tok_path: str) -> None:
-        self.synced.append((model_path, tok_path))
+        with self._lock:
+            self.synced.append((model_path, tok_path))
+
+    @property
+    def events(self) -> list[tuple[str, dict]]:
+        with self._lock:
+            return list(self._events)
 
     def names(self) -> list[str]:
         return [n for n, _ in self.events]
@@ -52,6 +69,16 @@ class EventRecorder:
             if n == name:
                 return payload
         return None
+
+    def wait_for(self, name: str, timeout: float = 60.0) -> dict | None:
+        """Block until an event arrives, so ordering races cannot flake a test."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            found = self.last(name)
+            if found is not None:
+                return found
+            time.sleep(0.02)
+        return self.last(name)
 
 
 TINY_VESSEL = {
@@ -227,9 +254,12 @@ def test_train_start_reports_until_and_lifecycle_events_match_handlers(backend) 
     header progress bar stayed at 0/0 and no completion notice ever appeared."""
     be, rec = backend
     be.dispatch("vessel.cast", TINY_VESSEL)
+    # Capture the step *before* launching: the worker thread advances it as soon
+    # as it starts, so comparing afterwards would be a race, not a contract check.
+    step_before = be.trainer.step
     started = be.dispatch("train.start", {"steps": 4, "batch": 2, "lr": 2e-3, "every": 0, "validateEvery": 2})
     assert "started" in started and started["started"] is True
-    assert started["until"] == be.trainer.step + 4, "TrainingSnapshot.until comes from train.start"
+    assert started["until"] == step_before + 4, "TrainingSnapshot.until comes from train.start"
 
     deadline = time.time() + 60
     while time.time() < deadline and (be.trainer.running or be.trainer.starting):
@@ -262,7 +292,7 @@ def test_train_start_reports_until_and_lifecycle_events_match_handlers(backend) 
     assert np.isfinite(progress["loss"])
     assert progress["until"] - progress["startStep"] == 4
 
-    finished = rec.last("train.finished")
+    finished = rec.wait_for("train.finished")
     assert finished is not None, "handleTrainFinished listens for 'train.finished'"
     assert finished["outcome"] in {"completed", "doused", "failed", "stopped"}
     assert "model" in finished and "corpus" in finished, "handleTrainFinished refreshes model + corpus"
@@ -274,7 +304,7 @@ def test_train_start_reports_until_and_lifecycle_events_match_handlers(backend) 
     for key in ("step", "loss", "bestLoss", "ppl", "windows"):
         assert key in validation, f"ValidationPoint.fromJson expects '{key}'"
 
-    autosave = rec.last("train.autosave")
+    autosave = rec.wait_for("train.autosave")
     assert autosave is not None, "autosave notices need the train.autosave event"
     for key in ("name", "step", "bytes", "mtime"):
         assert key in autosave
@@ -284,13 +314,17 @@ def test_douse_sets_the_outcome_the_ui_announces(backend) -> None:
     be, rec = backend
     be.dispatch("vessel.cast", TINY_VESSEL)
     be.dispatch("train.start", {"steps": 400, "batch": 2, "lr": 2e-3, "every": 0, "validateEvery": 0})
-    time.sleep(0.2)
+    # Wait for the worker to be genuinely running rather than sleeping a fixed
+    # amount: on a loaded machine 200 ms is not enough to reach the first step.
+    deadline = time.time() + 60
+    while time.time() < deadline and not be.trainer.running and be.trainer.step == 0:
+        time.sleep(0.02)
     stopped = be.dispatch("train.stop")
     assert stopped["stopping"] is True
     deadline = time.time() + 60
     while time.time() < deadline and be.trainer.running:
         time.sleep(0.05)
-    finished = rec.last("train.finished")
+    finished = rec.wait_for("train.finished")
     assert finished is not None
     assert finished["outcome"] == "doused", "EmberRepository shows a dedicated 'Doused' notice for this outcome"
     assert be.trainer.step < 400
