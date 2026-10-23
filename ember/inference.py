@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import math
 import os
 import threading
 import time
@@ -414,6 +415,10 @@ class LlamaCppEngine(InferenceEngine):
         if not self.available():
             raise InferenceError(self._load_error or "native engine unavailable", code=-2, name="backend-not-initialized")
         cfg = config or EngineConfig()
+        if not (1 <= cfg.n_ctx <= 8192 and 1 <= cfg.n_batch <= 2048 and 0 <= cfg.n_threads <= 8):
+            raise InferenceError("Context, batch or thread count is out of range.", code=-1, name="invalid-arguments")
+        if cfg.n_gpu_layers != 0:
+            raise InferenceError("This build is CPU-only; GPU offload is not enabled.", code=-1, name="invalid-arguments")
         c_cfg = _CConfig(
             n_ctx=int(cfg.n_ctx),
             n_batch=int(cfg.n_batch),
@@ -508,6 +513,10 @@ class LlamaCppEngine(InferenceEngine):
         if not self.available():
             raise InferenceError(self._load_error or "native engine unavailable", code=-2, name="backend-not-initialized")
         p = params or GenParams()
+        if not all(math.isfinite(x) for x in (p.temperature, p.top_p, p.repeat_penalty)):
+            raise InferenceError("Sampling parameters must be finite numbers.", code=-1, name="invalid-arguments")
+        if p.max_tokens < 0 or p.max_tokens > 8192 or p.top_k < 0 or not 0 <= p.top_p <= 1 or p.repeat_penalty <= 0:
+            raise InferenceError("Invalid sampling range: check token limit, top-k, top-p and repetition penalty.", code=-1, name="invalid-arguments")
         seed = 0xFFFFFFFF if p.seed is None else (int(p.seed) & 0xFFFFFFFF)
         c_params = _CGenParams(
             max_tokens=max(0, min(8192, int(p.max_tokens))),

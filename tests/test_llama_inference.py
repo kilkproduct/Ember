@@ -81,3 +81,35 @@ def test_missing_corrupt_and_legacy_diagnostics(tmp_path):
             engine.load_model(path)
         assert not engine.is_loaded()
     finally: engine.close()
+
+def test_sampling_validation_and_no_fallback(fixture):
+    engine, _, _, _ = fixture
+    for params in (GenParams(temperature=float('nan')), GenParams(top_k=-2), GenParams(top_p=1.1),
+                   GenParams(repeat_penalty=0), GenParams(max_tokens=-1)):
+        with pytest.raises(InferenceError): engine.generate('hello', params)
+    assert engine.generate('hello', GenParams(max_tokens=0)).new_tokens == 0
+    missing = LlamaCppEngine('/no/such/libember_llama.so')
+    assert not missing.available()
+    with pytest.raises(InferenceError, match='load'):
+        missing.generate('hello')
+
+def test_library_selection_survives_restart_and_samples_refresh(fixture, tmp_path):
+    from ember.backend import EmberBackend
+    from ember.gguf_export import read_gguf_header
+    _, _, _, path = fixture
+    root = tmp_path/'data'
+    b = EmberBackend(root)
+    result = b.dispatch('model.importGguf', {'path':str(path), 'name':'local', 'select':True})
+    assert result['selected']
+    b.close()
+    b = EmberBackend(root)
+    try:
+        assert b.trainer._imported_gguf.name == 'local.gguf'
+        out = b.dispatch('gen.run', {'prompt':'hello','maxNew':4,'temperature':0,'stopOnBoundary':False})
+        assert out['backend'] == 'llama.cpp' and out['newTokens'] == 4
+        b.dispatch('corpus.addPack', {'pack':'starter'})
+        b.dispatch('vessel.cast', {'config':{'nLayer':2,'nHead':2,'nEmbd':32,'blockSize':32,'vocabSize':400},'seed':3})
+        b.dispatch('train.sync', {'steps':4,'every':2,'validateEvery':0,'batch':2})
+        assert [s['step'] for s in b.trainer.samples] == [4,2]
+        assert read_gguf_header(b.trainer.active_gguf_path).metadata['ember.source_step'] == 4
+    finally: b.close()

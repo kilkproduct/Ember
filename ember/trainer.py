@@ -663,6 +663,7 @@ class Trainer:
                     self.optimizer.step(grads)
 
                     self.step += 1
+                    self.mark_gguf_dirty()
                     completed += 1
                     step_sec = max(1e-6, time.perf_counter() - step_t0)
                     step_tokens = int(batch_size * self.cfg.block_size)
@@ -829,6 +830,7 @@ class Trainer:
     def stop(self) -> dict[str, Any]:
         self.stop_requested = True
         self._stop_event.set()
+        get_engine().cancel()
         return {"stopping": True, "step": self.step}
 
     # ------------------------------------------------------------------
@@ -858,27 +860,27 @@ class Trainer:
                 raise InferenceError(
                     "Cast or load a vessel before generating text.", code=-3, name="model-not-loaded"
                 )
-        cfg = EngineConfig()
-        if context_length:
-            cfg.n_ctx = int(context_length)
-        elif self.cfg is not None:
-            cfg.n_ctx = max(64, min(4096, int(self.cfg.block_size)))
-        self.ensure_engine_model(cfg)
+            cfg = EngineConfig()
+            if context_length:
+                cfg.n_ctx = int(context_length)
+            elif self.cfg is not None:
+                cfg.n_ctx = max(64, min(4096, int(self.cfg.block_size)))
+            self.ensure_engine_model(cfg)
 
-        params = GenParams(
-            max_tokens=max(0, int(max_new_tokens)),
-            temperature=float(temperature),
-            top_k=int(top_k),
-            top_p=float(top_p),
-            repeat_penalty=float(repetition_penalty),
-            repeat_last_n=64,
-            seed=seed,
-            stop_on_eos=bool(stop_on_eos),
-            prepend_bos=True,
-        )
-        gen = get_engine().generate(prompt or "", params, on_token=on_token)
-        self.gen_tps = gen.tokens_per_sec
-        return gen
+            params = GenParams(
+                max_tokens=max(0, int(max_new_tokens)),
+                temperature=float(temperature),
+                top_k=int(top_k),
+                top_p=float(top_p),
+                repeat_penalty=float(repetition_penalty),
+                repeat_last_n=64,
+                seed=seed,
+                stop_on_eos=bool(stop_on_eos),
+                prepend_bos=True,
+            )
+            gen = get_engine().generate(prompt or "", params, on_token=on_token)
+            self.gen_tps = gen.tokens_per_sec
+            return gen
 
     # ------------------------------------------------------------------
     # GGUF model library (user-imported models)
@@ -1291,8 +1293,6 @@ class Trainer:
             tok = BPETokenizer.from_dict(meta["tokenizer"])
         elif companion_tok_path is not None and companion_tok_path.exists():
             tok = BPETokenizer.load(companion_tok_path)
-        elif self.tokenizer is not None and self.tokenizer.vocab_size == cfg.vocab_size:
-            tok = self.tokenizer
         else:
             raise ValueError(
                 f"This standalone .emb file (vocab={cfg.vocab_size}) has no embedded tokenizer metadata "
