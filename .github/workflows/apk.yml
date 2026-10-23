@@ -237,12 +237,23 @@ jobs:
         if: failure()
         run: |
           {
-            grep -E "^e: |error: " /tmp/gradle.log | head -40
+            grep -E "^e: |[Ee]rror: " /tmp/gradle.log | head -40
             grep -A6 "^\* What went wrong" /tmp/gradle.log | head -18
           } > /tmp/errors.txt || true
           if [ ! -s /tmp/errors.txt ]; then tail -35 /tmp/gradle.log > /tmp/errors.txt; fi
           BODY=$(sed -e 's/%/%25/g' -e 's/\r//g' /tmp/errors.txt | awk '{printf "%s%%0A", $0}')
           echo "::error::$BODY"
+          python3 - <<'PYLINT'
+          import glob, pathlib, xml.etree.ElementTree as ET
+          for p in glob.glob("android/app/build/reports/*lint*.xml"):
+              for i in ET.parse(p).getroot().iter('issue'):
+                  if i.get('severity') in ('Error','Fatal'):
+                      message=f"LINT {i.get('id')}: {i.get('message')}"
+                      print("::error::"+message.replace('%','%25').replace('\n','%0A'))
+          for p in glob.glob("android/app/build/reports/*lint*.txt"):
+              text=pathlib.Path(p).read_text()[:10000]
+              print("::error::"+text.replace('%','%25').replace('\n','%0A'))
+          PYLINT
 
       - name: Measure baseline APK from exact pre-overhaul commit
         run: |

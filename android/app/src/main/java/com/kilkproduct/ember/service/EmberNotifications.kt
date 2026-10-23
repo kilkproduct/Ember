@@ -38,6 +38,9 @@ class EmberNotifications(private val context: Context) {
 
     fun post(level: NoticeLevel, title: String, body: String) {
         if (!permissionGranted()) return
+        // Keep the runtime guard at the call site as well: permission may be
+        // revoked between screens, and lint cannot infer custom helper checks.
+        if (Build.VERSION.SDK_INT >= 33 && context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return
         ensureChannel()
         val open = Intent(context, MainActivity::class.java)
             .setAction(Intent.ACTION_MAIN)
@@ -66,7 +69,7 @@ class EmberNotifications(private val context: Context) {
             )
             .build()
         val manager = context.getSystemService(NotificationManager::class.java)
-        manager?.notify(ids.incrementAndGet(), notification)
+        try { manager?.notify(ids.incrementAndGet(), notification) } catch (_: SecurityException) { /* Permission revoked concurrently. */ }
     }
 
     fun testNotification() {

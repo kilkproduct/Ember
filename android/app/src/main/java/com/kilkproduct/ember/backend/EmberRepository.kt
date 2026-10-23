@@ -1346,6 +1346,26 @@ class EmberRepository private constructor(
     // Vessel + training
     // ---------------------------------------------------------------------
 
+    private var lastResourceProtection=0L
+    fun protectResources(reason: String) {
+        val now=android.os.SystemClock.elapsedRealtime()
+        if(now-lastResourceProtection<10000)return
+        lastResourceProtection=now
+        val snapshot=state.value
+        if(snapshot.trainingActive)stopTraining()
+        if(snapshot.generating)cancelGeneration()
+        if(snapshot.foragingActive)stopForage()
+        if(snapshot.workActive || snapshot.generating)
+            addNotice(NoticeLevel.WARNING,"Work stopped for device safety","$reason. Training retains the last committed checkpoint; resume after the device recovers.")
+    }
+
+    private fun admitTrainingMemory(bytes: Long) {
+        val info=android.app.ActivityManager.MemoryInfo()
+        app.getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(info) ?: return
+        if(info.lowMemory || bytes>info.availMem*6/10)
+            throw EmberBackendException("Training working-set estimate exceeds 60% of currently available memory. Reduce context/batch/width or free memory.")
+    }
+
     fun estimateVessel(config: ModelConfig) {
         try {
             val estimate=VesselEstimator.estimate(config)
@@ -1361,6 +1381,7 @@ class EmberRepository private constructor(
 
     fun castVessel(config: ModelConfig, lr: Double, tokenizer: String) {
         launchOperation(Ops.CAST, "Casting failed") {
+            admitTrainingMemory(VesselEstimator.estimate(config).trainBytes)
             val params = JSONObject()
                 .put("config", config.toJson())
                 .put("lr", lr)
@@ -1394,6 +1415,7 @@ class EmberRepository private constructor(
             return
         }
         launchOperation(Ops.TRAIN_START, "Training could not start") {
+            state.value.status.model.config?.let {admitTrainingMemory(VesselEstimator.estimate(it,options.batch).trainBytes)}
             val params = JSONObject()
                 .put("steps", options.steps)
                 .put("batch", options.batch)
