@@ -74,6 +74,13 @@ data class ModelConfig(
     val vocabSize: Int,
     val dropout: Double,
     val ffnMult: Double,
+    val nKvHead: Int = 1,
+    val ropeTheta: Double = 500000.0,
+    val maxTrainTokens: Int = 3000000,
+    val maxValTokens: Int = 250000,
+    val tokenizerChars: Int = 2000000,
+    val intermediateSize: Int? = null,
+    val seed: Int = 42,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ModelConfig? {
@@ -86,6 +93,13 @@ data class ModelConfig(
                 vocabSize = json.intOr("vocabSize"),
                 dropout = json.doubleOr("dropout"),
                 ffnMult = json.doubleOr("ffnMult", 4.0),
+                nKvHead = json.intOr("n_kv_head", json.intOr("nKvHead",1)),
+                ropeTheta = json.doubleOr("rope_theta", json.doubleOr("ropeTheta",500000.0)),
+                intermediateSize = if(json.isNull("intermediate_size")) null else json.optInt("intermediate_size"),
+                maxTrainTokens=json.intOr("maxTrainTokens",3000000),
+                maxValTokens=json.intOr("maxValTokens",250000),
+                tokenizerChars=json.intOr("tokenizerChars",2000000),
+                seed=json.intOr("seed",42),
             ).takeIf { it.nLayer > 0 && it.nEmbd > 0 }
         }
     }
@@ -98,6 +112,13 @@ data class ModelConfig(
         .put("vocabSize", vocabSize)
         .put("dropout", dropout)
         .put("ffnMult", ffnMult)
+        .put("nKvHead", nKvHead)
+        .put("ropeTheta", ropeTheta)
+        .put("maxTrainTokens", maxTrainTokens)
+        .put("maxValTokens", maxValTokens)
+        .put("tokenizerChars", tokenizerChars)
+        .put("intermediate_size", intermediateSize ?: JSONObject.NULL)
+        .put("seed",seed)
 }
 
 data class LastRun(
@@ -377,6 +398,14 @@ data class ForagingSnapshot(
     val currentSeeds: String = "",
     val startedAt: Long = 0,
     val error: String? = null,
+    val activeRequests: Int = 0,
+    val fetched: Long = 0,
+    val cached: Long = 0,
+    val failed: Long = 0,
+    val duplicates: Long = 0,
+    val rejected: Long = 0,
+    val bytesDownloaded: Long = 0,
+    val pendingTopics: Int = 0,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ForagingSnapshot {
@@ -384,6 +413,10 @@ data class ForagingSnapshot(
             return ForagingSnapshot(
                 running = json.boolOr("running"),
                 documentsAccepted = json.longOr("documentsAccepted"),
+                activeRequests=json.intOr("activeRequests"),fetched=json.longOr("fetched"),cached=json.longOr("cached"),
+                failed=json.longOr("failed"),duplicates=json.longOr("duplicates"),
+                rejected=json.longOr("rejected"),bytesDownloaded=json.longOr("bytesDownloaded"),
+                pendingTopics=json.optJSONObject("autosave")?.optJSONArray("pendingTopics")?.length() ?: 0,
                 lastDocument = json.stringOr("lastDocument"),
                 currentSeeds = json.stringOr("currentSeeds"),
                 startedAt = json.longOr("startedAt"),
@@ -640,7 +673,7 @@ data class FilePreview(
     }
 }
 
-/** One progress tick from the importer (see `web/ingest/pipeline.js`). */
+/** One progress tick from the Python importer (`ember/ingest.py`). */
 data class ImportProgress(
     val token: String,
     val processed: Int = 0,
@@ -653,15 +686,18 @@ data class ImportProgress(
     val failed: Int = 0,
     val bytesRead: Long = 0,
     val sourceBytes: Long = 0,
+    val byteBasis: String = "source",
     val entries: Int = 0,
     val message: String = "",
     val elapsedMs: Long = 0,
 ) {
+    val progressFraction: Float
+        get()=if(stage!="completed" && (byteBasis=="decompressed" || percent<=0)) Float.NaN else percent/100f
     val stageLabel: String
         get() = when (stage) {
             "opening" -> "Opening the file"
             "reading" -> "Reading records"
-            "committing" -> "Writing documents"
+            "committing" -> if(byteBasis=="decompressed") "Parsing decompressed records · total unknown" else if(total==0) "Writing documents · source bytes read" else "Writing documents"
             "finalizing" -> "Finishing up"
             "paused" -> "Paused"
             "cancelled" -> "Stopped"
@@ -669,6 +705,37 @@ data class ImportProgress(
             "completed" -> "Complete"
             else -> stage.replaceFirstChar { it.uppercase() }
         }
+
+    companion object {
+        /**
+         * Single parser for `import.progress` events, so the shape the Python
+         * importer emits is checked in `EmberV3ContractTest` instead of being
+         * re-derived inline in the repository.
+         */
+        fun fromJson(json: JSONObject): ImportProgress {
+            val documents = json.intOr("documents")
+            val records = json.intOr("records")
+            // The importer reports its own record estimate; only fall back to
+            // deriving a total when the payload does not carry one.
+            val reportedTotal = json.intOr("total")
+            return ImportProgress(
+                token = json.stringOr("token"),
+                processed = documents,
+                total = if (json.has("total")) reportedTotal else records.coerceAtLeast(documents),
+                percent = json.intOr("percent"),
+                stage = json.stringOr("stage", "reading"),
+                records = records,
+                merged = json.intOr("merged"),
+                skipped = json.intOr("skipped"),
+                failed = json.intOr("failed"),
+                bytesRead = json.longOr("bytesRead"),
+                sourceBytes = json.longOr("sourceBytes"),byteBasis=json.stringOr("byteBasis","source"),
+                entries = json.intOr("entries"),
+                message = json.stringOr("message"),
+                elapsedMs = json.longOr("elapsedMs"),
+            )
+        }
+    }
 }
 
 /**
@@ -826,9 +893,11 @@ data class TrainingProgress(
     val valLoss: Double?,
     val bestValLoss: Double?,
     val passes: Long,
+    val etaSeconds: Double? = null,
 ) {
     companion object {
         fun fromJson(json: JSONObject) = TrainingProgress(
+            etaSeconds=json.doubleOrNull("etaSeconds"),
             step = json.longOr("step"),
             until = json.longOr("until"),
             startStep = json.longOr("startStep"),
@@ -890,8 +959,9 @@ data class GenerationResult(
     val tokensPerSec: Double,
     val ms: Double,
     val promptTokens: Int,
-    val seed: Int?,
-    val warning: String?,
+    val seed: Long?,
+    val stoppedBy: String = "length",
+    val warning: String? = null,
 ) {
     companion object {
         fun fromJson(json: JSONObject) = GenerationResult(
@@ -901,7 +971,8 @@ data class GenerationResult(
             tokensPerSec = json.doubleOr("tokensPerSec"),
             ms = json.doubleOr("ms"),
             promptTokens = json.intOr("promptTokens"),
-            seed = json.longOrNull("seed")?.toInt(),
+            seed = json.longOrNull("seed"),
+            stoppedBy = json.stringOr("stoppedBy", "length"),
             warning = json.stringOrNull("warning"),
         )
     }
@@ -1067,6 +1138,16 @@ data class TrainingOptions(
     val balance: String = "off",
     val lessonLoss: String = "both",
     val samplePrompt: String = "",
+    val weightDecay: Double = 0.01,
+    val gradientAccumulation: Int = 1,
+    val checkpointEvery: Int = 50,
+    val beta1: Double = .9,
+    val beta2: Double = .95,
+    val epsilon: Double = 1e-8,
+    val warmupSteps: Int? = null,
+    val minLrFraction: Double = .1,
+    val trainingSeed: Int = 42,
+    val resumeSchedule: Boolean = false,
 )
 
 data class GenerationOptions(
@@ -1081,6 +1162,12 @@ data class GenerationOptions(
     val task: String = "continue",
     val language: String = "Spanish",
     val stopOnBoundary: Boolean = true,
+    /** llama.cpp context length; 0 keeps whatever the model was exported with. */
+    val contextLength: Int = 0,
+    val repeatLastN: Int = 64,
+    val threads: Int = 0,
+    val batchSize: Int = 256,
+    val microBatch: Int = 64,
 )
 
 data class ForageOptions(
@@ -1099,6 +1186,7 @@ data class ForageOptions(
     val wander: Boolean = true,
     val autopilot: Boolean = true,
     val autoFire: Boolean = false,
+    val resume: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("seeds", seeds)
@@ -1117,4 +1205,5 @@ data class ForageOptions(
         .put("wander", wander)
         .put("autopilot", autopilot)
         .put("autoFire", autoFire)
+        .put("resume",resume)
 }

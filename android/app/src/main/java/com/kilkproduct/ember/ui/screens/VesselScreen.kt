@@ -31,6 +31,7 @@ import com.kilkproduct.ember.MainViewModel
 import com.kilkproduct.ember.backend.Formats
 import com.kilkproduct.ember.backend.Ops
 import com.kilkproduct.ember.backend.UiState
+import com.kilkproduct.ember.ui.components.EmberTextField
 import com.kilkproduct.ember.ui.components.EmberCard
 import com.kilkproduct.ember.ui.components.ErrorBanner
 import com.kilkproduct.ember.ui.components.InfoBanner
@@ -79,7 +80,7 @@ fun VesselScreen(
             EmberCard(
                 title = "Active brain",
                 subtitle = if (model.ready) {
-                    "Weights live in the JavaScript engine. Kotlin never touches the tensors."
+                    "Weights train in Python (NumPy) and generate in native C++. Kotlin never touches raw tensors."
                 } else {
                     "No brain cast yet. Choose a shape and cast from the corpus."
                 },
@@ -107,7 +108,7 @@ fun VesselScreen(
                     if (cfg != null) {
                         KeyValueRow(
                             "Architecture",
-                            "${cfg.nLayer} layers · ${cfg.nHead} heads · width ${cfg.nEmbd} · FFN ${cfg.ffnMult}×",
+                            "${cfg.nLayer} layers · ${cfg.nHead} heads · width ${cfg.nEmbd} · Llama GQA ${cfg.nKvHead} KV · SwiGLU ${cfg.ffnMult}×",
                         )
                         KeyValueRow(
                             "Context / vocab",
@@ -124,7 +125,7 @@ fun VesselScreen(
                         onAction = onGoToFuel,
                     )
                 } else {
-                    InfoBanner("Cast a vessel: this builds the TensorFlow.js model tensors from your corpus.")
+                    InfoBanner("Cast fits byte-BPE on training documents and initializes EMB4 Llama weights. Fire performs actual training.")
                 }
             }
         }
@@ -132,11 +133,15 @@ fun VesselScreen(
         item(key = "shape") {
             EmberCard(
                 title = "Vessel shape",
-                subtitle = "Larger vessels learn more but train slowly on a phone. Presets are honest starting points.",
+                subtitle = "Llama decoder configurations. Long contexts and large vocabularies may exceed phone memory; estimates are admission checks, not fit guarantees.",
             ) {
+                EmberTextField(label="Custom preset name",value=form.presetName,onValueChange={v->vm.updateVessel{it.copy(presetName=v)}})
+                Row {TextButton(onClick={vm.saveCustomPreset()}) {Text("Save configuration")};TextButton(onClick={vm.loadCustomPreset()}) {Text("Load saved")}}
+                EmberTextField(label="Feed-forward width (blank uses multiplier)",value=form.intermediate,onValueChange={v->vm.updateVessel{it.copy(intermediate=v,preset="custom")}})
+                EmberTextField(label="Initialization seed",value=form.seed,onValueChange={v->vm.updateVessel{it.copy(seed=v)}})
                 SectionHeading("Presets")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("phone" to "Phone", "tiny" to "Tiny", "small" to "Small", "medium" to "Medium").forEach { (id, label) ->
+                    MainViewModel.VESSEL_PRESETS.keys.map { it to it.replace('-',' ') }.forEach { (id, label) ->
                         FilterChip(
                             selected = form.preset == id,
                             onClick = { vm.applyVesselPreset(id) },
@@ -152,8 +157,8 @@ fun VesselScreen(
                         value = form.layers,
                         onValueChange = { value -> vm.updateVessel { it.copy(layers = value, preset = "custom") } },
                         step = 1.0,
-                        min = 2.0,
-                        max = 6.0,
+                        min = 1.0,
+                        max = 12.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -162,8 +167,8 @@ fun VesselScreen(
                         value = form.heads,
                         onValueChange = { value -> vm.updateVessel { it.copy(heads = value, preset = "custom") } },
                         step = 1.0,
-                        min = 2.0,
-                        max = 8.0,
+                        min = 1.0,
+                        max = 16.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -176,7 +181,7 @@ fun VesselScreen(
                         onValueChange = { value -> vm.updateVessel { it.copy(embd = value, preset = "custom") } },
                         step = 16.0,
                         min = 32.0,
-                        max = 256.0,
+                        max = 512.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -186,7 +191,7 @@ fun VesselScreen(
                         onValueChange = { value -> vm.updateVessel { it.copy(ctx = value, preset = "custom") } },
                         step = 32.0,
                         min = 32.0,
-                        max = 256.0,
+                        max = 2048.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -198,25 +203,48 @@ fun VesselScreen(
                         value = form.vocab,
                         onValueChange = { value -> vm.updateVessel { it.copy(vocab = value, preset = "custom") } },
                         step = 500.0,
-                        min = 500.0,
-                        max = 6000.0,
+                        min = 262.0,
+                        max = 50000.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
-                        helper = "Vocabulary is clamped to tokens actually seen.",
+                        helper = "Maximum 50,000. Actual vocabulary may be smaller if useful merges run out; no filler tokens are created.",
                     )
                     NumberStepper(
-                        label = "Dropout",
+                        label = "Dropout (Llama: 0)",
                         value = form.dropout,
                         onValueChange = { value -> vm.updateVessel { it.copy(dropout = value, preset = "custom") } },
                         step = 0.05,
                         min = 0.0,
-                        max = 0.4,
+                        max = 0.0,
                         decimals = 2,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
                 }
                 Spacer(Modifier.height(10.dp))
+                Text("Llama architecture · RMSNorm · adjacent-pair RoPE · SwiGLU", style = MaterialTheme.typography.bodySmall)
+                NumberStepper(
+                    label = "KV heads (must divide query heads)", value = form.kvHeads,
+                    onValueChange = { value -> vm.updateVessel { it.copy(kvHeads = value) } },
+                    step = 1.0, min = 1.0, max = 16.0, enabled = !casting,
+                )
+                NumberStepper(
+                    label = "RoPE frequency base", value = form.ropeTheta,
+                    onValueChange = { value -> vm.updateVessel { it.copy(ropeTheta = value) } },
+                    step = 10000.0, min = 10000.0, max = 1000000.0, enabled = !casting,
+                )
+                NumberStepper(
+                    label = "Training preparation token limit", value = form.maxTrainTokens,
+                    onValueChange = { value -> vm.updateVessel { it.copy(maxTrainTokens = value) } },
+                    step = 100000.0, min = 1000.0, max = 10000000.0, enabled = !casting,
+                    helper = "Explicit subset budget; unused source documents remain in Fuel.",
+                )
+                NumberStepper(
+                    label = "Tokenizer sample character limit", value = form.tokenizerChars,
+                    onValueChange = { value -> vm.updateVessel { it.copy(tokenizerChars = value) } },
+                    step = 100000.0, min = 1000.0, max = 10000000.0, enabled = !casting,
+                    helper = "Fits BPE only on training documents, never validation documents.",
+                )
                 ChoiceRow(
                     label = "FFN multiplier",
                     options = listOf("2" to "2×", "3" to "3×", "4" to "4×", "6" to "6×"),
@@ -231,14 +259,14 @@ fun VesselScreen(
                 Spacer(Modifier.height(10.dp))
                 ChoiceRow(
                     label = "Tokenizer",
-                    options = listOf("byte-bpe" to "Byte BPE", "legacy" to "Legacy"),
+                    options = listOf("byte-bpe" to "GPT-2 byte BPE"),
                     selected = form.tokenizer,
                     onSelect = { value -> vm.updateVessel { it.copy(tokenizer = value) } },
                     enabled = !casting,
                     helper = if (model.ready && model.tokenizerType != form.tokenizer) {
                         "Switching tokenizer starts a fresh brain. The old weights are saved as a pre-switch checkpoint first."
                     } else {
-                        "Byte BPE handles any text including non-English. Legacy matches old brains."
+                        "GPT-2 byte BPE handles Unicode and is shared with llama.cpp. Old tokenizers require recasting."
                     },
                 )
                 Spacer(Modifier.height(10.dp))
@@ -257,7 +285,7 @@ fun VesselScreen(
         }
 
         item(key = "estimate") {
-            EmberCard(title = "Estimate") {
+            EmberCard(title = "Allocation estimate — not a completion timer") {
                 val estimate = ui.vesselEstimate
                 if (estimate != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -312,22 +340,21 @@ fun VesselScreen(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                         Spacer(Modifier.width(8.dp))
-                        val pct = model.castProgress?.let { (it * 100).roundToInt() }
-                        Text(if (pct != null) "Casting… $pct%" else "Casting…")
+                        Text("Casting…")
                     } else {
                         Text(if (model.ready) "Cast new vessel (replaces weights)" else "Cast vessel from corpus")
                     }
                 }
-                if (casting && model.castProgress != null) {
+                if (casting) {
                     Spacer(Modifier.height(10.dp))
-                    LinearProgressIndicator(
-                        progress = { model.castProgress.toFloat().coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(6.dp),
-                    )
+                    val castRatio=model.castProgress
+                    if(castRatio!=null)LinearProgressIndicator(progress={castRatio.toFloat().coerceIn(0f,1f)},modifier=Modifier.fillMaxWidth().height(6.dp))
+                    else LinearProgressIndicator(modifier=Modifier.fillMaxWidth().height(6.dp))
                     Text(
                         text = when (model.castStage) {
                             "corpus" -> "Counting the corpus…"
-                            "tokenizer" -> "Learning the tokenizer…"
+                            "tokenizer" -> "BPE merge target ${((model.castProgress ?: 0.0)*100).roundToInt()}% · corpus may finish earlier"
+                            "tokenizer-scan" -> "Reading the bounded tokenizer sample…"
                             "model" -> "Building the model…"
                             "stream" -> "Tokenizing documents into the training stream…"
                             else -> "Casting…"

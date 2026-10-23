@@ -1,177 +1,459 @@
-"""A compact GPT for CPU training — nanoGPT-shaped, sized for a laptop."""
-
+"""Ember EMB4 Llama-style NumPy training and atomic checkpoint serialization."""
 from __future__ import annotations
 
-import math
-from dataclasses import asdict, dataclass
+import json
+import struct
+import zlib
+from dataclasses import dataclass
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
+
+from .spec import (
+    ARCH,
+    ACTIVATION,
+    DTYPE_FLOAT32,
+    DTYPE_ITEMSIZE,
+    FORMAT_MAGIC,
+    FORMAT_VERSION,
+    NORM_EPS,
+    POSITIONAL,
+    ffn_dim,
+    tensor_specs,
+)
+
+__all__ = ["ModelConfig", "Llama", "GPT", "init_params", "save_model", "load_model", "model_to_dict", "model_from_dict"]
+
+HEADER_ALIGN = 16
 
 
 @dataclass
-class EmberConfig:
-    vocab_size: int = 256
-    block_size: int = 128
-    n_layer: int = 4
-    n_head: int = 4
-    n_embd: int = 128
-    dropout: float = 0.1
-    bias: bool = True
+class ModelConfig:
+    n_layer: int = 2
+    n_head: int = 2
+    n_embd: int = 64
+    block_size: int = 64
+    vocab_size: int = 1500
+    ffn_mult: float = 4.0
+    dropout: float = 0.0
+    tie_embeddings: bool = True
+    norm_eps: float = NORM_EPS
 
-    def asdict(self) -> dict:
-        return asdict(self)
+    n_kv_head: int = 1
+    rope_theta: float = 500000.0
+    rope_scaling: str = "none"
+    bias: bool = False
+    training_dtype: str = "float32"
+    intermediate_size: int | None = None
+
+    # -- derived --------------------------------------------------------
+    @property
+    def head_dim(self) -> int:
+        if self.n_embd % self.n_head != 0:
+            raise ValueError("n_embd must be divisible by n_head")
+        return self.n_embd // self.n_head
 
     @property
-    def n_params_est(self) -> int:
-        """Rough parameter count used by the UI before the model exists."""
-        v, d, l, t = self.vocab_size, self.n_embd, self.n_layer, self.block_size
-        embed = v * d + t * d
-        # Per block: attn (3d^2 weights + 3d bias) + proj (d^2 + d) +
-        # mlp (4d^2 + 4d, 4d^2 + d) + 2 LayerNorms (4d) = 12d^2 + 13d.
-        # The LM head is tied to wte, so it adds nothing beyond `embed`.
-        per = 12 * d * d + 13 * d
-        return embed + l * per + 2 * d  # + final LayerNorm
+    def ffn(self) -> int:
+        return self.intermediate_size if self.intermediate_size is not None else ffn_dim(self.n_embd, self.ffn_mult)
 
-
-class CausalSelfAttention(nn.Module):
-    def __init__(self, cfg: EmberConfig) -> None:
-        super().__init__()
-        assert cfg.n_embd % cfg.n_head == 0
-        self.n_head = cfg.n_head
-        self.n_embd = cfg.n_embd
-        self.c_attn = nn.Linear(cfg.n_embd, 3 * cfg.n_embd, bias=cfg.bias)
-        self.c_proj = nn.Linear(cfg.n_embd, cfg.n_embd, bias=cfg.bias)
-        self.attn_drop = nn.Dropout(cfg.dropout)
-        self.resid_drop = nn.Dropout(cfg.dropout)
-        self.register_buffer(
-            "mask",
-            torch.tril(torch.ones(cfg.block_size, cfg.block_size)).view(
-                1, 1, cfg.block_size, cfg.block_size
-            ),
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, t, c = x.size()
-        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        hs = c // self.n_head
-        q = q.view(b, t, self.n_head, hs).transpose(1, 2)
-        k = k.view(b, t, self.n_head, hs).transpose(1, 2)
-        v = v.view(b, t, self.n_head, hs).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(hs))
-        att = att.masked_fill(self.mask[:, :, :t, :t] == 0, float("-inf"))
-        att = F.softmax(att, dim=-1)
-        att = self.attn_drop(att)
-        y = att @ v
-        y = y.transpose(1, 2).contiguous().view(b, t, c)
-        return self.resid_drop(self.c_proj(y))
-
-
-class MLP(nn.Module):
-    def __init__(self, cfg: EmberConfig) -> None:
-        super().__init__()
-        self.fc = nn.Linear(cfg.n_embd, 4 * cfg.n_embd, bias=cfg.bias)
-        self.proj = nn.Linear(4 * cfg.n_embd, cfg.n_embd, bias=cfg.bias)
-        self.drop = nn.Dropout(cfg.dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.drop(self.proj(F.gelu(self.fc(x))))
-
-
-class Block(nn.Module):
-    def __init__(self, cfg: EmberConfig) -> None:
-        super().__init__()
-        self.ln1 = nn.LayerNorm(cfg.n_embd)
-        self.attn = CausalSelfAttention(cfg)
-        self.ln2 = nn.LayerNorm(cfg.n_embd)
-        self.mlp = MLP(cfg)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.ln1(x))
-        x = x + self.mlp(self.ln2(x))
-        return x
-
-
-class EmberGPT(nn.Module):
-    def __init__(self, cfg: EmberConfig) -> None:
-        super().__init__()
-        self.cfg = cfg
-        self.wte = nn.Embedding(cfg.vocab_size, cfg.n_embd)
-        self.wpe = nn.Embedding(cfg.block_size, cfg.n_embd)
-        self.drop = nn.Dropout(cfg.dropout)
-        self.h = nn.ModuleList([Block(cfg) for _ in range(cfg.n_layer)])
-        self.ln_f = nn.LayerNorm(cfg.n_embd)
-        self.lm_head = nn.Linear(cfg.n_embd, cfg.vocab_size, bias=False)
-        # weight tying
-        self.wte.weight = self.lm_head.weight
-        self.apply(self._init_weights)
-        for pn, p in self.named_parameters():
-            if pn.endswith("c_proj.weight") or pn.endswith("proj.weight"):
-                nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * cfg.n_layer))
-
-    def _init_weights(self, module: nn.Module) -> None:
-        if isinstance(module, nn.Linear):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-            if module.bias is not None:
-                nn.init.zeros_(module.bias)
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
+    @property
     def n_params(self) -> int:
-        return sum(p.numel() for p in self.parameters())
+        return sum(int(np.prod(shape)) for _,shape in tensor_specs(self))
 
-    def forward(
-        self, idx: torch.Tensor, targets: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        b, t = idx.size()
-        if t > self.cfg.block_size:
-            raise ValueError(f"sequence length {t} > block size {self.cfg.block_size}")
-        pos = torch.arange(0, t, dtype=torch.long, device=idx.device)
-        x = self.drop(self.wte(idx) + self.wpe(pos))
-        for block in self.h:
-            x = block(x)
-        x = self.ln_f(x)
-        logits = self.lm_head(x)
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1
+    def validate(self) -> None:
+        for name in ("n_layer","n_head","n_embd","n_kv_head","block_size","vocab_size"):
+            if not isinstance(getattr(self,name),int): raise ValueError(f"{name} must be an integer")
+        if not (1<=self.n_layer<=64 and 1<=self.n_head<=128 and 1<=self.n_embd<=8192 and 1<=self.block_size<=8192):
+            raise ValueError("Training shape exceeds bounded architecture limits")
+        if self.intermediate_size is not None and (not isinstance(self.intermediate_size,int) or self.intermediate_size<1):
+            raise ValueError("intermediate_size must be a positive integer")
+        if not np.isfinite(self.ffn_mult) or self.ffn_mult<=0: raise ValueError("ffn_mult must be positive and finite")
+        if self.n_kv_head < 1 or self.n_head % self.n_kv_head:
+            raise ValueError("n_head must be a multiple of n_kv_head (GQA)")
+        if self.n_head < 1 or self.n_embd % self.n_head or self.head_dim % 2:
+            raise ValueError("head dimension must be a positive even divisor of n_embd")
+        if self.rope_scaling != "none" or not np.isfinite(self.rope_theta) or self.rope_theta <= 0:
+            raise ValueError("only unscaled RoPE with finite positive theta is supported")
+        if self.dropout != 0 or self.bias or self.training_dtype != "float32":
+            raise ValueError("supported training configuration: dropout=0, bias=False, dtype=float32")
+        if self.ffn < 1 or not np.isfinite(self.norm_eps) or self.norm_eps <= 0:
+            raise ValueError("intermediate size and RMSNorm epsilon must be positive")
+        if self.n_layer < 1:
+            raise ValueError("n_layer must be >= 1")
+        if self.n_head < 1:
+            raise ValueError("n_head must be >= 1")
+        if self.n_embd < 1:
+            raise ValueError("n_embd must be >= 1")
+        if self.block_size < 1:
+            raise ValueError("block_size must be >= 1")
+        if self.vocab_size>50000:raise ValueError("Ember training vocabulary maximum is 50,000 (not a limit for imported GGUF models)")
+        if self.vocab_size < 262:
+            raise ValueError("vocab_size must leave room for the 256 byte tokens and specials")
+        if self.n_embd % self.n_head != 0:
+            raise ValueError("n_embd must be divisible by n_head")
+
+    def to_dict(self) -> dict:
+        return {
+            "n_kv_head": self.n_kv_head,
+            "rope_theta": self.rope_theta,
+            "rope_scaling": self.rope_scaling,
+            "bias": self.bias,
+            "training_dtype": self.training_dtype,
+            "intermediate_size": self.intermediate_size,
+            "arch": ARCH,
+            "format": FORMAT_VERSION,
+            "spec": "v4",
+            "n_layer": int(self.n_layer),
+            "n_head": int(self.n_head),
+            "n_embd": int(self.n_embd),
+            "block_size": int(self.block_size),
+            "vocab_size": int(self.vocab_size),
+            "ffn_mult": float(self.ffn_mult),
+            "dropout": float(self.dropout),
+            "tie_embeddings": bool(self.tie_embeddings),
+            "norm_eps": float(self.norm_eps),
+            "activation": ACTIVATION,
+            "positional": POSITIONAL,
+            "dtype": "float32",
+            "n_params": int(self.n_params),
+            # camelCase mirrors for UI status parsing
+            "nLayer": int(self.n_layer),
+            "nHead": int(self.n_head),
+            "nEmbd": int(self.n_embd),
+            "blockSize": int(self.block_size),
+            "vocabSize": int(self.vocab_size),
+            "ffnMult": float(self.ffn_mult),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "ModelConfig":
+        if data.get("dtype", "float32") != "float32": raise ValueError("unsupported checkpoint dtype (expected float32)")
+        version = int(data.get("format", FORMAT_VERSION))
+        if version != FORMAT_VERSION:
+            raise ValueError(
+                "model format v%s is not readable by this build (expected v%d)"
+                % (data.get("format"), FORMAT_VERSION)
             )
-        return logits, loss
+        if str(data.get("arch", ARCH)) != ARCH:
+            raise ValueError("not an Ember model (arch=%r)" % (data.get("arch"),))
+        if str(data.get("activation", ACTIVATION)) != ACTIVATION:
+            raise ValueError("unsupported activation %r" % (data.get("activation"),))
+        if str(data.get("positional", POSITIONAL)) != POSITIONAL:
+            raise ValueError("unsupported positional encoding %r" % (data.get("positional"),))
+        cfg = cls(
+            n_kv_head=int(data.get("n_kv_head", 1)),
+            rope_theta=float(data.get("rope_theta", 500000.0)),
+            rope_scaling=str(data.get("rope_scaling", "none")),
+            bias=bool(data.get("bias", False)),
+            training_dtype=str(data.get("training_dtype", "float32")),
+            intermediate_size=data.get("intermediate_size"),
+            n_layer=int(data.get("n_layer") or data.get("nLayer")),
+            n_head=int(data.get("n_head") or data.get("nHead")),
+            n_embd=int(data.get("n_embd") or data.get("nEmbd")),
+            block_size=int(data.get("block_size") or data.get("blockSize")),
+            vocab_size=int(data.get("vocab_size") or data.get("vocabSize")),
+            ffn_mult=float(data.get("ffn_mult") or data.get("ffnMult") or 4.0),
+            dropout=float(data.get("dropout", 0.0)),
+            tie_embeddings=bool(data.get("tie_embeddings", True)),
+            norm_eps=float(data.get("norm_eps", NORM_EPS)),
+        )
+        cfg.validate()
+        return cfg
 
-    @torch.no_grad()
-    def generate(
-        self,
-        idx: torch.Tensor,
-        max_new_tokens: int,
-        temperature: float = 0.9,
-        top_k: int | None = 40,
-        top_p: float | None = 0.95,
-        eos_id: int | None = None,
-    ) -> torch.Tensor:
-        self.eval()
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -self.cfg.block_size :]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / max(temperature, 1e-6)
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("inf")
-            if top_p is not None and 0 < top_p < 1:
-                sorted_logits, sorted_idx = torch.sort(logits, descending=True)
-                probs = F.softmax(sorted_logits, dim=-1)
-                cum = torch.cumsum(probs, dim=-1)
-                mask = cum > top_p
-                mask[..., 1:] = mask[..., :-1].clone()
-                mask[..., 0] = False
-                sorted_logits = sorted_logits.masked_fill(mask, -float("inf"))
-                logits = torch.full_like(logits, -float("inf")).scatter(
-                    1, sorted_idx, sorted_logits
-                )
-            probs = F.softmax(logits, dim=-1)
-            next_id = torch.multinomial(probs, num_samples=1)
-            idx = torch.cat((idx, next_id), dim=1)
-            if eos_id is not None and int(next_id[0, 0]) == eos_id:
-                break
-        return idx
+
+# --------------------------------------------------------------------------
+# Weight initialisation
+# --------------------------------------------------------------------------
+
+
+def init_params(cfg: ModelConfig, seed: int | None = None) -> dict[str, np.ndarray]:
+    cfg.validate()
+    rng = np.random.default_rng(seed)
+    return {name: (np.ones(shape, dtype=np.float32) if "norm.weight" in name else
+                   rng.normal(0,0.02,shape).astype(np.float32)) for name,shape in tensor_specs(cfg)}
+
+
+def check_params(cfg: ModelConfig, params: dict[str, np.ndarray]) -> None:
+    expected = tensor_specs(cfg)
+    extra = set(params)-{name for name,_ in expected}
+    if extra: raise ValueError(f"unexpected model tensors: {sorted(extra)}")
+    missing = [n for n, _ in expected if n not in params]
+    if missing:
+        raise ValueError("model is missing tensors: %s" % ", ".join(missing[:6]))
+    for name, shape in expected:
+        got = params[name]
+        if not isinstance(got, np.ndarray):
+            raise ValueError("tensor %s is not an array" % name)
+        if list(got.shape) != shape:
+            raise ValueError(
+                "tensor %s has shape %s, expected %s" % (name, list(got.shape), shape)
+            )
+        if got.dtype != np.float32:
+            raise ValueError("tensor %s is %s, expected float32" % (name, got.dtype))
+        if not np.all(np.isfinite(got)):
+            raise ValueError("tensor %s contains non-finite values (NaN or Inf)" % name)
+
+
+# --------------------------------------------------------------------------
+# Model
+# --------------------------------------------------------------------------
+
+
+class Llama:
+    """Configurable bias-free RMSNorm/RoPE/GQA/SwiGLU causal decoder.
+
+    NumPy training keeps the existing embedded Android runtime supported.
+    There is deliberately no sampling method or custom production decoder.
+    """
+    def __init__(self, cfg, params=None, seed=None):
+        cfg.validate()
+        self.cfg = cfg
+        self.params = init_params(cfg,seed) if params is None else params
+        check_params(cfg,self.params)
+        self.grads = None
+        self._cache = None
+
+    def zero_grad(self): self.grads = None
+    def param_vector_length(self): return sum(p.size for p in self.params.values())
+
+    def forward(self, idx, doc_ids=None, targets=None, dropout=0.0, rng=None):
+        from .autodiff import Tensor, embedding, rmsnorm, rope, repeat_kv, softmax, silu
+        if dropout: raise ValueError("Llama trainer currently supports dropout=0 only")
+        c = self.cfg
+        idx = np.asarray(idx)
+        if idx.ndim != 2 or idx.shape[1] > c.block_size or idx.size == 0:
+            raise ValueError("expected nonempty [batch,time] within configured context")
+        if np.any(idx<0) or np.any(idx>=c.vocab_size): raise ValueError("token ID outside vocabulary")
+        b,t = idx.shape
+        p = {k:Tensor(v) for k,v in self.params.items()}
+        x = embedding(p["wte"],idx)
+        mask = np.triu(np.ones((t,t),dtype=bool),1)[None,None,:,:]
+        if doc_ids is not None:
+            mask = mask | (doc_ids[:,None,:,None] != doc_ids[:,None,None,:])
+        for i in range(c.n_layer):
+            k = f"blk.{i}."
+            h = rmsnorm(x,p[k+"attn_norm.weight"],c.norm_eps)
+            def project(name, heads):
+                return (h @ p[k+name+".weight"]).reshape(b,t,heads,c.head_dim).transpose(0,2,1,3)
+            q = rope(project("attn_q",c.n_head),c.rope_theta)
+            key = repeat_kv(rope(project("attn_k",c.n_kv_head),c.rope_theta),c.n_head//c.n_kv_head)
+            v = repeat_kv(project("attn_v",c.n_kv_head),c.n_head//c.n_kv_head)
+            scores = (q @ key.transpose(0,1,3,2)) * (c.head_dim**-0.5)
+            attn = softmax(scores + np.where(mask,-1e9,0).astype(np.float32)) @ v
+            x = x + attn.transpose(0,2,1,3).reshape(b,t,c.n_embd) @ p[k+"attn_output.weight"]
+            h = rmsnorm(x,p[k+"ffn_norm.weight"],c.norm_eps)
+            x = x + (silu(h @ p[k+"ffn_gate.weight"]) * (h @ p[k+"ffn_up.weight"])) @ p[k+"ffn_down.weight"]
+        x = rmsnorm(x,p["output_norm.weight"],c.norm_eps)
+        head = p["wte"] if c.tie_embeddings else p["lm_head.weight"]
+        logits = x @ head.transpose(1,0)
+        loss = None
+        self._cache = None
+        if targets is not None:
+            targets=np.asarray(targets).copy()
+            if targets.shape != idx.shape: raise ValueError("targets must match input shape")
+            if doc_ids is not None and t>1:
+                targets[:,:-1][doc_ids[:,:-1] != doc_ids[:,1:]] = -100
+            if np.any((targets != -100) & ((targets<0)|(targets>=c.vocab_size))):
+                raise ValueError("target ID outside vocabulary")
+            loss,grad = _cross_entropy_backward(logits.data,targets)
+            self._cache = (logits,p,grad.reshape(logits.data.shape))
+        return logits.data, loss
+
+    def backward(self):
+        if self._cache is None: raise RuntimeError("forward with targets required before backward")
+        logits,p,grad = self._cache
+        logits.backward(grad)
+        self.grads = {k:v.grad for k,v in p.items()}
+        self._cache = None
+        return self.grads
+
+    def forward_logits(self, idx): return self.forward(idx)[0]
+
+
+# Source API alias only; checkpoints are EMB4 Llama and never accept GPT weights.
+GPT = Llama
+
+
+def _cross_entropy_backward(logits, targets):
+    """logits [B,T,V], targets [B,T] with -100 = ignore.  Returns loss, dlogits."""
+    B, T, V = logits.shape
+    flat = logits.reshape(B * T, V)
+    tgt = targets.reshape(B * T)
+    valid = tgt >= 0
+    n_valid = int(valid.sum())
+    if n_valid == 0:
+        return 0.0, np.zeros_like(flat)
+    m = np.max(flat, axis=-1, keepdims=True)
+    # One vocabulary-sized working buffer, reused as the gradient. Never
+    # materialize full log-probabilities or a second probability matrix.
+    gradient = flat - m
+    np.exp(gradient, out=gradient)
+    sums = np.sum(gradient, axis=-1, keepdims=True)
+    idx = np.nonzero(valid)[0]
+    nll = np.log(sums[idx, 0]) - (flat[idx, tgt[idx]] - m[idx, 0])
+    loss = float(np.mean(nll))
+    gradient /= sums
+    gradient[idx, tgt[idx]] -= 1.0
+    gradient *= valid.astype(np.float32)[:, None] / float(n_valid)
+    return loss, gradient
+
+
+
+# --------------------------------------------------------------------------
+# Serialization: the .emb container
+# --------------------------------------------------------------------------
+#
+#   "EMB3" | u32 version | u32 header_len | header_json
+#          | u32 tensor_count
+#          | repeated: u32 name_len | name | u32 dtype | u32 ndim
+#          |            ndim * u32 shape | u32 pad | data
+#          | u32 crc32(everything before this field)
+#
+# Tensors are stored in spec.tensor_specs() order; data is little-endian
+# float32 and each payload starts on a 16-byte boundary.
+
+
+def save_model(path, cfg: ModelConfig, params: dict[str, np.ndarray], meta: dict | None = None) -> None:
+    cfg.validate()
+    check_params(cfg, params)
+    header = cfg.to_dict()
+    if meta:
+        header["meta"] = meta
+    header_bytes = json.dumps(header, ensure_ascii=True).encode("utf-8")
+
+    chunks = [FORMAT_MAGIC, struct.pack("<II", FORMAT_VERSION, len(header_bytes)), header_bytes]
+
+    specs = tensor_specs(cfg)
+    chunks.append(struct.pack("<I", len(specs)))
+    for name, shape in specs:
+        arr = np.ascontiguousarray(params[name], dtype=np.float32)
+        if arr.size != int(np.prod(shape)):
+            raise ValueError("tensor %s does not match its spec" % name)
+        name_bytes = name.encode("utf-8")
+        body = b"".join([struct.pack("<II", DTYPE_FLOAT32, len(shape))] +
+                        [struct.pack("<I", int(s)) for s in shape])
+        pad = (-(len(body)) % HEADER_ALIGN)
+        chunks.append(struct.pack("<I", len(name_bytes)) + name_bytes + body + b"\x00" * pad)
+        chunks.append(arr.tobytes(order="C"))
+
+    blob = b"".join(chunks)
+    blob += struct.pack("<I", zlib.crc32(blob) & 0xFFFFFFFF)
+    tmp = str(path) + ".tmp"
+    with open(tmp, "wb") as fh:
+        fh.write(blob)
+        fh.flush()
+        import os
+
+        os.fsync(fh.fileno())
+    import os
+
+    os.replace(tmp, path)
+
+
+def read_checkpoint_metadata(path):
+    """Read identity/config only for snapshot publication, not weight validation."""
+    with open(path,"rb") as f:
+        prefix=f.read(12)
+        if len(prefix)!=12 or prefix[:4]!=FORMAT_MAGIC:raise ValueError("legacy or truncated checkpoint")
+        version,size=struct.unpack("<II",prefix[4:])
+        if version!=FORMAT_VERSION or size>64*1024*1024:raise ValueError("unsupported checkpoint header")
+        header=json.loads(f.read(size))
+        ModelConfig.from_dict(header)
+        return header.get("meta",{})
+
+
+def load_model(path) -> tuple[ModelConfig, dict[str, np.ndarray], dict]:
+    with open(path, "rb") as fh:
+        blob = fh.read()
+    cfg, params, meta = load_model_bytes(blob)
+    return cfg, params, meta
+
+
+def load_model_bytes(blob: bytes) -> tuple[ModelConfig, dict[str, np.ndarray], dict]:
+    if len(blob) < 16:
+        raise ValueError("file is too small to be an Ember model")
+    if blob[:4] != FORMAT_MAGIC:
+        head = blob[:4]
+        if head[:1] in (b"{", b"["):
+            raise ValueError(
+                "this is a JSON brain from the old JavaScript engine, not an Ember v4 Llama model. "
+                "Old brains cannot be loaded by the new engine — recast a vessel and fire again."
+            )
+        raise ValueError("not an Ember v4 Llama model (bad magic %r)" % (head,))
+    if len(blob) < 12 + 4:
+        raise ValueError("truncated model file")
+    stored_crc = struct.unpack("<I", blob[-4:])[0]
+    if zlib.crc32(blob[:-4]) & 0xFFFFFFFF != stored_crc:
+        raise ValueError("model file is corrupt (checksum mismatch)")
+    version, header_len = struct.unpack("<II", blob[4:12])
+    if version != FORMAT_VERSION:
+        raise ValueError("model format v%d is not supported (expected v%d)" % (version, FORMAT_VERSION))
+    off = 12
+    header = json.loads(blob[off : off + header_len].decode("utf-8"))
+    off += header_len
+    cfg = ModelConfig.from_dict(header)
+    (count,) = struct.unpack("<I", blob[off : off + 4])
+    off += 4
+    params: dict[str, np.ndarray] = {}
+    if count != len(tensor_specs(cfg)): raise ValueError("checkpoint tensor count mismatch")
+    for _ in range(count):
+        if off + 4 > len(blob) - 4:
+            raise ValueError("truncated tensor table")
+        (name_len,) = struct.unpack("<I", blob[off : off + 4])
+        off += 4
+        name = blob[off : off + name_len].decode("utf-8")
+        off += name_len
+        dtype, ndim = struct.unpack("<II", blob[off : off + 8])
+        off += 8
+        shape = []
+        for _ in range(ndim):
+            (dim,) = struct.unpack("<I", blob[off : off + 4])
+            off += 4
+            shape.append(int(dim))
+        pad = (-(8 + 4 * ndim)) % HEADER_ALIGN
+        off += pad
+        n = int(np.prod(shape)) if shape else 0
+        nbytes = n * DTYPE_ITEMSIZE[dtype] if dtype == DTYPE_FLOAT32 else 0
+        if dtype != DTYPE_FLOAT32:
+            raise ValueError("tensor %s has unsupported dtype %d" % (name, dtype))
+        if off + nbytes > len(blob) - 4:
+            raise ValueError("truncated tensor data for %s" % name)
+        arr = np.frombuffer(blob, dtype="<f4", count=n, offset=off).reshape(shape).copy()
+        off += nbytes
+        if name in params: raise ValueError("duplicate checkpoint tensor")
+        params[name] = arr
+    if off != len(blob)-4: raise ValueError("unexpected trailing checkpoint data")
+    check_params(cfg, params)
+    return cfg, params, header.get("meta", {}) or {}
+
+
+# --------------------------------------------------------------------------
+# Brain (portable JSON container: config + tokenizer + base64 weights)
+# --------------------------------------------------------------------------
+
+BRAIN_KIND = "ember-brain"
+BRAIN_VERSION = 4
+
+
+def model_to_dict(cfg: ModelConfig, params: dict[str, np.ndarray]) -> dict:
+    import base64
+
+    out = {}
+    for name, _ in tensor_specs(cfg):
+        out[name] = base64.b64encode(np.ascontiguousarray(params[name], dtype="<f4").tobytes()).decode("ascii")
+    return out
+
+
+def model_from_dict(cfg: ModelConfig, blobs: dict) -> dict[str, np.ndarray]:
+    import base64
+
+    params = {}
+    for name, shape in tensor_specs(cfg):
+        if name not in blobs:
+            raise ValueError("brain is missing tensor %s" % name)
+        raw = base64.b64decode(blobs[name])
+        arr = np.frombuffer(raw, dtype="<f4").reshape(shape).copy()
+        if name in params: raise ValueError("duplicate checkpoint tensor")
+        params[name] = arr
+    check_params(cfg, params)
+    return params

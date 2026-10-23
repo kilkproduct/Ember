@@ -3,6 +3,11 @@ package com.kilkproduct.ember.backend
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.content.Intent
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
+import kotlinx.coroutines.ensureActive
 import com.kilkproduct.ember.BuildConfig
 import com.kilkproduct.ember.data.Preferences
 import com.kilkproduct.ember.service.EmberNotifications
@@ -63,6 +68,12 @@ object Ops {
     const val FORAGE_START = "forage.start"
     const val FORAGE_STOP = "forage.stop"
     const val FORAGE_LOAD = "forage.load"
+    const val GEN_CANCEL = "gen.cancel"
+    const val MODEL_IMPORT = "model.import"
+    const val MODEL_SELECT = "model.select"
+    const val MODEL_UNLOAD = "model.unload"
+    const val MODEL_VALIDATE = "model.validate"
+    const val MODEL_QUANTIZE = "model.quantize"
 
     fun teacher(id: String) = "teacher.$id"
     fun teacherAsk(id: String) = "teacher.ask.$id"
@@ -124,6 +135,21 @@ data class UiState(
     val notifyTraining: Boolean = true,
     val notifyTeacher: Boolean = true,
     val keepScreenOn: Boolean = true,
+    // --- llama.cpp inference state -------------------------------------
+    val inferenceBackend: String = "llama.cpp",
+    val inferenceAvailable: Boolean = false,
+    val inferenceDiagnostics: String = "",
+    val inferenceError: String? = null,
+    val loadedModel: ModelDescriptor? = null,
+    val libraryModels: List<LibraryModel> = emptyList(),
+    val modelSource: String = "trained",
+    val streamingText: String = "",
+    val streamingTokens: Int = 0,
+    val streamingRequestId: String? = null,
+    val modelBusy: Boolean = false,
+    val modelImportDetail: String = "",
+    val contextLength: Int = 512,
+    val quantization: String = "f32",
 ) {
     val trainingActive: Boolean
         get() = status.training.running || status.training.starting
@@ -133,6 +159,54 @@ data class UiState(
         get() = trainingActive || foragingActive
     val modelReady: Boolean
         get() = status.model.ready
+
+    /** A GGUF model llama.cpp can run: either the trained export or an imported file. */
+    val inferenceReady: Boolean
+        get() = inferenceAvailable && libraryModels.any { it.valid == true } || loadedModel?.loaded == true
+}
+
+/** One entry in the on-device GGUF model library (`files/ember_v3/models/library`). */
+data class LibraryModel(
+    val name: String,
+    val path: String,
+    val bytes: Long,
+    val mtime: Long,
+    val selected: Boolean,
+    val valid: Boolean?,
+    val error: String?,
+    val arch: String = "",
+    val contextLength: Int = 0,
+    val vocabSize: Int = 0,
+    val blockCount: Int = 0,
+    val embeddingLength: Int = 0,
+    val emberFormat: String = "",
+    val quantizedTensors: Int = 0,
+    val storage: String = "copied",
+    val uri: String = "",
+    val trained: Boolean = false,
+    val step: Long = 0,
+) {
+    companion object {
+        fun fromJson(json: JSONObject) = LibraryModel(
+            name = json.optString("name", "model"),
+            path = json.optString("path", ""),
+            bytes = json.optLong("bytes", 0),
+            mtime = json.optLong("mtime", 0),
+            selected = json.optBoolean("selected", false),
+            valid = if (json.isNull("valid")) null else json.optBoolean("valid"),
+            error = if (json.isNull("error")) null else json.optString("error"),
+            arch = json.optString("arch", ""),
+            contextLength = json.optInt("contextLength", 0),
+            vocabSize = json.optInt("vocabSize", 0),
+            blockCount = json.optInt("blockCount", 0),
+            embeddingLength = json.optInt("embeddingLength", 0),
+            emberFormat = json.optString("emberFormat", ""),
+            quantizedTensors = json.optInt("quantizedTensors", 0),
+            storage=json.optString("storage","copied"),uri=json.optString("uri",""),
+            trained = json.optBoolean("trained", false),
+            step = json.optLong("step", 0),
+        )
+    }
 }
 
 /**
@@ -215,6 +289,19 @@ class EmberRepository private constructor(
                 addNotice(NoticeLevel.ERROR, "Export failed", message)
             }
         }
+        scope.launch {
+            engine.generationTokens.collect { token ->
+                val current = _state.value.streamingRequestId
+                if (current != null && current == token.requestId) {
+                    _state.update {
+                        it.copy(
+                            streamingText = it.streamingText + token.piece,
+                            streamingTokens = token.generated,
+                        )
+                    }
+                }
+            }
+        }
     }
 
     private fun initialize() {
@@ -230,11 +317,17 @@ class EmberRepository private constructor(
                         backend = info.stringOr("backend", "—"),
                         runtime = info.stringOr("runtime"),
                         tfVersion = info.stringOr("tfVersion", "—"),
-                        webViewVersion = EmberEngine.currentWebViewVersion(),
+                        webViewVersion = EmberEngine.nativeRuntimeLabel(),
+                        inferenceBackend = info.stringOr("inferenceBackend", "llama.cpp"),
+                        inferenceAvailable = info.boolOr("nativeAvailable", false),
+                        inferenceDiagnostics = info.stringOr("nativeInfo"),
+                        inferenceError = info.stringOrNull("error") ?: info.stringOrNull("nativeError"),
                     )
                 }
+                restoreExternalModels()
                 val statusJson = engine.call("status", timeoutMs = 120_000)
                 applyStatus(EmberStatus.fromJson(statusJson))
+                applyInferenceStatus(statusJson)
                 loadTeachersNow()
                 loadGithubSettingsNow()
                 // The Fuel screen starts with a real first page instead of an
@@ -273,6 +366,12 @@ class EmberRepository private constructor(
 
     fun retryInitialization() {
         if (gate.isBusy(Ops.INIT)) return
+        val current = _state.value
+        if (current.workActive || current.generating || current.importBusy || current.modelBusy) {
+            addNotice(NoticeLevel.WARNING, "Finish or stop active work first",
+                "Restart is unavailable while training, importing or generating.")
+            return
+        }
         initialize()
     }
 
@@ -304,6 +403,7 @@ class EmberRepository private constructor(
             try {
                 val json = engine.call("status", timeoutMs = 120_000)
                 applyStatus(EmberStatus.fromJson(json))
+                applyInferenceStatus(json)
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
@@ -313,6 +413,32 @@ class EmberRepository private constructor(
             } finally {
                 gate.finish(Ops.STATUS)
             }
+        }
+    }
+
+    /** Reads the `inference` + `models` blocks the Python backend adds to status. */
+    private fun applyInferenceStatus(statusJson: JSONObject) {
+        val inference = statusJson.optJSONObject("inference")
+        val models = statusJson.optJSONArray("models")
+        val rows = if (models == null) {
+            emptyList()
+        } else {
+            (0 until models.length()).mapNotNull { models.optJSONObject(it) }.map(LibraryModel::fromJson)
+        }
+        val model = inference?.optJSONObject("model")
+        _state.update {
+            it.copy(
+                inferenceAvailable = inference?.optBoolean("available", it.inferenceAvailable) ?: it.inferenceAvailable,
+                inferenceError = if (inference != null && !inference.isNull("error")) {
+                    inference.optString("error")
+                } else {
+                    it.inferenceError
+                },
+                modelSource = inference?.optString("source", it.modelSource) ?: it.modelSource,
+                quantization = inference?.optString("quantization", it.quantization) ?: it.quantization,
+                loadedModel = model?.let(ModelDescriptor::fromJson) ?: it.loadedModel,
+                libraryModels = rows.ifEmpty { it.libraryModels },
+            )
         }
     }
 
@@ -336,11 +462,30 @@ class EmberRepository private constructor(
     private fun handleEvent(event: EngineEvent) {
         val data = event.data
         when (event.name) {
+            "model.importProgress" -> if(data!=null) {
+                _state.update {it.copy(modelImportDetail="Library copy ${Formats.bytes(data.longOr("bytesCopied"))} / ${Formats.bytes(data.longOr("totalBytes"))}")}
+            }
+            "inference.loaded" -> if (data != null) {
+                _state.update { it.copy(loadedModel = ModelDescriptor.fromJson(data), inferenceError = null) }
+            }
             "ready" -> {
-                if (data != null) applyStatus(EmberStatus.fromJson(data))
+                // The engine's `ready` event only carries `{backend: …}`. Parsing
+                // that as a status snapshot used to blank the model, corpus and
+                // checkpoint lists (and stop the foreground service). Accept a
+                // real snapshot when one is sent, otherwise refresh properly.
+                if (data != null && data.has("model")) {
+                    applyStatus(EmberStatus.fromJson(data))
+                } else {
+                    refreshStatus()
+                }
+            }
+            "fatal" -> {
+                val message = data?.stringOr("message") ?: "The local runtime failed to start."
+                _state.update { it.copy(backendError = message, initializing = false) }
+                addNotice(NoticeLevel.ERROR, "Engine failure", message)
             }
             "backend.error" -> {
-                val message = data?.stringOr("message", "The JavaScript engine reported an error.") ?: "The JavaScript engine reported an error."
+                val message = data?.stringOr("message", "The local runtime reported an error.") ?: "The local runtime reported an error."
                 _state.update { it.copy(backendError = message, initializing = false) }
             }
             "train.log" -> data?.let { appendLog(it, train = true) }
@@ -434,26 +579,7 @@ class EmberRepository private constructor(
             "import.progress" -> if (data != null) {
                 val token = data.stringOr("token")
                 if (token == currentImportToken) {
-                    _state.update {
-                        it.copy(
-                            importProgress = ImportProgress(
-                                token = token,
-                                processed = data.intOr("documents"),
-                                total = data.intOr("records").coerceAtLeast(data.intOr("documents")),
-                                percent = data.intOr("percent"),
-                                stage = data.stringOr("stage", "reading"),
-                                records = data.intOr("records"),
-                                merged = data.intOr("merged"),
-                                skipped = data.intOr("skipped"),
-                                failed = data.intOr("failed"),
-                                bytesRead = data.longOr("bytesRead"),
-                                sourceBytes = data.longOr("sourceBytes"),
-                                entries = data.intOr("entries"),
-                                message = data.stringOr("message"),
-                                elapsedMs = data.longOr("elapsedMs"),
-                            )
-                        )
-                    }
+                    _state.update { it.copy(importProgress = ImportProgress.fromJson(data)) }
                 }
             }
             "import.finished" -> if (data != null) {
@@ -1223,38 +1349,42 @@ class EmberRepository private constructor(
     // Vessel + training
     // ---------------------------------------------------------------------
 
+    private var lastResourceProtection=0L
+    fun protectResources(reason: String) {
+        val now=android.os.SystemClock.elapsedRealtime()
+        if(now-lastResourceProtection<10000)return
+        lastResourceProtection=now
+        val snapshot=state.value
+        if(snapshot.trainingActive)stopTraining()
+        if(snapshot.generating)cancelGeneration()
+        if(snapshot.foragingActive)stopForage()
+        if(snapshot.workActive || snapshot.generating)
+            addNotice(NoticeLevel.WARNING,"Work stopped for device safety","$reason. Training retains the last committed checkpoint; resume after the device recovers.")
+    }
+
+    private fun admitTrainingMemory(bytes: Long) {
+        val info=android.app.ActivityManager.MemoryInfo()
+        app.getSystemService(android.app.ActivityManager::class.java)?.getMemoryInfo(info) ?: return
+        if(info.lowMemory || bytes>info.availMem*6/10)
+            throw EmberBackendException("Training working-set estimate exceeds 60% of currently available memory. Reduce context/batch/width or free memory.")
+    }
+
     fun estimateVessel(config: ModelConfig) {
-        val seq = estimateSeq.incrementAndGet()
-        scope.launch {
-            try {
-                val json = engine.call(
-                    "vessel.estimate",
-                    JSONObject().put("config", config.toJson()),
-                    timeoutMs = 30_000,
-                )
-                if (seq == estimateSeq.get()) {
-                    _state.update { it.copy(vesselEstimate = VesselEstimate.fromJson(json), vesselEstimateError = null) }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                if (seq == estimateSeq.get()) {
-                    _state.update {
-                        it.copy(vesselEstimate = null, vesselEstimateError = t.message ?: "Invalid configuration")
-                    }
-                }
-            }
-        }
+        try {
+            val estimate=VesselEstimator.estimate(config)
+            _state.update {it.copy(vesselEstimate=estimate,vesselEstimateError=null)}
+        } catch(t: Throwable) {reportVesselConfigError(t.message ?: "Invalid dimensions")}
     }
 
     fun reportVesselConfigError(
-        message: String = "Layers 2–6 · heads 2–8 · width 32–256 · context 32–256 · vocab 500–6000. Heads must divide width.",
+        message: String = "Layers 1–12 · heads 1–16 · width 32–512 · context 32–2048 · vocab 262–50,000. Heads must divide width.",
     ) {
         _state.update { it.copy(vesselEstimate = null, vesselEstimateError = message) }
     }
 
     fun castVessel(config: ModelConfig, lr: Double, tokenizer: String) {
         launchOperation(Ops.CAST, "Casting failed") {
+            admitTrainingMemory(VesselEstimator.estimate(config).trainBytes)
             val params = JSONObject()
                 .put("config", config.toJson())
                 .put("lr", lr)
@@ -1288,6 +1418,7 @@ class EmberRepository private constructor(
             return
         }
         launchOperation(Ops.TRAIN_START, "Training could not start") {
+            state.value.status.model.config?.let {admitTrainingMemory(VesselEstimator.estimate(it,options.batch).trainBytes)}
             val params = JSONObject()
                 .put("steps", options.steps)
                 .put("batch", options.batch)
@@ -1300,6 +1431,12 @@ class EmberRepository private constructor(
                 .put("balance", options.balance)
                 .put("lessonLoss", options.lessonLoss)
                 .put("samplePrompt", options.samplePrompt)
+                .put("weightDecay",options.weightDecay)
+                .put("gradientAccumulation",options.gradientAccumulation)
+                .put("checkpointEvery",options.checkpointEvery)
+                .put("beta1",options.beta1).put("beta2",options.beta2).put("epsilon",options.epsilon)
+                .put("warmupSteps",options.warmupSteps ?: JSONObject.NULL).put("minLrFraction",options.minLrFraction)
+                .put("trainingSeed",options.trainingSeed).put("resumeSchedule",options.resumeSchedule)
             val result = engine.call("train.start", params, timeoutMs = 300_000)
             _state.update {
                 it.copy(
@@ -1365,10 +1502,20 @@ class EmberRepository private constructor(
     fun generate(options: GenerationOptions) {
         if (!gate.tryStart(Ops.GENERATE)) return
         markBusy(Ops.GENERATE, true)
-        _state.update { it.copy(generating = true, generationError = null) }
+        val requestId = java.util.UUID.randomUUID().toString()
+        _state.update {
+            it.copy(
+                generating = true,
+                generationError = null,
+                streamingText = "",
+                streamingTokens = 0,
+                streamingRequestId = requestId,
+            )
+        }
         scope.launch {
             try {
                 val params = JSONObject()
+                    .put("requestId", requestId)
                     .put("prompt", options.prompt)
                     .put("maxNew", options.maxNew)
                     .put("temperature", options.temperature)
@@ -1380,29 +1527,312 @@ class EmberRepository private constructor(
                     .put("task", options.task)
                     .put("lang", options.language)
                     .put("stopOnBoundary", options.stopOnBoundary)
-                val result = GenerationResult.fromJson(engine.call("gen.run", params, timeoutMs = 900_000))
+                    .put("nCtx", options.contextLength)
+                    .put("nThreads",options.threads)
+                    .put("nBatch",options.batchSize)
+                    .put("nUbatch",options.microBatch)
+                val json = engine.call("gen.run", params, timeoutMs = 900_000)
+                val result = GenerationResult.fromJson(json)
+                val streamed = _state.value.streamingText
                 _state.update {
                     it.copy(
-                        lastGeneration = result,
+                        // Prefer the streamed text when the native path produced it:
+                        // it is what the user watched appear token by token.
+                        lastGeneration = if (result.text.isBlank() && streamed.isNotBlank()) {
+                            result.copy(text = streamed)
+                        } else {
+                            result
+                        },
                         generating = false,
-                        generationError = result.warning,
+                        generationError = result.warning ?: json.stringOrNull("error"),
                     )
                 }
+                if (result.text.isBlank() && streamed.isBlank() && result.warning == null) {
+                    val stopped = json.stringOr("stoppedBy", "length")
+                    if (stopped == "cancelled") {
+                        addNotice(NoticeLevel.INFO, "Generation stopped", "Cancelled before any token was produced.")
+                    }
+                }
+                refreshStatus()
             } catch (e: CancellationException) {
                 throw e
             } catch (t: Throwable) {
+                // Loading a new model may have released the previous context.
+                // Never leave an old "loaded" descriptor after a native failure.
+                val actualModel=withContext(Dispatchers.IO) {engine.inference.modelDescriptor()}
                 _state.update {
                     it.copy(
+                        loadedModel = actualModel,
                         generating = false,
                         generationError = t.message ?: "Generation failed.",
                     )
                 }
                 addNotice(NoticeLevel.ERROR, "Generation failed", t.message ?: "Unknown error")
             } finally {
+                // Never leave the screen stuck in a streaming/loading state.
+                _state.update { it.copy(generating = false, streamingRequestId = null) }
                 markBusy(Ops.GENERATE, false)
                 gate.finish(Ops.GENERATE)
             }
         }
+    }
+
+    fun cancelGeneration() {
+        engine.cancelGeneration()
+    }
+
+    // ---------------------------------------------------------------------
+    // GGUF model library (llama.cpp)
+    // ---------------------------------------------------------------------
+
+    /** Refresh the on-device model library and the loaded-model descriptor. */
+    fun refreshModels() {
+        scope.launch {
+            try {
+                val json = engine.call("model.list", JSONObject(), timeoutMs = 60_000)
+                val rows = json.arrayOrEmpty("models").objects().map(LibraryModel::fromJson)
+                _state.update { it.copy(libraryModels = rows) }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                _state.update { it.copy(inferenceError = t.message ?: "Could not read the model library.") }
+            }
+        }
+    }
+
+    /**
+     * Import a user-selected GGUF file through the Storage Access Framework.
+     *
+     * The file is copied into app-private storage first (so it survives the URI
+     * permission expiring), then validated structurally before it is selected.
+     */
+    private val externalDescriptors = java.util.concurrent.ConcurrentHashMap<String,ParcelFileDescriptor>()
+    private var modelImportJob: Job? = null
+
+    private suspend fun registerExternal(uri: Uri, name: String, select: Boolean): JSONObject {
+        return withContext(Dispatchers.IO) {
+            if(externalDescriptors.size>=32 && !externalDescriptors.containsKey(uri.toString()))
+                throw EmberBackendException("32 external models are registered. Forget one to free a descriptor before adding another.")
+            var descriptor: ParcelFileDescriptor? = null
+            try {
+                descriptor=app.contentResolver.openFileDescriptor(uri,"r")
+                    ?: throw java.io.IOException("Provider could not open this model")
+                Os.lseek(descriptor.fileDescriptor,0,OsConstants.SEEK_CUR)
+                if (descriptor.statSize<=0) throw java.io.IOException("Provider does not expose a seekable file")
+                val result=engine.call("model.registerExternal",JSONObject()
+                    .put("path","/proc/self/fd/${descriptor.fd}").put("uri",uri.toString())
+                    .put("name",name).put("select",select),timeoutMs=300_000)
+                externalDescriptors.put(uri.toString(),descriptor)?.close()
+                descriptor=null
+                result
+            } finally { descriptor?.close() }
+        }
+    }
+
+    private suspend fun restoreExternalModels() {
+        val stored=app.getSharedPreferences("external_models",Context.MODE_PRIVATE).getString("models","[]") ?: "[]"
+        val entries=JSONArray(stored)
+        for (i in 0 until entries.length()) {
+            val entry=entries.getJSONObject(i)
+            try { registerExternal(Uri.parse(entry.getString("uri")),entry.getString("name"),false) }
+            catch (t: Throwable) {
+                if(t is CancellationException) throw t
+                addNotice(NoticeLevel.WARNING,"External model unavailable","${entry.optString("name")}: permission revoked or file moved. Select it again. ${t.message}")
+            }
+        }
+    }
+
+    fun forgetExternalModel(model: LibraryModel) {
+        launchOperation(Ops.MODEL_IMPORT,"Could not forget external model") {
+            if(model.selected)engine.call("model.unload")
+            engine.call("model.unregisterExternal",JSONObject().put("uri",model.uri))
+            externalDescriptors.remove(model.uri)?.close()
+            val prefs=app.getSharedPreferences("external_models",Context.MODE_PRIVATE)
+            val entries=JSONArray(prefs.getString("models","[]") ?: "[]");val kept=JSONArray()
+            for(i in 0 until entries.length())if(entries.getJSONObject(i).optString("uri")!=model.uri)kept.put(entries.getJSONObject(i))
+            prefs.edit().putString("models",kept.toString()).apply()
+            runCatching {app.contentResolver.releasePersistableUriPermission(Uri.parse(model.uri),Intent.FLAG_GRANT_READ_URI_PERMISSION)}
+            refreshStatus()
+            addNotice(NoticeLevel.INFO,"External registration forgotten","The original file was not deleted.")
+        }
+    }
+
+    fun cancelModelImport() {
+        modelImportJob?.cancel()
+        scope.launch {runCatching {engine.call("model.cancelImport",timeoutMs=30_000)}}
+    }
+
+    fun importModel(uri: Uri) {
+        if (!gate.tryStart(Ops.MODEL_IMPORT)) return
+        markBusy(Ops.MODEL_IMPORT, true)
+        _state.update { it.copy(modelBusy = true, inferenceError = null) }
+        modelImportJob = scope.launch {
+            var token: String? = null
+            try {
+                val name = withContext(Dispatchers.IO) { Files.displayName(app, uri) }
+                _state.update { it.copy(modelImportDetail="Inspecting model metadata…") }
+                val result = try {
+                    withContext(Dispatchers.IO) {
+                        app.contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    registerExternal(uri,name,true).also {
+                        val prefs=app.getSharedPreferences("external_models",Context.MODE_PRIVATE)
+                        val entries=JSONArray(prefs.getString("models","[]") ?: "[]")
+                        val saved=JSONArray()
+                        for (i in 0 until entries.length()) if(entries.getJSONObject(i).optString("uri")!=uri.toString()) saved.put(entries.getJSONObject(i))
+                        saved.put(JSONObject().put("uri",uri.toString()).put("name",name))
+                        prefs.edit().putString("models",saved.toString()).apply()
+                        _state.update { state -> state.copy(modelImportDetail="Registered external model · no model copy · native validation on first load") }
+                    }
+                } catch(t: Throwable) {
+                    if(t is CancellationException) throw t
+                    // Only non-seekable/provider failures may need copying; an
+                    // invalid GGUF must fail validation rather than copying gigabytes.
+                    if(t is EmberBackendException) throw t
+                    addNotice(NoticeLevel.INFO,"Copy required","This provider cannot retain direct seekable access. Copying into Ember storage.")
+                    val mime=withContext(Dispatchers.IO) { Files.mimeType(app,uri) }
+                    val staged=withContext(Dispatchers.IO) {
+                        val taskContext=coroutineContext
+                        engine.stageImport(uri,name,mime,maxBytes=16L*1024*1024*1024,
+                            checkCancelled={taskContext.ensureActive()},onProgress={bytes ->
+                                _state.update { it.copy(modelImportDetail="Copied ${Formats.bytes(bytes)} · validation pending") }
+                            })
+                    }
+                    token=staged.token
+                    engine.call("model.importGguf",JSONObject().put("token",staged.token).put("name",name).put("select",true),timeoutMs=600_000)
+                }
+                addNotice(
+                    NoticeLevel.SUCCESS,
+                    "Model imported",
+                    "${result.stringOr("name", name)} · ${result.stringOr("arch", "?")} · " +
+                        "ctx ${result.intOr("contextLength")} · vocab ${result.intOr("vocabSize")} · " +
+                        Formats.bytes(result.longOr("bytes")),
+                )
+                _state.update {
+                    it.copy(
+                        loadedModel = ModelDescriptor(
+                            loaded = false,
+                            path = result.stringOr("path"),
+                            arch = result.stringOr("arch"),
+                            name = result.stringOr("libraryName", result.stringOr("name")),
+                            emberFormat = result.stringOr("emberFormat"),
+                            vocabSize = result.intOr("vocabSize"),
+                            nCtxTrain = result.intOr("contextLength"),
+                            nCtx = result.intOr("contextLength"),
+                            modelBytes = result.longOr("bytes"),
+                        ),
+                        contextLength = result.intOr("contextLength").coerceIn(64,512),
+                        modelSource = "imported",
+                        inferenceError = null,
+                    )
+                }
+                refreshModels()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                val message = t.message ?: "That model could not be imported."
+                _state.update { it.copy(inferenceError = message) }
+                addNotice(NoticeLevel.ERROR, "Model import failed", message)
+            } finally {
+                token?.let { runCatching { engine.releaseImport(it) } }
+                _state.update { it.copy(modelBusy = false) }
+                markBusy(Ops.MODEL_IMPORT, false)
+                gate.finish(Ops.MODEL_IMPORT)
+            }
+        }
+    }
+
+    /** Select the trained `active.gguf` (path = null) or a library model. */
+    fun selectModel(path: String?) {
+        if (!gate.tryStart(Ops.MODEL_SELECT)) return
+        markBusy(Ops.MODEL_SELECT, true)
+        _state.update { it.copy(modelBusy = true) }
+        scope.launch {
+            try {
+                val params = JSONObject()
+                if (!path.isNullOrBlank()) params.put("path", path)
+                val result = engine.call("model.select", params, timeoutMs = 300_000)
+                _state.update {
+                    it.copy(
+                        modelSource = if (path.isNullOrBlank()) "trained" else "imported",
+                        contextLength = result.intOr("contextLength").takeIf { c -> c > 0 } ?: it.contextLength,
+                        libraryModels = result.arrayOrEmpty("models").objects().map(LibraryModel::fromJson)
+                            .ifEmpty { it.libraryModels },
+                        inferenceError = null,
+                    )
+                }
+                addNotice(
+                    NoticeLevel.INFO,
+                    if (path.isNullOrBlank()) "Using the model trained on this device" else "Model selected",
+                    result.stringOr("name", "").ifBlank { result.stringOr("selected", "") },
+                )
+            } catch (e: CancellationException) {
+                throw e
+            } catch (t: Throwable) {
+                _state.update { it.copy(inferenceError = t.message ?: "Could not select that model.") }
+                addNotice(NoticeLevel.ERROR, "Model selection failed", t.message ?: "Unknown error")
+            } finally {
+                _state.update { it.copy(modelBusy = false) }
+                markBusy(Ops.MODEL_SELECT, false)
+                gate.finish(Ops.MODEL_SELECT)
+            }
+        }
+    }
+
+    /** Release native model memory (the files stay on disk). */
+    fun unloadModel() {
+        launchOperation(Ops.MODEL_UNLOAD, "Could not unload the model") {
+            engine.call("model.unload", JSONObject(), timeoutMs = 60_000)
+            _state.update { it.copy(loadedModel = null) }
+            addNotice(NoticeLevel.INFO, "Model unloaded", "Native memory was released. The next generation reloads it.")
+        }
+    }
+
+    /** Structural validation of the model inference would use. */
+    fun validateModel() {
+        launchOperation(Ops.MODEL_VALIDATE, "Model validation failed") {
+            val result = engine.call("model.validate", JSONObject(), timeoutMs = 300_000)
+            if (result.boolOr("valid", false)) {
+                addNotice(
+                    NoticeLevel.SUCCESS,
+                    "Model is valid",
+                    "${result.stringOr("arch")} · ctx ${result.intOr("contextLength")} · " +
+                        "${result.intOr("blockCount")} blocks · vocab ${result.intOr("vocabSize")} · " +
+                        "${result.intOr("tensorCount")} tensors · ${Formats.bytes(result.longOr("bytes"))}",
+                )
+            } else {
+                val message = result.stringOr("error", "This file is not a usable GGUF model.")
+                _state.update { it.copy(inferenceError = message) }
+                addNotice(NoticeLevel.ERROR, "Model is not usable", message)
+            }
+        }
+    }
+
+    /** Re-export the trained model at another quantization (`f32` or `q8_0`). */
+    fun setQuantization(quantization: String) {
+        launchOperation(Ops.MODEL_QUANTIZE, "Could not change quantization") {
+            val result = engine.call(
+                "model.setQuantization",
+                JSONObject().put("quantization", quantization),
+                timeoutMs = 600_000,
+            )
+            _state.update { it.copy(quantization = result.stringOr("quantization", quantization)) }
+            applyInferenceStatus(JSONObject().put("inference", result.optJSONObject("inference")))
+            addNotice(
+                NoticeLevel.SUCCESS,
+                "Quantization set to ${quantization.uppercase()}",
+                if (quantization == "q8_0") {
+                    "Weight matrices are stored as 8-bit blocks; embeddings and biases stay float32."
+                } else {
+                    "All tensors are stored as float32 (largest file, no quantization loss)."
+                },
+            )
+            refreshModels()
+        }
+    }
+
+    fun setContextLength(nCtx: Int) {
+        _state.update { it.copy(contextLength = nCtx.coerceIn(64, 8192)) }
     }
 
     // ---------------------------------------------------------------------
@@ -1456,6 +1886,12 @@ class EmberRepository private constructor(
     private fun applyCheckpoints(array: JSONArray) {
         val rows = array.objects().map(CheckpointInfo::fromJson)
         _state.update { it.copy(status = it.status.copy(checkpoints = rows)) }
+    }
+
+    fun exportGguf() {
+        beginExport("GGUF model", "model.exportGguf", JSONObject()
+            .put("name", "ember-step-${_state.value.status.model.step}")
+            .put("quantization", _state.value.quantization))
     }
 
     fun exportBrain(name: String, includeCorpus: Boolean) {
@@ -1540,8 +1976,7 @@ class EmberRepository private constructor(
                 addNotice(
                     NoticeLevel.SUCCESS,
                     "File saved and verified",
-                    "${pending.filename} · ${Formats.bytes(pending.bytes)} written. " +
-                        "The same JSON imports again on any device (tested in tests/native-backend.test.mjs).",
+                    "${pending.filename} · ${Formats.bytes(pending.bytes)} written and verified on disk.",
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -1820,7 +2255,12 @@ class EmberRepository private constructor(
 
     fun clearFileCaches() {
         engine.clearCaches()
-        addNotice(NoticeLevel.INFO, "Temporary files cleared", "Any unfinished import or export was discarded.")
+        addNotice(
+            NoticeLevel.INFO,
+            "Temporary files cleared",
+            "Prepared exports were discarded. Staged imports stay on this device, so a paused import can still resume.",
+        )
+        refreshPendingImports()
     }
 
     fun dismissBackendError() {

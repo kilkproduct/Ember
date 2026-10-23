@@ -13,12 +13,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.tween
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -112,11 +107,11 @@ import com.kilkproduct.ember.ui.theme.EmberTheme
 import com.kilkproduct.ember.ui.theme.EmberWarning
 
 private enum class Tab(val label: String) {
-    FUEL("Fuel"),
+    FUEL("Data"),
     TEACHERS("Teachers"),
     VESSEL("Vessel"),
     FIRE("Fire"),
-    VOICE("Voice"),
+    VOICE("Chat"),
 }
 
 private enum class SheetId {
@@ -125,40 +120,25 @@ private enum class SheetId {
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var engineHost: FrameLayout
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        engineHost = FrameLayout(applicationContext)
-        EmberEngine.get(this).attachHost(engineHost)
+        EmberEngine.get(this).start()
         setContent {
             EmberTheme {
                 val vm: MainViewModel = viewModel()
-                EmberApp(vm = vm, engineHost = engineHost)
+                EmberApp(vm = vm)
             }
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        EmberEngine.get(this).attachHost(engineHost)
-    }
-
-    override fun onDestroy() {
-        // The engine WebView is app-scoped and reused after rotation, so it is
-        // deliberately not destroyed here. The transparent host frame below is
-        // the only thing tying it to this activity's view tree.
-        super.onDestroy()
     }
 }
 
 @Composable
-private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
+private fun EmberApp(vm: MainViewModel) {
     val ui by vm.repo.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
-    var tab by rememberSaveable { mutableStateOf(Tab.FUEL.name) }
+    var tab by rememberSaveable { mutableStateOf(Tab.VOICE.name) }
     var sheetName by rememberSaveable { mutableStateOf(SheetId.NONE.name) }
     val snackbarHost = remember { SnackbarHostState() }
     val sheet = SheetId.valueOf(sheetName)
@@ -195,12 +175,19 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
     }
 
     val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
+        ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
         if (uri != null) {
             vm.repo.finishExport(uri)
         } else {
             vm.repo.reportSaveCancelled()
+        }
+    }
+
+    // GGUF model import: any file, validated after the copy into app storage.
+    val modelLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            vm.repo.importModel(uri)
         }
     }
 
@@ -303,6 +290,21 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                     onRetryEngine = { vm.repo.retryInitialization() },
                     onStopTraining = { vm.repo.stopTraining() },
                 )
+                if(ui.workActive || ui.modelBusy) {
+                    Surface(color=MaterialTheme.colorScheme.surfaceVariant,modifier=Modifier.fillMaxWidth()) {
+                        Row(modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
+                            Text(when {
+                                ui.modelBusy -> ui.modelImportDetail.ifBlank { "Model operation in progress" }
+                                ui.importBusy -> "Import · ${ui.importProgress?.records ?: 0} records processed"
+                                ui.generating -> "Generating · ${ui.streamingTokens} tokens"
+                                ui.trainingActive -> "Fire · step ${ui.progress?.step ?: ui.status.model.step} · ${Formats.tps(ui.status.model.trainTps)} training"
+                                ui.foragingActive -> "Foraging · ${ui.status.foraging.documentsAccepted} saved · ${ui.status.foraging.activeRequests} requests active"
+                                else -> "Background work in progress"
+                            },style=MaterialTheme.typography.labelMedium,modifier=Modifier.weight(1f))
+                            TextButton(onClick={tab=when {ui.trainingActive->Tab.FIRE.name;ui.foragingActive||ui.importBusy->Tab.FUEL.name;else->Tab.VOICE.name}}) {Text("Open")}
+                        }
+                    }
+                }
                 val booting = !ui.initialized && ui.backendError == null
                 val tabState = rememberSaveableStateHolder()
                 // Phones stay edge-to-edge; on a tablet or a folded-open
@@ -312,11 +314,8 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     Box(modifier = Modifier.widthIn(max = 720.dp).fillMaxSize()) {
-                        AnimatedContent(
-                            targetState = Tab.valueOf(tab),
-                            transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(90)) },
-                            label = "tab",
-                        ) { current ->
+                        val current=Tab.valueOf(tab)
+                        androidx.compose.runtime.key(current) {
                             // Keeps each tab's scroll position and local field
                             // state when the user switches away and back.
                             tabState.SaveableStateProvider(current.name) {
@@ -339,7 +338,7 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                                         Tab.VESSEL -> VesselScreen(
                                             ui = ui,
                                             vm = vm,
-                                            onPickBrain = { importLauncher.launch(arrayOf("application/json")) },
+                                            onPickBrain = { importLauncher.launch(arrayOf("*/*")) },
                                             onOpenExport = { sheetName = SheetId.EXPORT.name },
                                             onOpenStatus = { sheetName = SheetId.STATUS.name },
                                             onOpenGithub = { sheetName = SheetId.GITHUB.name },
@@ -355,6 +354,7 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
                                             ui = ui,
                                             vm = vm,
                                             onOpenVessel = { tab = Tab.VESSEL.name },
+                                            onImportModel = { modelLauncher.launch(arrayOf("*/*")) },
                                         )
                                     }
                                 }
@@ -365,17 +365,7 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
             }
         }
 
-        // The JavaScript engine runs in a WebView that is part of this window
-        // so Chromium keeps its renderer alive, but it is not the UI: one
-        // transparent 1dp frame in the corner.
-        AndroidView(
-            factory = { engineHost },
-            modifier = Modifier
-                .size(1.dp)
-                .alpha(0.01f),
-        )
-
-    when (sheet) {
+        when (sheet) {
         SheetId.STATUS -> StatusSheet(
             ui = ui,
             onDismiss = { sheetName = SheetId.NONE.name },
@@ -496,10 +486,9 @@ private fun EngineFailureScreen(message: String, onRetry: () -> Unit, onOpenSett
             )
             Spacer(Modifier.height(10.dp))
             EmptyState(
-                title = "Why a WebView?",
-                body = "Ember's unchanged TensorFlow.js training engine needs a modern JavaScript " +
-                    "runtime with IndexedDB and typed arrays. Android System WebView provides it. " +
-                    "Update it from the Play Store, then try again.",
+                title = "Embedded Python + llama.cpp Runtime",
+                body = "Ember trains in embedded Python (NumPy) and generates text with llama.cpp " +
+                    "(libember_llama.so) from a local GGUF model — no network required.",
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 androidx.compose.material3.Button(onClick = onRetry) { Text("Restart engine") }
@@ -531,8 +520,8 @@ private fun EngineBootPane(onRetry: () -> Unit) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "TensorFlow.js and your saved corpus load from this device. " +
-                "The first start after an update can take a few seconds.",
+            text = "Embedded Python, the llama.cpp inference engine, and your saved corpus load on this " +
+                "device. The first start after an update can take a few seconds.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
@@ -563,9 +552,9 @@ private fun EmberHeader(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Ember",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = EmberOrange,
+                        text = "EMBER / local workstation",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
                         text = when {
@@ -696,7 +685,7 @@ private fun EmberBottomBar(selected: Tab, workActive: Boolean, onSelect: (Tab) -
         containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
     ) {
-        Tab.entries.forEach { tab ->
+        listOf(Tab.VOICE,Tab.FUEL,Tab.VESSEL,Tab.FIRE,Tab.TEACHERS).forEach { tab ->
             NavigationBarItem(
                 selected = selected == tab,
                 onClick = { if (selected != tab) onSelect(tab) },

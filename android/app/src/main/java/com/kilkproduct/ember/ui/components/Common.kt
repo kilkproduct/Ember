@@ -49,6 +49,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -87,7 +89,7 @@ fun EmberCard(
     accent: Color? = null,
     trailing: (@Composable () -> Unit)? = null,
     contentPadding: androidx.compose.foundation.layout.PaddingValues =
-        androidx.compose.foundation.layout.PaddingValues(16.dp),
+        androidx.compose.foundation.layout.PaddingValues(12.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
@@ -177,8 +179,7 @@ fun StatTile(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
                 color = valueColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                softWrap = true,
             )
             Text(
                 text = label,
@@ -201,12 +202,17 @@ fun StatTile(
 }
 
 @Composable
+private fun readableAccent(tone: Color): Color =
+    if(MaterialTheme.colorScheme.surface.luminance()>.5f)lerp(tone,Color.Black,.42f) else tone
+
+@Composable
 fun StatusPill(text: String, tone: Color, modifier: Modifier = Modifier) {
+    val accent=readableAccent(tone)
     Surface(
         modifier = modifier,
         shape = CircleShape,
-        color = tone.copy(alpha = 0.16f),
-        border = BorderStroke(1.dp, tone.copy(alpha = 0.4f)),
+        color = accent.copy(alpha = 0.16f),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.4f)),
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -216,13 +222,13 @@ fun StatusPill(text: String, tone: Color, modifier: Modifier = Modifier) {
                 modifier = Modifier
                     .size(6.dp)
                     .clip(CircleShape)
-                    .background(tone)
+                    .background(accent)
             )
             Spacer(Modifier.width(6.dp))
             Text(
                 text = text,
                 style = MaterialTheme.typography.labelSmall,
-                color = tone,
+                color = accent,
                 maxLines = 1,
             )
         }
@@ -536,14 +542,15 @@ fun InfoBanner(
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
 ) {
+    val accent=readableAccent(tone)
     Surface(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.small,
-        color = tone.copy(alpha = 0.12f),
-        border = BorderStroke(1.dp, tone.copy(alpha = 0.3f)),
+        color = accent.copy(alpha = 0.12f),
+        border = BorderStroke(1.dp, accent.copy(alpha = 0.3f)),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(12.dp)) {
-            Icon(Icons.Filled.Info, contentDescription = null, tint = tone, modifier = Modifier.size(16.dp))
+            Icon(Icons.Filled.Info, contentDescription = null, tint = accent, modifier = Modifier.size(16.dp))
             Spacer(Modifier.width(8.dp))
             Text(
                 text = message,
@@ -584,7 +591,8 @@ fun ProgressBlock(
             }
         }
         Spacer(Modifier.height(4.dp))
-        LinearProgressIndicator(
+        if(!fraction.isFinite())LinearProgressIndicator(modifier=Modifier.fillMaxWidth().height(6.dp))
+        else LinearProgressIndicator(
             progress = { fraction.coerceIn(0f, 1f) },
             modifier = Modifier
                 .fillMaxWidth()

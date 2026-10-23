@@ -521,3 +521,27 @@ input[type="range"] { padding: 0; accent-color: var(--ember); }
 }
 
 code { font-family: var(--mono); font-size: 0.85em; color: var(--copper); }
+
+/* --- v3 client: corpus rows, teacher cards, log emphasis ------------------ */
+.doc-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.2rem;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+.doc-row strong { flex: 0 1 auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doc-row .muted { flex: 1 1 auto; }
+.doc-row .btn-del { margin-left: auto; }
+.muted { color: var(--muted); font-size: 0.85rem; }
+.hint.error, .error { color: #ff8f6b; }
+.teacher-card { display: flex; flex-direction: column; gap: 0.4rem; }
+.teacher-card .teacher-draft pre { max-height: 220px; overflow: auto; }
+.sample pre {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: var(--mono);
+  font-size: 0.82rem;
+  color: var(--ink, #f3e9dc);
+}

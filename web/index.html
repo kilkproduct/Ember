@@ -140,7 +140,7 @@
             <button type="button" id="btn-add-text" class="btn">Add to corpus</button>
             <label class="btn ghost file">
               Load file
-              <input id="file-input" type="file" accept=".txt,.md,.json" hidden />
+              <input id="file-input" type="file" accept=".txt,.md,.json,.jsonl,.ndjson,.csv,.tsv,.xml,.html,.htm,text/*" hidden />
             </label>
             <button type="button" id="btn-alice" class="btn ghost">Load public-domain starter</button>
             <button type="button" id="btn-topic-pack" class="btn ghost">Load topic-training pack</button>
@@ -187,6 +187,9 @@
           </label>
           <label class="chk" style="margin-top:1.6rem"><input id="teach-notify" type="checkbox" checked /> Notify when a teacher is empty</label>
         </div>
+        <label>Topics for auto-teach <span class="opt">(comma-separated; blank lets teachers choose)</span>
+          <input id="teach-topics" type="text" placeholder="bicycle repair, sourdough, local history" />
+        </label>
         <div class="actions">
           <button type="button" id="btn-teach-run" class="btn ember">Auto-teach (use enabled teachers)</button>
           <button type="button" id="btn-teach-stop" class="btn ghost" disabled>Stop teachers</button>
@@ -243,7 +246,6 @@
           <label>Tokenizer
             <select id="v-tokenizer">
               <option value="byte-bpe" selected>Byte-level BPE — new brains (recommended)</option>
-              <option value="legacy">Legacy word pieces — original</option>
             </select>
           </label>
           <p class="est" id="param-est">Selected configuration estimate appears here.</p>
@@ -289,6 +291,7 @@
           </label>
           <label class="chk"><input id="gh-pull-start" type="checkbox" /> Pull on start if SHA changed</label>
           <div class="actions">
+            <button type="button" id="btn-gh-save" class="btn">Save settings</button>
             <button type="button" id="btn-gh-pull" class="btn">Pull brain</button>
             <button type="button" id="btn-gh-push" class="btn ghost">Push brain</button>
           </div>
@@ -441,6 +444,7 @@
           </div>
           <div class="actions">
             <button type="button" id="btn-gen" class="btn ember">Generate</button>
+            <button type="button" id="btn-gen-stop" class="btn ghost" disabled>Stop</button>
             <button id="btn-gen-reset" class="btn ghost" type="button">Reset defaults</button>
           </div>
           <div id="gen-out" class="output"></div>
@@ -469,9 +473,8 @@
   </main>
 
   <footer class="foot">
-    <p>Ember trains a tiny GPT entirely in your browser (WebGL/CPU) — including on a phone. Corpus and checkpoints stay in IndexedDB. No safety fine-tune. Foraging uses public APIs from this device. Keep the screen awake while firing. You are responsible for what you gather and how you use the weights.</p>
+    <p>Ember v3 trains a compact GPT in Python (NumPy) and generates text via native C++ inference (<code>libember_infer</code>). Corpus, checkpoints, and v3 models stay local on your device.</p>
   </footer>
-  <script src="vendor/tf.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

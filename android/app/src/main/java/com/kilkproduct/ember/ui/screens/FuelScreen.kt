@@ -144,7 +144,7 @@ fun FuelScreen(
                         enabled = !ui.foragingActive,
                     )
                     EmberTextField(
-                        label = "Wiki",
+                        label = "Extra topic",
                         value = form.wiki,
                         onValueChange = { value -> vm.updateFuel { it.copy(wiki = value) } },
                         placeholder = "Sourdough",
@@ -158,7 +158,7 @@ fun FuelScreen(
                     SourceChip("Wikipedia", form.wikiOn, !ui.foragingActive) {
                         vm.updateFuel { it.copy(wikiOn = it.wikiOn.not()) }
                     }
-                    SourceChip("Wikipedia family", form.wikiFamily, !ui.foragingActive) {
+                    SourceChip("Also Simple English", form.wikiFamily, !ui.foragingActive) {
                         vm.updateFuel { it.copy(wikiFamily = it.wikiFamily.not()) }
                     }
                     SourceChip("Reddit · Arctic", form.redditArctic, !ui.foragingActive) {
@@ -243,6 +243,9 @@ fun FuelScreen(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+                if(!ui.foragingActive && ui.status.foraging.pendingTopics>0)TextButton(onClick={vm.startForage(resume=true)},enabled=!busyStart) {
+                    Text("Resume ${ui.status.foraging.pendingTopics} saved topics")
+                }
             }
         }
 
@@ -261,6 +264,8 @@ fun FuelScreen(
                             modifier = Modifier.weight(1f),
                         )
                     }
+                    Text("${ui.status.foraging.activeRequests} active · ${ui.status.foraging.fetched} fetched · ${ui.status.foraging.cached} cached · ${ui.status.foraging.failed} failed",style=MaterialTheme.typography.bodySmall)
+                    Text("${ui.status.foraging.duplicates} duplicates · ${ui.status.foraging.rejected} rejected · ${Formats.bytes(ui.status.foraging.bytesDownloaded)} downloaded",style=MaterialTheme.typography.bodySmall)
                     if (ui.status.foraging.lastDocument.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
                         Text(

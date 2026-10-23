@@ -1,5 +1,6 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.32.0
-# The shipped app is web/ (trains in the browser) and needs nothing else.
-# torch is ONLY needed if you run the parallel PyTorch implementation in
-# ember/ directly:  pip install "torch>=2.0"
+numpy>=1.26.0
+zstandard>=0.22.0
+pytest>=8.0.0
+
+# Independent official GGUF reader used by conversion tests (not Android runtime).
+gguf==0.19.0

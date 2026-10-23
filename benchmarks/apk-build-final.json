@@ -1,0 +1,25 @@
+{
+  "baselineCommit": "412f8c1c6a26440d1d1043e429a534d7e1fc5751",
+  "sourceCommit": "3f72d50e5197b002498443f5e26e69e358e3a8d7",
+  "run": "https://github.com/kilkproduct/Ember/actions/runs/40014471211",
+  "artifactId": 12527679351,
+  "note": "Final application-source build. Debug/release assembly, JVM tests, instrumentation APK assembly (not execution), Python/native tests, HTTP smoke, baseline rebuild and package verification passed. NativeBytes sums top-level .so entries, excludes Python extensions in asset containers. No device execution.",
+  "baseline": {
+    "apkBytes": 95463165,
+    "nativeBytes": 53450984
+  },
+  "universal": {
+    "apkBytes": 87811553,
+    "nativeBytes": 45737192
+  },
+  "arm64-v8a": {
+    "apkBytes": 66446051,
+    "nativeBytes": 24467960
+  },
+  "x86_64": {
+    "apkBytes": 66609861,
+    "nativeBytes": 24654544
+  },
+  "artifactCompressedBytes": 155110633,
+  "conclusion": "success"
+}

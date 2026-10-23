@@ -5,73 +5,335 @@ on:
   push:
     branches: [main, "arena/**"]
     paths:
-      - "web/**"
+      - "ember/**"
+      - "native/**"
+      - "scripts/**"
+      - "third_party/**"
       - "android/**"
+      - "web/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "pyproject.toml"
       - ".github/workflows/apk.yml"
 
 jobs:
   apk:
     runs-on: ubuntu-latest
+    env:
+      OPENBLAS_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
-      # Reuse one debug signing key across runs. Without this, every CI
-      # build gets a fresh key and Android refuses to install the new APK
-      # over the old one — forcing an uninstall that wipes the on-device
-      # corpus/brains. A stable key makes updates keep app data.
+
       - name: Restore stable debug keystore
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
           key: android-debug-keystore
-      - uses: actions/setup-java@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
-      - name: Test and assemble debug APK
+
+      # AGP provisions the exact ndkVersion and cmake.version pinned in
+      # android/app/build.gradle. Don't call a runner-dependent bare sdkmanager:
+      # its PATH/location differs across Ubuntu runner images.
+      - name: Install Python backend dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+
+      - name: Fetch pinned llama.cpp source (SHA-256 verified)
+        run: scripts/fetch-llama-cpp.sh
+
+      - name: Build llama.cpp + Ember wrapper and test trained Llama GGUF inference
+        run: |
+          set -euo pipefail
+          cmake -S native/llama -B native/build-llama -DCMAKE_BUILD_TYPE=Release -DEMBER_BUILD_LLAMA_TESTS=ON
+          cmake --build native/build-llama -j 2
+          export EMBER_LLAMA_LIB="$PWD/native/build-llama/libember_llama.so"
+          python3 scripts/make_test_gguf.py /tmp/test-f32.gguf --steps 4
+          python3 scripts/make_test_gguf.py /tmp/test-q8.gguf --quantize q8_0 --steps 4
+          printf 'EMB3 legacy incompatible checkpoint' > /tmp/not-gguf.emb
+          ./native/build-llama/test_llama_engine /tmp/test-f32.gguf /tmp/not-gguf.emb
+          ./native/build-llama/test_llama_engine /tmp/test-q8.gguf /tmp/not-gguf.emb
+          echo "EMBER_LLAMA_LIB=$EMBER_LLAMA_LIB" >> "$GITHUB_ENV"
+
+      - name: Run Python backend & Python-to-C++ interoperability tests
+        run: |
+          set -o pipefail
+          # Covers ember/* unit + integration tests, Python↔C++ tokenizer/logit/
+          # decoding parity, the Android (Kotlin) JSON wire contract, and the
+          # browser client contract (module exports, element ids, RPC methods).
+          pytest -v tests/ 2>&1 | tee /tmp/pytest.log
+
+      - name: Report Python test failures
+        if: failure()
+        run: |
+          # pytest output is only in the (log-download-gated) job log, so mirror
+          # the failure region into annotations where it can actually be read.
+          python3 - <<'PY'
+          import os, pathlib
+
+          log = pathlib.Path("/tmp/pytest.log")
+          if not log.exists():
+              print("::notice::No pytest log was produced; the step failed before pytest ran.")
+              raise SystemExit(0)
+
+          lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+          start = next((i for i, l in enumerate(lines) if l.startswith("=== FAILURES") or l.startswith("==== FAILURES")), 0)
+          region = lines[start:] if start else lines[-80:]
+          # Keep the assertion lines and the short summary; drop pytest's code echo.
+          keep = [l for l in region if l.startswith(("E ", "FAILED", "ERROR", "___", "===")) or "assert" in l]
+          keep = keep or region[-60:]
+
+          chunk, chunks = [], []
+          for line in keep:
+              if sum(len(x) + 1 for x in chunk) + len(line) > 800:
+                  chunks.append("\n".join(chunk))
+                  chunk = []
+              chunk.append(line.strip()[:300])
+          if chunk:
+              chunks.append("\n".join(chunk))
+
+          for part in chunks[:12]:
+              safe = part.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error::PYTEST {safe}")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## Python test failures\n\n```\n" + "\n".join(keep[:200]) + "\n```\n")
+          print(f"reported {len(chunks[:12])} annotation chunk(s) from {len(keep)} failure line(s)")
+          PY
+
+      - name: End-to-end runtime smoke test through run.sh (HTTP → Python → native C++)
+        run: |
+          set -o pipefail
+          rm -rf /tmp/ember-e2e && mkdir -p /tmp/ember-e2e
+          python3 -m ember.server --host 127.0.0.1 --port 8123 --data-dir /tmp/ember-e2e > /tmp/ember-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, time, urllib.request
+
+          BASE = "http://127.0.0.1:8123/api/rpc"
+
+          def call(method, params=None, timeout=300):
+              req = urllib.request.Request(
+                  BASE,
+                  data=json.dumps({"method": method, "params": params or {}}).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  body = json.loads(resp.read().decode("utf-8"))
+              assert body.get("ok"), f"{method} failed: {body.get('error')}"
+              return body["result"]
+
+          deadline = time.time() + 90
+          while time.time() < deadline:
+              try:
+                  call("ping", timeout=5)
+                  break
+              except Exception:
+                  time.sleep(0.5)
+          else:
+              raise SystemExit("server never answered ping")
+
+          info = call("runtime.info")
+          print("runtime:", info["runtime"], "native:", info["nativeAvailable"])
+
+          added = call("corpus.addPack", {"pack": "starter"})
+          assert added["added"] >= 5, added
+
+          cast = call("vessel.cast", {
+              "config": {"nLayer": 2, "nHead": 2, "nEmbd": 48, "blockSize": 32, "vocabSize": 500},
+              "lr": 2e-3,
+          })
+          assert cast["model"]["ready"] is True
+          assert cast["model"]["config"]["nEmbd"] == 48, "nested Android config shape must be honoured"
+
+          run = call("train.sync", {"steps": 6, "batch": 2, "lr": 2e-3, "every": 0, "validateEvery": 3})
+          assert run["completedSteps"] == 6, run
+
+          gen = call("gen.run", {
+              "prompt": "Stars appear to move",
+              "maxNew": 16,
+              "temperature": 0.0,
+              "topK": 1,
+              "seed": "4242",
+              "stopOnBoundary": False,
+          })
+          assert gen["newTokens"] == 16, gen
+          assert isinstance(gen["text"], str)
+          print("generated:", repr(gen["text"][:60]), "| meta:", gen["meta"])
+
+          status = call("status")
+          assert status["model"]["step"] == 6
+          assert status["checkpoints"], "autosave checkpoint must exist after training"
+          print("SMOKE TEST OK")
+          PY
+          kill $SERVER_PID 2>/dev/null || true
+          trap - EXIT
+          echo "--- server log tail ---"
+          tail -5 /tmp/ember-server.log || true
+
+      - name: Test Android unit suite and assemble debug APK (NDK CMake + Chaquopy Python 3.13)
         working-directory: android
         run: |
           set -o pipefail
-          gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
-      # On failure, collect the compiler errors into one annotation so they are
-      # readable without downloading the full Gradle log.
+          gradle testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
+
+      - name: Report Android unit test failures
+        if: failure()
+        run: |
+          # A bare "There were failing tests" from Gradle hides which assertion
+          # broke, so surface the JUnit XML as annotations and in the job summary.
+          python3 - <<'PY'
+          import glob, os, xml.etree.ElementTree as ET
+
+          paths = sorted(glob.glob("android/app/build/test-results/testDebugUnitTest/*.xml"))
+          if not paths:
+              print("::notice::No JUnit XML was produced — the failure is a compilation or task error, see the Gradle log.")
+              raise SystemExit(0)
+
+          failures = []
+          for path in paths:
+              root = ET.parse(path).getroot()
+              for case in root.iter("testcase"):
+                  for kind in ("failure", "error"):
+                      for node in case.findall(kind):
+                          msg = " ".join((node.get("message") or "").split())[:500]
+                          body = " | ".join((node.text or "").split())[:700]
+                          failures.append(f'{case.get("classname")}#{case.get("name")}: {msg} :: {body}')
+
+          for line in failures:
+              safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error::UNIT TEST FAILED {safe}")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("## Android unit test failures\n\n")
+                  for line in failures:
+                      fh.write(f"- `{line}`\n")
+          print(f"reported {len(failures)} failing unit test(s)")
+          PY
+
       - name: Summarize build errors
         if: failure()
         run: |
           {
-            grep -E "^e: " /tmp/gradle.log | head -40
-            grep -A4 "^\* What went wrong" /tmp/gradle.log | head -12
+            grep -E "^e: |[Ee]rror: " /tmp/gradle.log | head -40
+            grep -A6 "^\* What went wrong" /tmp/gradle.log | head -18
           } > /tmp/errors.txt || true
-          if [ ! -s /tmp/errors.txt ]; then tail -25 /tmp/gradle.log > /tmp/errors.txt; fi
+          if [ ! -s /tmp/errors.txt ]; then tail -35 /tmp/gradle.log > /tmp/errors.txt; fi
           BODY=$(sed -e 's/%/%25/g' -e 's/\r//g' /tmp/errors.txt | awk '{printf "%s%%0A", $0}')
           echo "::error::$BODY"
-      - name: Name the APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk Ember-debug.apk
-      # Fail the build if the APK stops being the native app: the engine
-      # runtime must ship and the old web interface must not.
-      - name: Verify APK contents
+          python3 - <<'PYLINT'
+          import glob, pathlib, xml.etree.ElementTree as ET
+          for p in glob.glob("android/app/build/reports/*lint*.xml"):
+              for i in ET.parse(p).getroot().iter('issue'):
+                  if i.get('severity') in ('Error','Fatal'):
+                      message=f"LINT {i.get('id')}: {i.get('message')}"
+                      print("::error::"+message.replace('%','%25').replace('\n','%0A'))
+          for p in glob.glob("android/app/build/reports/*lint*.txt"):
+              text=pathlib.Path(p).read_text()[:10000]
+              print("::error::"+text.replace('%','%25').replace('\n','%0A'))
+          PYLINT
+
+      - name: Measure baseline APK from exact pre-overhaul commit
+        run: |
+          git fetch origin 412f8c1c6a26440d1d1043e429a534d7e1fc5751
+          mkdir -p /tmp/ember-baseline
+          git archive 412f8c1c6a26440d1d1043e429a534d7e1fc5751 | tar -x -C /tmp/ember-baseline
+          ln -s "$PWD/third_party/llama.cpp" /tmp/ember-baseline/third_party/llama.cpp
+          gradle -p /tmp/ember-baseline/android assembleDebug --no-daemon
+          python scripts/apk_metrics.py /tmp/ember-baseline/android/app/build/outputs/apk/debug/app-debug.apk > baseline-apk-metrics.json
+
+      - name: Name the APKs and record measured package sizes
+        run: |
+          cp android/app/build/outputs/apk/debug/app-universal-debug.apk Ember-debug.apk
+          cp android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk Ember-arm64-v8a-debug.apk
+          cp android/app/build/outputs/apk/debug/app-x86_64-debug.apk Ember-x86_64-debug.apk
+          python scripts/apk_metrics.py Ember-debug.apk Ember-arm64-v8a-debug.apk Ember-x86_64-debug.apk > apk-metrics.json
+          python - <<'PYMETRICS'
+          import json
+          for r in json.load(open('baseline-apk-metrics.json')) + json.load(open('apk-metrics.json')):
+              print(f"::notice::{r['apk']}: APK {r['bytes']} bytes, native libraries {r['nativeBytes']} bytes")
+          PYMETRICS
+
+      - name: Verify APK native libraries, Python runtime, and packaged assets
         run: |
           unzip -l Ember-debug.apk > /tmp/apk-contents.txt
           problems=""
-          for f in assets/www/native-backend.html assets/www/native-backend.js \
-                   assets/www/engine.js assets/www/vendor/tf.min.js classes.dex; do
+
+          # 1. Verify compiled C++ NDK inference engine + Chaquopy CPython runtime across ABIs
+          for f in \
+            lib/arm64-v8a/libember_llama.so \
+            lib/x86_64/libember_llama.so \
+            lib/arm64-v8a/libpython3.13.so \
+            lib/x86_64/libpython3.13.so \
+            lib/arm64-v8a/libchaquopy_java.so \
+            lib/x86_64/libchaquopy_java.so \
+            assets/chaquopy/app.imy \
+            classes.dex; do
             grep -q " $f$" /tmp/apk-contents.txt || problems="$problems missing:$f"
           done
-          for f in assets/www/index.html assets/www/app.js assets/www/styles.css; do
-            grep -q " $f$" /tmp/apk-contents.txt && problems="$problems packaged:$f"
+
+          # 2. Verify our real Python backend package (ember/*) is compiled inside assets/chaquopy/app.imy
+          unzip -p Ember-debug.apk assets/chaquopy/app.imy > /tmp/app.imy
+          unzip -l /tmp/app.imy > /tmp/app-imy.txt
+          for pyc in ember/backend ember/model ember/trainer ember/tokenizer ember/corpus ember/ingest ember/dataset ember/optim ember/inference ember/gguf_export ember/gpt2_tokenizer ember/spec; do
+            grep -q "$pyc" /tmp/app-imy.txt || problems="$problems missing_py:$pyc"
           done
-          assets=$(grep -c " assets/www/" /tmp/apk-contents.txt || true)
+
+          # 3. Verify packaged Python requirements archives (numpy + zstandard) exist for target ABIs
+          grep -q "assets/chaquopy/requirements-arm64-v8a" /tmp/apk-contents.txt || problems="$problems missing:requirements-arm64-v8a"
+          grep -q "assets/chaquopy/requirements-x86_64" /tmp/apk-contents.txt || problems="$problems missing:requirements-x86_64"
+
+          # 3. Verify obsolete JS ML backend files are NOT inside the APK
+          for f in \
+            lib/arm64-v8a/libember_infer.so \
+            lib/x86_64/libember_infer.so \
+            assets/www/vendor/tf.min.js \
+            assets/www/engine.js \
+            assets/www/native-backend.js \
+            assets/www/native-backend.html; do
+            grep -q " $f$" /tmp/apk-contents.txt && problems="$problems obsolete_packaged:$f"
+          done
+
           size=$(du -h Ember-debug.apk | cut -f1)
-          echo "::notice::APK $size · $assets engine assets · $([ -z "$problems" ] && echo ok || echo "$problems")"
+          so_count=$(grep -c " lib/.*\.so$" /tmp/apk-contents.txt || true)
+          echo "::notice::APK $size · $so_count native .so libraries · $([ -z "$problems" ] && echo verified-ok || echo "$problems")"
           if [ -n "$problems" ]; then
-            echo "::error::APK contents are wrong:$problems"
+            echo "--- APK entries matching lib/ or assets/ ---"
+            grep -E " (lib|assets)/" /tmp/apk-contents.txt || true
+            echo "::error::APK contents verification failed:$problems"
             exit 1
           fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: Ember-debug
-          path: Ember-debug.apk
+          path: |
+            Ember-debug.apk
+            Ember-arm64-v8a-debug.apk
+            Ember-x86_64-debug.apk
+            apk-metrics.json
+            baseline-apk-metrics.json
           if-no-files-found: error
           retention-days: 30

@@ -1,0 +1,17 @@
+{
+  "project": "llama.cpp",
+  "repository": "https://github.com/ggml-org/llama.cpp",
+  "tag": "b11836",
+  "commit": "f5027fb21307eb264aed483242603d68c87b0fe3",
+  "tarball_url": "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/b11836",
+  "sha256": "5fdae446417f5f6371b9cab097fa2404e1c0de632b00eb76213889b18153f64b",
+  "license": "MIT",
+  "license_file": "licenses/LICENSE-llama.cpp",
+  "destination": "third_party/llama.cpp",
+  "selected_because": [
+    "b11836 is the newest upstream release tag at the time of the migration (2026-10-23), so it is a published snapshot rather than an arbitrary master commit.",
+    "Its llama architecture (src/models/llama.cpp) supports the EMB4 bias-free RMSNorm, adjacent-pair RoPE, GQA, SwiGLU decoder and tied or untied output; tokenizer metadata independently supports Ember byte-level BPE.",
+    "Its Android build path is documented (docs/android.md) with the exact CMake options used by native/llama/CMakeLists.txt: GGML_NATIVE=OFF, GGML_OPENMP=OFF, GGML_LLAMAFILE=OFF, LLAMA_OPENSSL=OFF.",
+    "The C API used by native/llama (llama_model_load_from_file, llama_init_from_model, llama_batch_get_one, llama_decode, llama_sampler_chain_*, llama_tokenize/llama_detokenize, llama_memory_clear) is present and stable in this revision (include/llama.h, LLAMA_SESSION_VERSION 11)."
+  ]
+}

@@ -68,11 +68,7 @@ fun FireScreen(
     val until = progress?.until ?: training.until
     val step = progress?.step ?: ui.status.model.step
     val fraction = if (until > fromStep) ((step - fromStep).toFloat() / (until - fromStep)).coerceIn(0f, 1f) else 0f
-    val remaining = if (progress != null && progress.ms > 0) {
-        ((until - progress.step).coerceAtLeast(0) * progress.ms / 1000.0).toLong()
-    } else {
-        0L
-    }
+    val remaining = progress?.etaSeconds?.toLong() ?: 0L
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -201,6 +197,22 @@ fun FireScreen(
                     enabled = !running,
                 )
                 Spacer(Modifier.height(12.dp))
+                NumberStepper(label="Gradient accumulation",value=form.accumulation,onValueChange={v->vm.updateTrain{it.copy(accumulation=v)}},
+                    step=1.0,min=1.0,max=64.0,enabled=!running)
+                NumberStepper(label="Weight decay",value=form.weightDecay,onValueChange={v->vm.updateTrain{it.copy(weightDecay=v)}},
+                    step=.01,min=0.0,max=1.0,decimals=3,enabled=!running)
+                NumberStepper(label="Checkpoint interval (steps; 0 = end only)",value=form.checkpointEvery,onValueChange={v->vm.updateTrain{it.copy(checkpointEvery=v)}},
+                    step=25.0,min=0.0,max=5000.0,enabled=!running)
+                NumberStepper(label="AdamW beta 1",value=form.beta1,onValueChange={v->vm.updateTrain{it.copy(beta1=v)}},step=.01,min=0.0,max=.999,decimals=3,enabled=!running)
+                NumberStepper(label="AdamW beta 2",value=form.beta2,onValueChange={v->vm.updateTrain{it.copy(beta2=v)}},step=.001,min=0.0,max=.9999,decimals=4,enabled=!running)
+                EmberTextField(label="AdamW epsilon",value=form.epsilon,onValueChange={v->vm.updateTrain{it.copy(epsilon=v)}},enabled=!running)
+                EmberTextField(label="Warmup steps (blank = automatic)",value=form.warmupSteps,onValueChange={v->vm.updateTrain{it.copy(warmupSteps=v)}},enabled=!running)
+                NumberStepper(label="Final learning-rate fraction",value=form.minLrFraction,onValueChange={v->vm.updateTrain{it.copy(minLrFraction=v)}},step=.05,min=0.0,max=1.0,decimals=2,enabled=!running)
+                EmberTextField(label="Batch sampling seed",value=form.trainingSeed,onValueChange={v->vm.updateTrain{it.copy(trainingSeed=v)}},enabled=!running)
+                Row(verticalAlignment=Alignment.CenterVertically) {
+                    androidx.compose.material3.Switch(checked=form.resumeSchedule,onCheckedChange={v->vm.updateTrain{it.copy(resumeSchedule=v)}},enabled=!running)
+                    Text("Resume saved LR schedule and batch cursor",style=MaterialTheme.typography.bodySmall)
+                }
                 EmberTextField(
                     label = "Sample prompt",
                     value = form.samplePrompt,
@@ -263,7 +275,7 @@ fun FireScreen(
                     fraction = if (running) fraction else if (ui.status.training.outcome != null) 1f else 0f,
                     label = if (until > 0) {
                         "${Formats.integer(step)} / ${Formats.integer(until)} steps" +
-                            if (remaining > 0) " · ~${remaining / 60}m ${remaining % 60}s left" else ""
+                            if (remaining > 0) " · roughly ${kotlin.math.max(1,(remaining*.7/60).toInt())}–${kotlin.math.max(1,kotlin.math.ceil(remaining*1.4/60).toInt())} min left" else " · calculating ETA"
                     } else {
                         "No active run"
                     },

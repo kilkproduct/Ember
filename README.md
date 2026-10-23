@@ -1,104 +1,89 @@
-# Ember — Small Language Foundry
+# Ember — local training, llama.cpp inference
 
-A **small language model you train yourself**, including **on a phone**. Ember is a tiny GPT that runs entirely on your device (TensorFlow.js / WebGL). The Android app is a native Kotlin + Jetpack Compose interface; the unchanged JavaScript engine runs behind it in an invisible runtime WebView. You forage public web text, dump it in the kiln, cast a vessel, and fire it by hand. Weights stay in IndexedDB on that device.
+> **0.7 engineering overhaul:** [architecture, compatibility, measurements and limits](docs/overhaul.md) · [reproducible Android verification](docs/device-verification.md).
 
-## What it is
+Ember is a native Kotlin/Jetpack Compose Android language foundry. Python/NumPy
+(embedded with Chaquopy) trains small Llama 3–style models from a persistent SQLite
+corpus. **Every production generation uses llama.cpp** from local GGUF weights.
+There is no cloud inference, Python generator fallback, or server process in the APK.
 
-- **Vessel** — a compact decoder-only transformer in TensorFlow.js, sized for a phone (~0.2M params default) up to a few million on desktop. Header shows **train tok/s** and **gen tok/s**. New vessels learn a **byte-level BPE tokenizer** from your own corpus (the original word-piece tokenizer remains available, and brains already trained with it keep it forever — see `docs/brain-format.md`).
-- **Fuel** — an auto-forager that walks public APIs from *your* browser: the Wikipedia family (Simple/EN wiki, Wikiquote, Wikisource, Wikivoyage, Wikibooks, Wikinews, Wiktionary), Reddit archives (Arctic Shift + PullPush), Stack Exchange, Gutenberg, Open Library, Hacker News. Autopilot keeps discovering related topics and subreddits. Nothing is topic-filtered. Incoming text is cleaned (script/style junk and HTML entities stripped) and exact duplicates are merged automatically; the Corpus card reports corpus health (duplicates, tiny docs, size spread).
-- **Uncensored** — no refusal layer, no banned-topic list, no safety fine-tune. The model completes whatever it absorbed. You own the weights and the consequences.
-- **Fire** — you choose every step, batch, and learning rate. Loss draws itself live alongside **held-out validation loss** (teal) from documents the model never trains on, so you can see memorization vs. actual learning. Gradients are checked before every update (a NaN step is refused, never baked in) with optional gradient clipping; progress reports tokens actually trained, not just corpus size.
-- **Voice** — prompt it, then **teach by hand**: write the answer you wanted. Lessons are stored with extra weight so the next firing leans toward them. Sampling presets, a repetition penalty, and an optional **seed** (same seed = same output) make results reproducible.
-- **Memory** — save and load checkpoints; export/import whole brains as `.json` (v1/v2/v3 supported, schema in `docs/brain-format.md`).
+## On Android
 
-This is not a chat product with a hidden API. The weights are yours. A 1M-parameter model trained for a few minutes will sound like a dream of its fuel — that is the point.
+1. Install the `Ember-debug.apk` from **Actions → Build APK → Ember-debug**.
+2. Either add text in Data, **Cast** in Vessel, and **Fire** to train; or use
+   **Chat → Model library → Import GGUF** to register a seekable external model without copying it (or use a cancellable private copy when required).
+3. In Chat select the model, choose the context/sampling settings, and Generate.
+   Output streams as tokens arrive. **Stop** retains partial output.
+4. **Unload** releases native model memory; files remain on disk. The next Generate
+   reloads the selected file. Selection survives restart.
+5. **Export GGUF** opens Android's file picker. F32 is lossless; Q8_0 quantizes the
+   seven projection matrices per transformer block. Checkpoints/corpus exports remain
+   separate: a GGUF file is for inference, not a backup of your training corpus.
 
-## Run
+This build admits dense **`llama`, `qwen2` (Qwen2/Qwen2.5) and `qwen3` GGUF**.
+Imported tokenizers/control IDs/templates remain model-native; the own-training
+50,000-vocabulary limit never resizes imported vocabularies. Dense Qwen F32/Q8_0
+random graph fixtures are tested, **not official pretrained checkpoints or every
+Qwen variant/quantization**. MoE/VL/hybrid/embedding variants and arbitrary Jinja
+templates are not claimed. Read the [compatibility matrix](docs/overhaul.md).
+A `.gguf` extension or structural registration alone is not native readiness.
+Own training still uses Ember's classic GPT-2 byte BPE and unscaled Llama-style
+RoPE; that is a small trainable decoder, not Meta pretrained weights.
 
-### Android APK (no PC, no website)
+After installation and local model setup, generation requires no internet.
+INTERNET permission remains for **optional**, explicit foraging, teachers and
+GitHub sync; these are not used as a fallback for local inference.
 
-The app is a **self-contained native APK** (Kotlin + Jetpack Compose). It is not hosted. GitHub only *compiles* it; you install the file on the phone.
+## Reproducible native dependency
 
-1. Phone browser, logged into GitHub → this repo → **Actions** → **Build APK** → **Run workflow**.
-2. Wait until the green check appears.
-3. Open that run → **Artifacts** → **Ember-debug** → download the zip → unzip → tap `Ember-debug.apk`.
-4. Allow **Install unknown apps** for Chrome/Files if Android asks.
+Upstream: <https://github.com/ggml-org/llama.cpp>, MIT.
+Pinned release **b11836**, commit `f5027fb21307eb264aed483242603d68c87b0fe3`.
+[`third_party/llama.cpp.version`](third_party/llama.cpp.version) records the source
+URL, SHA-256 and selection rationale. No prebuilt native binaries are downloaded.
 
-The screens are native Compose. The unchanged TensorFlow.js engine runs in an
-invisible, app-scoped WebView on the same asset origin as the old APK, so an
-update keeps the existing corpus and checkpoints. `index.html`/`app.js` are not
-packaged in the APK; the browser build below still ships from `web/` via Pages.
-Architecture and limits: [`docs/native-android.md`](docs/native-android.md).
-
-### No PC (phone only, without APK)
-
-You do **not** need a computer. Training already happens in the browser.
-
-**Easiest:** open a hosted copy of Ember on the phone (GitHub Pages after this repo is published, or any link that serves the `web/` folder). Then **Add to Home Screen**.
-
-**Android, fully offline host:** install [Termux](https://termux.dev) from F-Droid, then:
-
-```bash
-pkg update && pkg install git python
-git clone https://github.com/kilkproduct/AI.git
-cd AI
-git checkout arena/d6275a66-ai
-cd web
-python -m http.server 8000 --bind 0.0.0.0
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt cmake
+scripts/build-native.sh                 # fetch/checksum/build pinned source
+export EMBER_LLAMA_LIB="$PWD/native/build-llama/libember_llama.so"
+pytest -v tests/
+python scripts/make_test_gguf.py /tmp/ember-test.gguf --steps 4
+native/build-llama/test_llama_engine /tmp/ember-test.gguf
+./run.sh                               # optional desktop/web companion, port 8000
 ```
 
-Do **not** `pip install -r requirements.txt` on Termux — FastAPI/Pydantic try to compile Rust and fail on Android. The app is static files; Python’s built-in server is enough.
+The fetch step needs internet **at build time**, not during inference. Source and
+build products are ignored by Git. Android needs Java 17, Gradle 8.7, NDK
+26.1.10909125, CMake 3.22.1, SDK 34; CI installs the tools and fetches the pinned
+source before `gradle testDebugUnitTest assembleDebug` in `android/`.
+ABIs: `arm64-v8a` and `x86_64`; minimum Android API 24.
 
-Open `http://127.0.0.1:8000` in Chrome on that same phone.
+## Train an existing corpus from the command line
 
-**iPhone:** Safari cannot run a Python server. Use a hosted URL (GitHub Pages, or a friend/cloud link). Add to Home Screen. Keep the screen awake while firing.
-
-### With a computer
-
-```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python -m uvicorn ember.server:app --host 0.0.0.0 --port 8000
+```sh
+python -m ember.train --data ./data --preset phone --steps 200 --seed 42 \
+  --max-train-tokens 100000 --tokenizer-chars 200000 \
+  --export model.gguf --quantization q8_0
 ```
 
-Open the printed URL. Typical loop:
+The same training pipeline runs in the APK. The command-line environment is
+optional, not required for normal Android use. Preparation limits are explicit
+and do not delete documents. See the migration guide for JSONL import and resume.
 
-1. **Fuel** — seed topics, optionally list subreddits, start foraging (autopilot is on by default). It will crawl Wikipedia sisters, Reddit, Stack Exchange, and the rest until you stop. Or paste text / load the Alice starter.
-2. **Vessel** — leave **Phone** selected on a mobile, then *Cast vessel from corpus*.
-3. **Fire** — 150 steps, batch 2. Watch **train tok/s** in the header. Keep the screen awake.
-4. **Voice** — prompt; **gen tok/s** prints above the completion. Teach a lesson and fire again.
+## Architecture and format boundary
 
-Add the site to your phone’s home screen for a standalone app. Everything (corpus, weights) stays on that phone.
+See [migration and audit](docs/llama-cpp-migration.md) for the tensor mapping,
+precision limits, tests and unverified device checks.
 
-## Speed
+- **EMB4** `.emb` + tokenizer JSON + Adam state: training checkpoints, retained on disk.
+- `active.gguf`: atomic export of trained weights, loaded by llama.cpp.
+- Tokenizer schema **v4**: GPT-2-compatible Unicode pre-tokenization; the old v3
+  byte-class chunker cannot be silently reinterpreted. Recast/retrain old vessels.
+- Existing source corpora, lessons and datasets are **not reset or deleted**.
+- Legacy JavaScript weights and old custom-engine weights are not production
+  inference files. Import/export diagnostics identify the mismatch explicitly.
 
-Tok/s is measured live — there is no fake number. Ballpark for the Phone vessel (~0.2M params):
-
-| Device | Train tok/s (batch×context / step) | Generate tok/s |
-| --- | --- | --- |
-| Recent phone, WebGL | ~80–400 | ~3–15 |
-| Phone, CPU fallback | ~20–80 | ~1–5 |
-| Desktop, WebGL | ~400–2000+ | ~15–80 |
-
-First generate is slower (shader compile). Batch 2 × context 64 = 128 training tokens per step, so 128 tok/s ≈ 1 step/s.
-
-## Notes
-
-- Foraging uses CORS-open public APIs in the browser (no scrape proxy, no API keys). Stay inside the page budget; do not copy what you are not allowed to use.
-- Simple English Wikipedia is the best default fuel for a tiny model.
-- Changing architecture recasts the vessel and forgets previous fire — save a checkpoint first.
-- Heads must divide embedding size (the presets already do).
-- Do not switch apps mid-fire on iOS; Safari may throttle background tabs.
-- Every setting has an **ⓘ button** next to it explaining what it does, what happens when you raise/lower it, and when the change takes effect.
-- **Notifications**: the bell (top right) keeps a history of training/export/import results and errors. In the native APK, training/teacher notifications are posted by Android after the user grants the permission; in the browser build they go through the service worker.
-- **Brain export**: *Export brain (.json)* writes the real learned weights + vocabulary (versioned format, see [`docs/brain-format.md`](docs/brain-format.md)). Imports are fully validated before anything is replaced, so a bad file can't destroy a working brain. Legacy `ember-brain-v1` files still import.
-- **Topic-aware training** (see [`docs/architecture-experiments.md`](docs/architecture-experiments.md)): documents train as structured records with real endings (`<eos>`), attention and loss cannot cross document boundaries (Fire → *Doc boundaries*), Reddit fuel keeps its subreddit/thread structure (one document per comment), and small sources can be gently boosted (Fire → *Source balance*). The *topic-training pack* (Fuel tab) adds short example documents for staying on topic and changing subject only on cue. New vessels use stream format 2 automatically; imported brains keep the layout they were trained with.
-- **All-purpose skills** (see [`docs/capabilities.md`](docs/capabilities.md)): lesson packs teach translation (EN↔ES + FR/DE/MS/ZH), passage-grounded research QA, and writing skills (summarize/rewrite/keywords/grammar). Voice → *Task* asks in the trained format, including *Answer from my documents*, which retrieves passages from your own corpus on-device. Fire → *Lesson loss: Response only* focuses training on answers. Honest scope: at phone scale these are learnable formats, not datacenter fluency — the guide explains volumes and limits.
-
-## Tests
-
-```bash
-cd tests && npm install && npm test   # engine training/generation, brain round-trips, UI wiring (Node + TF.js CPU + jsdom)
-python3 tests/test_python_side.py     # Python tokenizer/corpus (stdlib only)
-```
+The removed `libember_infer` forward pass, tokenizer and sampler are not compiled
+or packaged. NumPy's training forward/backward implementation remains as the
+numerical reference; the old custom generator and sampler are removed entirely.

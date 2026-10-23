@@ -1,6 +1,9 @@
 package com.kilkproduct.ember
 
 import android.app.Application
+import android.os.Build
+import android.os.PowerManager
+import androidx.annotation.RequiresApi
 import android.util.Log
 import com.kilkproduct.ember.backend.EmberRepository
 import com.kilkproduct.ember.service.EmberNotifications
@@ -9,8 +12,8 @@ import com.kilkproduct.ember.service.EmberWorkService
 /**
  * Application entry point.
  *
- * Ember keeps no model state in Kotlin: the JavaScript engine owns weights and
- * training. This class only creates the notification channels early enough for
+ * Python owns training weights and JNI owns inference. This class creates
+ * notification channels and safety callbacks early enough for
  * a foreground-service notification, and starts the engine handshake so the
  * first screen can show real status instead of a blank card.
  */
@@ -22,20 +25,30 @@ class EmberApplication : Application() {
         EmberNotifications(this)
         try {
             EmberRepository.get(this).ensureInitialized()
+            if(Build.VERSION.SDK_INT>=29)watchThermals()
         } catch (t: Throwable) {
             Log.e(TAG, "Could not start the Ember engine", t)
         }
     }
 
+    @RequiresApi(29)
+    private fun watchThermals() {
+        getSystemService(PowerManager::class.java)?.addThermalStatusListener(mainExecutor) { status ->
+            if(status>=PowerManager.THERMAL_STATUS_SEVERE)
+                EmberRepository.get(this).protectResources("Android reports severe thermal pressure")
+        }
+    }
+
     override fun onLowMemory() {
         super.onLowMemory()
-        // The engine itself keeps running; stopping the foreground service here
-        // would silently end background training. Only drop the wake lock path
-        // if no work is active so the notification does not outlive the job.
-        val repo = EmberRepository.get(this)
-        if (!repo.state.value.workActive) {
-            EmberWorkService.stop(this)
-        }
+        EmberRepository.get(this).protectResources("Android reports critical memory pressure")
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // UI_HIDDEN (20) is not low memory. Never stop merely on backgrounding.
+        if(level==TRIM_MEMORY_RUNNING_CRITICAL || level==TRIM_MEMORY_COMPLETE)
+            EmberRepository.get(this).protectResources("Android requests critical memory reclamation")
     }
 
     companion object {

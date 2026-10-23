@@ -103,7 +103,7 @@ fun ImportSheet(
         if (preview == null) {
             if (progress != null) {
                 ProgressBlock(
-                    fraction = progress.percent / 100f,
+                    fraction = progress.progressFraction,
                     label = progress.stageLabel,
                     detail = progressLine(progress),
                     onCancel = if (!ui.importCancelling) onCancelRun else null,
@@ -193,7 +193,7 @@ fun ImportSheet(
         when {
             ui.importBusy -> {
                 ProgressBlock(
-                    fraction = (progress?.percent ?: 0) / 100f,
+                    fraction = progress?.progressFraction ?: Float.NaN,
                     label = progress?.stageLabel ?: "Importing",
                     detail = progress?.let { progressLine(it) },
                     onCancel = if (!preview.isBrain && !ui.importCancelling) onCancelRun else null,
@@ -217,7 +217,7 @@ fun ImportSheet(
             paused -> {
                 progress?.let {
                     ProgressBlock(
-                        fraction = it.percent / 100f,
+                        fraction = it.progressFraction,
                         label = "Paused after ${Formats.integer(it.processed)} documents",
                         detail = progressLine(it),
                     )
@@ -248,8 +248,10 @@ private fun progressLine(progress: ImportProgress): String {
     if (progress.merged > 0) parts += "${Formats.integer(progress.merged)} merged"
     if (progress.skipped > 0) parts += "${Formats.integer(progress.skipped)} skipped"
     if (progress.failed > 0) parts += "${Formats.integer(progress.failed)} failed"
-    if (progress.sourceBytes > 0) {
-        parts += "${Formats.bytes(progress.bytesRead)} of ${Formats.bytes(progress.sourceBytes)}"
+    if(progress.byteBasis=="decompressed") {
+        parts += "${Formats.bytes(progress.bytesRead)} decompressed · ${Formats.bytes(progress.sourceBytes)} compressed source"
+    } else if (progress.sourceBytes > 0) {
+        parts += "${Formats.bytes(progress.bytesRead)} of ${Formats.bytes(progress.sourceBytes)} source bytes read"
     } else if (progress.bytesRead > 0) {
         parts += Formats.bytes(progress.bytesRead)
     }
