@@ -469,9 +469,8 @@
   </main>
 
   <footer class="foot">
-    <p>Ember trains a tiny GPT entirely in your browser (WebGL/CPU) — including on a phone. Corpus and checkpoints stay in IndexedDB. No safety fine-tune. Foraging uses public APIs from this device. Keep the screen awake while firing. You are responsible for what you gather and how you use the weights.</p>
+    <p>Ember v3 trains a compact GPT in Python (NumPy) and generates text via native C++ inference (<code>libember_infer</code>). Corpus, checkpoints, and v3 models stay local on your device.</p>
   </footer>
-  <script src="vendor/tf.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

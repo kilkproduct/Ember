@@ -158,19 +158,12 @@ fun StatusSheet(
         Spacer(Modifier.height(12.dp))
         EmberCard(title = "Diagnostics") {
             KeyValueRow("Backend", ui.backend)
-            KeyValueRow("TensorFlow.js", ui.tfVersion.ifBlank { "—" })
+            KeyValueRow("Python ML", ui.tfVersion.ifBlank { "—" })
             KeyValueRow("Runtime", ui.runtime.ifBlank { "—" })
-            KeyValueRow("Android WebView", ui.webViewVersion.ifBlank { "—" })
+            KeyValueRow("Native C++", ui.webViewVersion.ifBlank { "—" })
             KeyValueRow("App version", ui.appVersion)
             KeyValueRow("Mask boundaries", if (model.docBoundaryMask) "on" else "off")
             KeyValueRow("Lesson prompt masking", if (model.maskLessonPrompts) "on" else "off")
-            if (ui.webViewVersion.isBlank() || ui.webViewVersion == "unknown") {
-                Spacer(Modifier.height(6.dp))
-                InfoBanner(
-                    "Android System WebView version is unknown. Update it from the Play Store if the engine fails.",
-                    tone = EmberWarning,
-                )
-            }
         }
 
         Spacer(Modifier.height(12.dp))
@@ -419,13 +412,13 @@ fun SettingsSheet(
         EmberCard(title = "Engine") {
             KeyValueRow("Backend", ui.backend)
             KeyValueRow("Runtime", ui.runtime.ifBlank { "—" })
-            KeyValueRow("WebView", ui.webViewVersion.ifBlank { "—" })
+            KeyValueRow("Native C++", ui.webViewVersion.ifBlank { "—" })
             KeyValueRow("App", ui.appVersion)
             Spacer(Modifier.height(6.dp))
-            OutlinedButton(onClick = onRetryEngine) { Text("Restart the JavaScript engine") }
+            OutlinedButton(onClick = onRetryEngine) { Text("Restart backend runtime") }
             Text(
-                text = "Training runs in the JavaScript engine. Restarting discards unsaved in-memory weights; " +
-                    "checkpoints and corpus survive.",
+                text = "Training runs in embedded Python and generation executes in native C++. " +
+                    "Saved checkpoints, active v3 models, and your corpus survive restarts.",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

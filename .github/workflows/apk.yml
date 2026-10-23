@@ -5,8 +5,13 @@ on:
   push:
     branches: [main, "arena/**"]
     paths:
-      - "web/**"
+      - "ember/**"
+      - "native/**"
       - "android/**"
+      - "web/**"
+      - "tests/**"
+      - "requirements.txt"
+      - "pyproject.toml"
       - ".github/workflows/apk.yml"
 
 jobs:
@@ -14,61 +19,113 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Reuse one debug signing key across runs. Without this, every CI
-      # build gets a fresh key and Android refuses to install the new APK
-      # over the old one — forcing an uninstall that wipes the on-device
-      # corpus/brains. A stable key makes updates keep app data.
+
       - name: Restore stable debug keystore
         uses: actions/cache@v4
         with:
           path: ~/.android/debug.keystore
           key: android-debug-keystore
-      - uses: actions/setup-java@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: "pip"
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: "8.7"
-      - name: Test and assemble debug APK
+
+      - name: Install Python backend dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install -r requirements.txt
+
+      - name: Build host C++ inference library and run native C++ tests (including ASan/UBSan)
+        run: |
+          cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build -j
+          ./native/build/test_native
+
+          g++ -std=c++17 -O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined -Wall -Wextra -Werror \
+            -I native/include -I native/src \
+            native/src/bpe.cpp native/src/model.cpp native/src/engine.cpp native/src/jni_bridge.cpp native/tests/test_native.cpp \
+            -lpthread -o native/build/test_native_asan
+          ASAN_OPTIONS=detect_leaks=1 ./native/build/test_native_asan
+          rm -f native/build/test_native_asan
+
+      - name: Run Python backend & Python-to-C++ interoperability tests
+        run: |
+          pytest -v tests/
+
+      - name: Test Android unit suite and assemble debug APK (NDK CMake + Chaquopy Python 3.13)
         working-directory: android
         run: |
           set -o pipefail
           gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
-      # On failure, collect the compiler errors into one annotation so they are
-      # readable without downloading the full Gradle log.
+
       - name: Summarize build errors
         if: failure()
         run: |
           {
-            grep -E "^e: " /tmp/gradle.log | head -40
-            grep -A4 "^\* What went wrong" /tmp/gradle.log | head -12
+            grep -E "^e: |error: " /tmp/gradle.log | head -40
+            grep -A6 "^\* What went wrong" /tmp/gradle.log | head -18
           } > /tmp/errors.txt || true
-          if [ ! -s /tmp/errors.txt ]; then tail -25 /tmp/gradle.log > /tmp/errors.txt; fi
+          if [ ! -s /tmp/errors.txt ]; then tail -35 /tmp/gradle.log > /tmp/errors.txt; fi
           BODY=$(sed -e 's/%/%25/g' -e 's/\r//g' /tmp/errors.txt | awk '{printf "%s%%0A", $0}')
           echo "::error::$BODY"
+
       - name: Name the APK
         run: cp android/app/build/outputs/apk/debug/app-debug.apk Ember-debug.apk
-      # Fail the build if the APK stops being the native app: the engine
-      # runtime must ship and the old web interface must not.
-      - name: Verify APK contents
+
+      - name: Verify APK native libraries, Python runtime, and packaged assets
         run: |
           unzip -l Ember-debug.apk > /tmp/apk-contents.txt
           problems=""
-          for f in assets/www/native-backend.html assets/www/native-backend.js \
-                   assets/www/engine.js assets/www/vendor/tf.min.js classes.dex; do
+
+          # 1. Verify compiled C++ NDK inference engine + Chaquopy CPython runtime across ABIs
+          for f in \
+            lib/arm64-v8a/libember_infer.so \
+            lib/x86_64/libember_infer.so \
+            lib/arm64-v8a/libpython3.13.so \
+            lib/x86_64/libpython3.13.so \
+            lib/arm64-v8a/libchaquopy_java.so \
+            lib/x86_64/libchaquopy_java.so \
+            assets/chaquopy/app.imy \
+            classes.dex; do
             grep -q " $f$" /tmp/apk-contents.txt || problems="$problems missing:$f"
           done
-          for f in assets/www/index.html assets/www/app.js assets/www/styles.css; do
-            grep -q " $f$" /tmp/apk-contents.txt && problems="$problems packaged:$f"
+
+          # 2. Verify packaged Python requirements archives exist for target ABIs
+          grep -q "assets/chaquopy/requirements-arm64-v8a" /tmp/apk-contents.txt || problems="$problems missing:requirements-arm64-v8a"
+          grep -q "assets/chaquopy/requirements-x86_64" /tmp/apk-contents.txt || problems="$problems missing:requirements-x86_64"
+
+          # 3. Verify obsolete JS ML backend files are NOT inside the APK
+          for f in \
+            assets/www/vendor/tf.min.js \
+            assets/www/engine.js \
+            assets/www/native-backend.js \
+            assets/www/native-backend.html; do
+            grep -q " $f$" /tmp/apk-contents.txt && problems="$problems obsolete_packaged:$f"
           done
-          assets=$(grep -c " assets/www/" /tmp/apk-contents.txt || true)
+
           size=$(du -h Ember-debug.apk | cut -f1)
-          echo "::notice::APK $size · $assets engine assets · $([ -z "$problems" ] && echo ok || echo "$problems")"
+          so_count=$(grep -c " lib/.*\.so$" /tmp/apk-contents.txt || true)
+          echo "::notice::APK $size · $so_count native .so libraries · $([ -z "$problems" ] && echo verified-ok || echo "$problems")"
           if [ -n "$problems" ]; then
-            echo "::error::APK contents are wrong:$problems"
+            echo "--- APK entries matching lib/ or assets/ ---"
+            grep -E " (lib|assets)/" /tmp/apk-contents.txt || true
+            echo "::error::APK contents verification failed:$problems"
             exit 1
           fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: Ember-debug

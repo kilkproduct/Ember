@@ -125,36 +125,21 @@ private enum class SheetId {
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var engineHost: FrameLayout
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        engineHost = FrameLayout(applicationContext)
-        EmberEngine.get(this).attachHost(engineHost)
+        EmberEngine.get(this).start()
         setContent {
             EmberTheme {
                 val vm: MainViewModel = viewModel()
-                EmberApp(vm = vm, engineHost = engineHost)
+                EmberApp(vm = vm)
             }
         }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        EmberEngine.get(this).attachHost(engineHost)
-    }
-
-    override fun onDestroy() {
-        // The engine WebView is app-scoped and reused after rotation, so it is
-        // deliberately not destroyed here. The transparent host frame below is
-        // the only thing tying it to this activity's view tree.
-        super.onDestroy()
     }
 }
 
 @Composable
-private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
+private fun EmberApp(vm: MainViewModel) {
     val ui by vm.repo.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
@@ -365,17 +350,7 @@ private fun EmberApp(vm: MainViewModel, engineHost: FrameLayout) {
             }
         }
 
-        // The JavaScript engine runs in a WebView that is part of this window
-        // so Chromium keeps its renderer alive, but it is not the UI: one
-        // transparent 1dp frame in the corner.
-        AndroidView(
-            factory = { engineHost },
-            modifier = Modifier
-                .size(1.dp)
-                .alpha(0.01f),
-        )
-
-    when (sheet) {
+        when (sheet) {
         SheetId.STATUS -> StatusSheet(
             ui = ui,
             onDismiss = { sheetName = SheetId.NONE.name },
@@ -496,10 +471,9 @@ private fun EngineFailureScreen(message: String, onRetry: () -> Unit, onOpenSett
             )
             Spacer(Modifier.height(10.dp))
             EmptyState(
-                title = "Why a WebView?",
-                body = "Ember's unchanged TensorFlow.js training engine needs a modern JavaScript " +
-                    "runtime with IndexedDB and typed arrays. Android System WebView provides it. " +
-                    "Update it from the Play Store, then try again.",
+                title = "Embedded Python + Native C++ Runtime",
+                body = "Ember runs training in embedded Python (NumPy) and executes text generation " +
+                    "in compiled native C++ (libember_infer.so) directly on this device.",
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 androidx.compose.material3.Button(onClick = onRetry) { Text("Restart engine") }

@@ -1,390 +1,295 @@
-"""Wordpiece-ish tokenizer: characters + frequent words/substrings from the corpus."""
+"""Byte-level BPE tokenizer for Ember v3.
+
+The vocabulary is 256 raw byte tokens + 5 specials + learned merges.  Every
+merge is a concatenation of two existing tokens, so any UTF-8 text can always
+be encoded (no unknown tokens) and decoding is a byte concatenation followed by
+a UTF-8 decode.
+
+The pre-tokenizer (:func:`ember.spec.pretokenize`) and the merge loop are
+re-implemented byte-for-byte in ``native/src/bpe.cpp``; the two are compared by
+``tests/python/test_interop.py`` and ``native/tests``.
+"""
 
 from __future__ import annotations
 
 import json
-import re
 from collections import Counter
-from pathlib import Path
+from typing import Iterable
 
-TOKEN_RE = re.compile(r"\w+|[^\w\s]|\s+", re.UNICODE)
+from .spec import (
+    BASE_VOCAB,
+    FIRST_MERGE_ID,
+    SPECIAL_BOS,
+    SPECIAL_DOC,
+    SPECIAL_EOS,
+    SPECIAL_NAMES,
+    SPECIAL_PAD,
+    SPECIAL_TOKENS,
+    SPECIAL_UNK,
+    TOKENIZER_FORMAT,
+    TOKENIZER_TYPE,
+    TOKENIZER_VERSION,
+    pretokenize,
+)
 
-SPECIAL = ["<pad>", "<unk>", "<bos>", "<eos>", "<doc>"]
-
-
-class EmberTokenizer:
-    def __init__(self) -> None:
-        self.token_to_id: dict[str, int] = {t: i for i, t in enumerate(SPECIAL)}
-        self.id_to_token: list[str] = list(SPECIAL)
-        self._max_tok_len = 1
-
-    @property
-    def vocab_size(self) -> int:
-        return len(self.id_to_token)
-
-    @property
-    def pad_id(self) -> int:
-        return 0
-
-    @property
-    def unk_id(self) -> int:
-        return 1
-
-    @property
-    def bos_id(self) -> int:
-        return 2
-
-    @property
-    def eos_id(self) -> int:
-        return 3
-
-    @property
-    def doc_id(self) -> int:
-        return 4
-
-    def _add(self, tok: str) -> None:
-        if tok not in self.token_to_id:
-            self.token_to_id[tok] = len(self.id_to_token)
-            self.id_to_token.append(tok)
-            if len(tok) > self._max_tok_len:
-                self._max_tok_len = len(tok)
-
-    def train(self, texts: list[str], vocab_size: int = 4000) -> None:
-        """Build a vocab from raw documents. Always keeps every seen character."""
-        self.token_to_id = {t: i for i, t in enumerate(SPECIAL)}
-        self.id_to_token = list(SPECIAL)
-        self._max_tok_len = 1
-        chars: set[str] = set()
-        word_counts: Counter[str] = Counter()
-        for text in texts:
-            for ch in text:
-                if ch not in ("\x00",):
-                    chars.add(ch)
-            for tok in TOKEN_RE.findall(text):
-                if tok.strip() == "":
-                    # keep a single space token; collapse longer whitespace later
-                    word_counts[" "] += 1
-                else:
-                    word_counts[tok] += 1
-        for ch in sorted(chars):
-            self._add(ch)
-        # Remaining slots go to the most common multi-char tokens
-        remaining = max(0, vocab_size - self.vocab_size)
-        for tok, _n in word_counts.most_common():
-            if remaining <= 0:
-                break
-            if tok in self.token_to_id:
-                continue
-            if len(tok) < 2:
-                continue
-            self._add(tok)
-            remaining -= 1
-
-    def encode(self, text: str, add_special: bool = False) -> list[int]:
-        ids: list[int] = []
-        if add_special:
-            ids.append(self.bos_id)
-        for tok in TOKEN_RE.findall(text):
-            if tok in self.token_to_id:
-                ids.append(self.token_to_id[tok])
-                continue
-            # Greedy longest-match inside the regex token so vocab pieces are
-            # reused inside unseen words, falling back to single characters
-            # (then <unk>) so nothing is silently lost. Mirrors web/tokenizer.js.
-            i = 0
-            while i < len(tok):
-                hit_id = None
-                hit_len = 0
-                for length in range(min(self._max_tok_len, len(tok) - i), 1, -1):
-                    cand = tok[i : i + length]
-                    if cand in self.token_to_id:
-                        hit_id = self.token_to_id[cand]
-                        hit_len = length
-                        break
-                if hit_id is not None:
-                    ids.append(hit_id)
-                    i += hit_len
-                else:
-                    ids.append(self.token_to_id.get(tok[i], self.unk_id))
-                    i += 1
-        if add_special:
-            ids.append(self.eos_id)
-        return ids
-
-    def decode(self, ids: list[int]) -> str:
-        skip = {self.pad_id, self.bos_id, self.eos_id, self.doc_id}
-        parts: list[str] = []
-        for i in ids:
-            if i in skip:
-                if i == self.doc_id:
-                    parts.append("\n\n")
-                continue
-            if 0 <= i < len(self.id_to_token):
-                tok = self.id_to_token[i]
-                if tok == "<unk>":
-                    # visible replacement char — mirrors web/tokenizer.js;
-                    # silently dropping unknowns hid tokenizer gaps
-                    parts.append("\ufffd")
-                    continue
-                parts.append(tok)
-        return "".join(parts)
-
-    def save(self, path: str | Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps({"id_to_token": self.id_to_token}, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-    @classmethod
-    def load(cls, path: str | Path) -> "EmberTokenizer":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        tok = cls()
-        tok.id_to_token = list(data["id_to_token"])
-        tok.token_to_id = {t: i for i, t in enumerate(tok.id_to_token)}
-        tok._max_tok_len = max((len(t) for t in tok.id_to_token), default=1)
-        return tok
+__all__ = ["BPETokenizer", "train_bpe", "count_chunks"]
 
 
-# ---------------------------------------------------------------------------
-# Byte-level BPE — the Python mirror of web/bpe.js (Stage D). Same special
-# ids (pad 0, unk 1, bos 2, eos 3, doc 4), byte b at id 5+b, merge i at
-# 261+i, same pre-tokenization, same deterministic tie-break (highest
-# count, then smallest (a, b) pair) and the same token length /
-# whitespace-run guards, so JS and Python learn identical merges from
-# the same corpus (verified by a golden test in tests/test_python_side.py
-# and tests/bpe.test.mjs).
-# ---------------------------------------------------------------------------
-
-BPE_CHUNK_RE = re.compile(r" ?\w+| ?[^\w\s]|\s+", re.UNICODE)
-_FIRST_MERGE_ID = 261
-_MAX_TOKEN_BYTES = 48
-_MAX_WS_TOKEN_BYTES = 8
-_TRAIN_CHAR_BUDGET = 2_000_000
-_WS_BYTES = frozenset((9, 10, 11, 12, 13, 32))
+def _token_to_bytes(token: str) -> bytes:
+    """Vocabulary entries are strings of code points < 256 (one per byte)."""
+    return token.encode("latin-1")
 
 
-def _bytes_to_unicode() -> list[str]:
-    bs = list(range(33, 127)) + list(range(161, 173)) + list(range(174, 256))
-    cs = list(bs)
-    n = 0
-    for b in range(256):
-        if b not in bs:
-            bs.append(b)
-            cs.append(256 + n)
-            n += 1
-    out = [""] * 256
-    for b, c in zip(bs, cs):
-        out[b] = chr(c)
+def _bytes_to_token(raw: bytes) -> str:
+    return raw.decode("latin-1")
+
+
+def count_chunks(text: str) -> int:
+    return len(pretokenize(text.encode("utf-8")))
+
+
+def _chunk_counts(texts: Iterable[str], progress=None, total_hint: int = 0) -> Counter:
+    counts: Counter = Counter()
+    seen = 0
+    for text in texts:
+        if not text:
+            continue
+        for chunk in pretokenize(text.encode("utf-8")):
+            counts[tuple(chunk[i : i + 1] for i in range(len(chunk)))] += 1
+        seen += 1
+        if progress and (seen % 200 == 0):
+            progress(seen, total_hint)
+    return counts
+
+
+def _stats(counts: Counter) -> Counter:
+    pairs: Counter = Counter()
+    for word, freq in counts.items():
+        for a, b in zip(word, word[1:]):
+            pairs[(a, b)] += freq
+    return pairs
+
+
+def _merge_pair(pair, counts: Counter) -> Counter:
+    first, second = pair
+    out: Counter = Counter()
+    for word, freq in counts.items():
+        new_word: list[bytes] = []
+        i = 0
+        n = len(word)
+        while i < n:
+            if i < n - 1 and word[i] == first and word[i + 1] == second:
+                new_word.append(first + second)
+                i += 2
+            else:
+                new_word.append(word[i])
+                i += 1
+        out[tuple(new_word)] = freq
     return out
 
 
-BYTE_TO_UNI = _bytes_to_unicode()
+class BPETokenizer:
+    """Deterministic byte-level BPE tokenizer."""
 
+    def __init__(self, vocab: list[str], merges: list[list[str]]) -> None:
+        self.vocab = list(vocab)
+        self.merges = [list(m) for m in merges]
+        self.token_to_id = {_token_to_bytes(t): i for i, t in enumerate(self.vocab)}
+        self.ranks = {(_token_to_bytes(a), _token_to_bytes(b)): i for i, (a, b) in enumerate(self.merges)}
+        self._cache: dict[bytes, tuple[int, ...]] = {}
+        if len(self.vocab) < FIRST_MERGE_ID:
+            raise ValueError("vocabulary is missing the base byte tokens")
+        for name, idx in SPECIAL_TOKENS.items():
+            if idx >= len(self.vocab):
+                raise ValueError(f"vocabulary is missing the <{name}> token")
 
-def _derive_bpe_vocab(merges: list[tuple[int, int]]) -> tuple[list[str], list[bytes]]:
-    token_bytes: list[bytes] = [b""] * (_FIRST_MERGE_ID + len(merges))
-    token_bytes[1] = "�".encode("utf-8")
-    for byte in range(256):
-        token_bytes[5 + byte] = bytes((byte,))
-    for i, pair in enumerate(merges):
-        if len(pair) != 2:
-            raise ValueError(f"BPE merge {i} is not a pair")
-        a, b = pair
-        limit = _FIRST_MERGE_ID + i
-        if not (5 <= a < limit and 5 <= b < limit):
-            raise ValueError(f"BPE merge {i} {pair} references an invalid token id")
-        token_bytes[_FIRST_MERGE_ID + i] = token_bytes[a] + token_bytes[b]
-    id_to_token = [
-        SPECIAL[i] if i < 5 else "".join(BYTE_TO_UNI[b] for b in tb)
-        for i, tb in enumerate(token_bytes)
-    ]
-    return id_to_token, token_bytes
-
-
-class ByteBpeTokenizer:
-    """Byte-level BPE. Mirrors web/bpe.js (same ids, merges, strings)."""
-
-    type = "byte-bpe"
-
-    def __init__(self) -> None:
-        self.merges: list[tuple[int, int]] = []
-        self._finalize()
-
+    # -- basics ---------------------------------------------------------
     @property
     def vocab_size(self) -> int:
-        return len(self.id_to_token)
+        return len(self.vocab)
 
     @property
     def pad_id(self) -> int:
-        return 0
-
-    @property
-    def unk_id(self) -> int:
-        return 1
+        return SPECIAL_PAD
 
     @property
     def bos_id(self) -> int:
-        return 2
+        return SPECIAL_BOS
 
     @property
     def eos_id(self) -> int:
-        return 3
+        return SPECIAL_EOS
 
     @property
     def doc_id(self) -> int:
-        return 4
+        return SPECIAL_DOC
 
-    def _finalize(self) -> None:
-        self.id_to_token, self._token_bytes = _derive_bpe_vocab(self.merges)
-        self._ranks = {pair: i for i, pair in enumerate(self.merges)}
-        self._chunk_cache: dict[str, list[int]] = {}
+    @property
+    def unk_id(self) -> int:
+        return SPECIAL_UNK
 
-    def train(self, texts: list[str], vocab_size: int = 1500) -> None:
-        self.merges = []
-        target = max(0, vocab_size - _FIRST_MERGE_ID)
-        if target == 0:
-            self._finalize()
-            return
-        chunk_freq: Counter[str] = Counter()
-        budget = _TRAIN_CHAR_BUDGET
-        done = False
-        for text in texts:
-            if done:
-                break
-            for raw in BPE_CHUNK_RE.findall(text):
-                for i in range(0, len(raw), 64):
-                    chunk_freq[raw[i : i + 64]] += 1
-                budget -= len(raw)
-                if budget <= 0:
-                    done = True
+    def id_to_token(self, idx: int) -> str:
+        return self.vocab[idx]
+
+    def token_bytes(self, idx: int) -> bytes:
+        return _token_to_bytes(self.vocab[idx])
+
+    # -- encoding -------------------------------------------------------
+    def _encode_chunk(self, chunk: bytes) -> tuple[int, ...]:
+        cached = self._cache.get(chunk)
+        if cached is not None:
+            return cached
+        word: list[bytes] = [chunk[i : i + 1] for i in range(len(chunk))]
+        if len(word) > 1:
+            while True:
+                best = None
+                best_rank = None
+                for a, b in zip(word, word[1:]):
+                    rank = self.ranks.get((a, b))
+                    if rank is not None and (best_rank is None or rank < best_rank):
+                        best_rank = rank
+                        best = (a, b)
+                if best is None:
                     break
-        chunks: list[list[int]] = []
-        freqs: list[int] = []
-        for s, n in chunk_freq.items():
-            data = s.encode("utf-8")
-            if not data:
-                continue
-            chunks.append([5 + b for b in data])
-            freqs.append(n)
-        pair_count: Counter[tuple[int, int]] = Counter()
-        pair_chunks: dict[tuple[int, int], set[int]] = {}
-
-        def bump(ids: list[int], ci: int, delta: int) -> None:
-            for i in range(len(ids) - 1):
-                pair = (ids[i], ids[i + 1])
-                pair_count[pair] += delta
-                if delta > 0:
-                    pair_chunks.setdefault(pair, set()).add(ci)
-                elif pair in pair_chunks:
-                    pair_chunks[pair].discard(ci)
-
-        for ci, ids in enumerate(chunks):
-            bump(ids, ci, freqs[ci])
-        tok_len = [1] * (_FIRST_MERGE_ID + target)
-        tok_ws = [False] * (_FIRST_MERGE_ID + target)
-        for byte in range(256):
-            tok_ws[5 + byte] = byte in _WS_BYTES
-        for m in range(target):
-            best_pair: tuple[int, int] | None = None
-            best_count = 0
-            for pair, count in pair_count.items():
-                if count < 2:
-                    continue
-                a, b = pair
-                length = tok_len[a] + tok_len[b]
-                if length > _MAX_TOKEN_BYTES:
-                    continue
-                if tok_ws[a] and tok_ws[b] and length > _MAX_WS_TOKEN_BYTES:
-                    continue
-                if count > best_count or (count == best_count and (best_pair is None or pair < best_pair)):
-                    best_count = count
-                    best_pair = pair
-            if best_pair is None:
-                break
-            a, b = best_pair
-            new_id = _FIRST_MERGE_ID + m
-            self.merges.append(best_pair)
-            tok_len[new_id] = tok_len[a] + tok_len[b]
-            tok_ws[new_id] = tok_ws[a] and tok_ws[b]
-            for ci in list(pair_chunks.get(best_pair, ())):
-                old = chunks[ci]
-                bump(old, ci, -freqs[ci])
-                merged: list[int] = []
+                first, second = best
+                new_word: list[bytes] = []
                 i = 0
-                while i < len(old):
-                    if i + 1 < len(old) and old[i] == a and old[i + 1] == b:
-                        merged.append(new_id)
+                n = len(word)
+                while i < n:
+                    if i < n - 1 and word[i] == first and word[i + 1] == second:
+                        new_word.append(first + second)
                         i += 2
                     else:
-                        merged.append(old[i])
+                        new_word.append(word[i])
                         i += 1
-                chunks[ci] = merged
-                bump(merged, ci, freqs[ci])
-            pair_count.pop(best_pair, None)
-            pair_chunks.pop(best_pair, None)
-        self._finalize()
-
-    def _encode_chunk(self, s: str) -> list[int]:
-        ids = [5 + b for b in s.encode("utf-8")]
-        while len(ids) >= 2:
-            best_rank: int | None = None
-            best_idx = -1
-            for i in range(len(ids) - 1):
-                r = self._ranks.get((ids[i], ids[i + 1]))
-                if r is not None and (best_rank is None or r < best_rank):
-                    best_rank = r
-                    best_idx = i
-            if best_idx < 0:
-                break
-            ids = ids[:best_idx] + [_FIRST_MERGE_ID + best_rank] + ids[best_idx + 2 :]
+                word = new_word
+        ids = tuple(self.token_to_id.get(sym, SPECIAL_UNK) for sym in word)
+        if len(self._cache) < 200_000:
+            self._cache[chunk] = ids
         return ids
 
-    def encode(self, text: str, add_special: bool = False) -> list[int]:
-        ids: list[int] = [self.bos_id] if add_special else []
-        for chunk in BPE_CHUNK_RE.findall(text):
-            part = self._chunk_cache.get(chunk)
-            if part is None:
-                part = self._encode_chunk(chunk)
-                if len(chunk) <= 128:
-                    if len(self._chunk_cache) > 8192:
-                        self._chunk_cache.clear()
-                    self._chunk_cache[chunk] = part
-            ids.extend(part)
-        if add_special:
-            ids.append(self.eos_id)
+    def encode_bytes(self, data: bytes) -> list[int]:
+        out: list[int] = []
+        for chunk in pretokenize(data):
+            out.extend(self._encode_chunk(chunk))
+        return out
+
+    def encode(self, text: str, add_bos: bool = False, add_eos: bool = False) -> list[int]:
+        ids = self.encode_bytes(text.encode("utf-8"))
+        if add_bos:
+            ids = [SPECIAL_BOS] + ids
+        if add_eos:
+            ids = ids + [SPECIAL_EOS]
         return ids
 
-    def decode(self, ids: list[int]) -> str:
-        skip = {0, 2, 3, 4}
-        data = b"".join(self._token_bytes[i] for i in ids if i not in skip and 0 <= i < len(self._token_bytes))
-        return data.decode("utf-8", "replace")
+    def decode(self, ids: Iterable[int], skip_special: bool = True) -> str:
+        buf = bytearray()
+        for i in ids:
+            i = int(i)
+            if i < 0 or i >= len(self.vocab):
+                continue
+            if skip_special and i >= BASE_VOCAB and i < FIRST_MERGE_ID:
+                continue
+            buf.extend(_token_to_bytes(self.vocab[i]))
+        return buf.decode("utf-8", errors="replace")
 
-    def save(self, path: str | Path) -> None:
-        path = Path(path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(
-                {
-                    "type": "byte-bpe",
-                    "version": 1,
-                    "merges": [list(p) for p in self.merges],
-                    "id_to_token": self.id_to_token,
-                },
-                ensure_ascii=False,
-            ),
-            encoding="utf-8",
-        )
+    def decode_bytes(self, ids: Iterable[int], skip_special: bool = True) -> bytes:
+        buf = bytearray()
+        for i in ids:
+            i = int(i)
+            if i < 0 or i >= len(self.vocab):
+                continue
+            if skip_special and i >= BASE_VOCAB and i < FIRST_MERGE_ID:
+                continue
+            buf.extend(_token_to_bytes(self.vocab[i]))
+        return bytes(buf)
+
+    def count_tokens(self, text: str) -> int:
+        return len(self.encode(text))
+
+    # -- serialization --------------------------------------------------
+    def to_dict(self) -> dict:
+        return {
+            "format": TOKENIZER_FORMAT,
+            "version": TOKENIZER_VERSION,
+            "type": TOKENIZER_TYPE,
+            "spec": "v3",
+            "base": BASE_VOCAB,
+            "specials": dict(SPECIAL_TOKENS),
+            "vocab": list(self.vocab),
+            "merges": [list(m) for m in self.merges],
+        }
+
+    def to_json(self) -> str:
+        # ensure_ascii keeps the file pure ASCII, which is what the C++
+        # reader (and Android's asset pipeline) expects.
+        return json.dumps(self.to_dict(), ensure_ascii=True)
 
     @classmethod
-    def load(cls, path: str | Path) -> "ByteBpeTokenizer":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        if data.get("type") != "byte-bpe":
-            raise ValueError("not a byte-bpe tokenizer file")
-        tok = cls()
-        tok.merges = [tuple(p) for p in data["merges"]]
-        tok._finalize()
-        if data.get("id_to_token") is not None and list(data["id_to_token"]) != tok.id_to_token:
-            raise ValueError("BPE vocabulary does not match its merges")
-        return tok
+    def from_dict(cls, data: dict) -> "BPETokenizer":
+        version = int(data.get("version", 0))
+        if version != TOKENIZER_VERSION:
+            raise ValueError(
+                "tokenizer version %s is not supported by this build (expected %d)"
+                % (data.get("version"), TOKENIZER_VERSION)
+            )
+        specials = data.get("specials") or {}
+        for name, idx in SPECIAL_TOKENS.items():
+            if int(specials.get(name, -1)) != idx:
+                raise ValueError(f"tokenizer specials do not match the v3 layout (<{name}>)")
+        return cls(list(data["vocab"]), [list(m) for m in data.get("merges", [])])
+
+    @classmethod
+    def from_json(cls, text: str) -> "BPETokenizer":
+        return cls.from_dict(json.loads(text))
+
+    def save(self, path) -> None:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(self.to_json())
+
+    @classmethod
+    def load(cls, path) -> "BPETokenizer":
+        with open(path, "r", encoding="utf-8") as fh:
+            return cls.from_json(fh.read())
+
+
+def train_bpe(
+    texts: Iterable[str],
+    vocab_size: int = 2048,
+    min_pair_count: int = 2,
+    progress=None,
+    total_hint: int = 0,
+) -> BPETokenizer:
+    """Learn a byte-level BPE vocabulary from ``texts``.
+
+    ``texts`` is iterated once and consumed in bounded chunks: only the
+    pre-tokenised chunk counts are held in memory (needed by the GPT-2 style
+    merge loop), never the corpus itself.
+    """
+    vocab_size = max(FIRST_MERGE_ID + 1, int(vocab_size))
+    counts = _chunk_counts(texts, progress=progress, total_hint=total_hint)
+    if not counts:
+        raise ValueError("cannot train a tokenizer on an empty corpus")
+
+    vocab = [_bytes_to_token(bytes([i])) for i in range(BASE_VOCAB)]
+    for name in ("pad", "bos", "eos", "doc", "unk"):
+        vocab.append(f"<{name}>")
+    merges: list[list[str]] = []
+
+    target_merges = vocab_size - len(vocab)
+    while len(merges) < target_merges:
+        pairs = _stats(counts)
+        if not pairs:
+            break
+        best_count = max(pairs.values())
+        if best_count < min_pair_count:
+            break
+        # Deterministic tie-break: lowest (count desc, pair) wins.
+        best = min((p for p, c in pairs.items() if c == best_count), key=lambda p: (p[0], p[1]))
+        merges.append([_bytes_to_token(best[0]), _bytes_to_token(best[1])])
+        vocab.append(_bytes_to_token(best[0] + best[1]))
+        counts = _merge_pair(best, counts)
+        if progress:
+            progress(len(merges), target_merges)
+
+    return BPETokenizer(vocab, merges)

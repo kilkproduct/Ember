@@ -1,135 +1,102 @@
-"""Stdlib-only tests for the Python tokenizer + corpus.
-
-Run from the repo root:  python3 tests/test_python_side.py
-(the PyTorch model in ember/model.py needs `pip install torch` and is not
-exercised here; the shipped app trains in the browser via web/engine.js.)
-"""
+"""Tests for Ember v3 byte-level BPE tokenizer and SQLite corpus."""
 
 from __future__ import annotations
 
-import sys
+import json
 import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+import pytest
 
 from ember.corpus import Corpus
-from ember.tokenizer import ByteBpeTokenizer, EmberTokenizer
+from ember.spec import (
+    SPECIAL_BOS,
+    SPECIAL_DOC,
+    SPECIAL_EOS,
+    SPECIAL_PAD,
+    SPECIAL_UNK,
+)
+from ember.tokenizer import BPETokenizer, train_bpe
 
-TEXT = (
-    "the cat sat on the mat. the cat likes the sun. "
-    "singapore is an island city. people in singapore like chicken rice. "
-) * 4
-
-
-def test_tokenizer_roundtrip() -> None:
-    tok = EmberTokenizer()
-    tok.train([TEXT], vocab_size=1500)
-    s = "the cat sat on the mat in singapore."
-    assert tok.decode(tok.encode(s)) == s, "round-trip must be exact"
-
-
-def test_tokenizer_greedy_match() -> None:
-    tok = EmberTokenizer()
-    tok.train([TEXT], vocab_size=1500)
-    ids = tok.encode("singaporeans")
-    assert tok.decode(ids) == "singaporeans"
-    # "singapore" is a vocab piece, so this must beat 1 token per character
-    assert len(ids) < len("singaporeans"), f"expected piece reuse, got {len(ids)} tokens"
+SAMPLE_TEXT = (
+    "the cat sat on the mat. the cat likes the warm morning sun.\n"
+    "singapore is an island city-state. people in singapore love hawker food! "
+) * 6
 
 
-def test_tokenizer_save_load() -> None:
-    tok = EmberTokenizer()
-    tok.train([TEXT], vocab_size=1500)
+def test_bpe_special_ids_and_roundtrip() -> None:
+    tok = train_bpe([SAMPLE_TEXT], vocab_size=400)
+    assert tok.pad_id == SPECIAL_PAD == 256
+    assert tok.bos_id == SPECIAL_BOS == 257
+    assert tok.eos_id == SPECIAL_EOS == 258
+    assert tok.doc_id == SPECIAL_DOC == 259
+    assert tok.unk_id == SPECIAL_UNK == 260
+    assert 261 < tok.vocab_size <= 400
+
+    for text in [
+        "",
+        " ",
+        "   multiple   spaces\tand\n\nnewlines  ",
+        "the cat sat on the mat in singapore!",
+        "Unicode: Café, naïve, 灯台の記録, العربية, 🔥🎉🚀🎊",
+    ]:
+        ids = tok.encode(text)
+        assert tok.decode(ids) == text
+        assert SPECIAL_UNK not in ids
+
+
+def test_bpe_compression_efficiency() -> None:
+    tok = train_bpe([SAMPLE_TEXT], vocab_size=450)
+    phrase = "the cat sat on the mat in singapore."
+    ids = tok.encode(phrase)
+    assert len(ids) < len(phrase.encode("utf-8")), "Learned merges must compress repeated words"
+
+
+def test_bpe_save_load_and_version_validation() -> None:
+    tok = train_bpe([SAMPLE_TEXT], vocab_size=350)
     with tempfile.TemporaryDirectory() as td:
-        path = Path(td) / "tok.json"
-        tok.save(path)
-        back = EmberTokenizer.load(path)
-    assert back.id_to_token == tok.id_to_token
-    s = "people in singapore like chicken rice."
-    assert back.encode(s) == tok.encode(s)
+        p = Path(td) / "tokenizer.json"
+        tok.save(p)
+        reloaded = BPETokenizer.load(p)
+        assert reloaded.vocab_size == tok.vocab_size
+        assert reloaded.encode("singapore sun 🔥") == tok.encode("singapore sun 🔥")
+
+        bad = tok.to_dict()
+        bad["version"] = 1
+        with pytest.raises(ValueError, match="version"):
+            BPETokenizer.from_dict(bad)
 
 
-def test_corpus() -> None:
+def test_sqlite_corpus_and_legacy_jsonl_preservation() -> None:
     with tempfile.TemporaryDirectory() as td:
-        corpus = Corpus(Path(td) / "corpus.jsonl")
-        corpus.add("hello world", title="a")
-        corpus.add("second doc", title="b", weight=3)
-        corpus.add("hello world v2", title="a2", url="http://x")
-        corpus.add("hello world v3", title="a3", url="http://x")  # dedupe by url
-        st = corpus.stats()
-        assert st["documents"] == 3, st
-        blob = corpus.weighted_blob()
-        assert blob.count("second doc") == 3  # weight repeats
-        # reload from disk
-        again = Corpus(Path(td) / "corpus.jsonl")
-        assert again.stats()["documents"] == 3
+        tdir = Path(td)
+        # Pre-populate a legacy corpus.jsonl to verify user training material is preserved
+        legacy_jsonl = tdir / "corpus.jsonl"
+        legacy_docs = [
+            {"id": "leg1", "title": "Legacy Note", "source": "user", "kind": "page", "weight": 2,
+             "text": "Preserved user training document from legacy corpus."},
+            {"id": "leg2", "title": "Legacy Lesson", "source": "taught", "kind": "lesson", "weight": 8,
+             "text": "### Prompt:\nHi\n\n### Response:\nHello from preserved lesson!"},
+        ]
+        legacy_jsonl.write_text("\n".join(json.dumps(d) for d in legacy_docs) + "\n", encoding="utf-8")
 
+        corpus = Corpus(tdir)
+        assert corpus.count() == 2, "Existing corpus.jsonl documents must be automatically preserved"
 
-def test_bpe_roundtrip_and_determinism() -> None:
-    tok = ByteBpeTokenizer()
-    tok.train([TEXT * 10], vocab_size=800)
-    for s in ["", "hello, world!", "café 🔥 中文", "unseen αβγ", "a  b\n\nc\td"]:
-        ids = tok.encode(s)
-        assert tok.decode(ids) == s, f"BPE round-trip failed for {s!r}"
-        assert tok.unk_id not in ids, "byte BPE must never emit <unk>"
-    again = ByteBpeTokenizer()
-    again.train([TEXT * 10], vocab_size=800)
-    assert again.merges == tok.merges, "BPE training must be deterministic"
-    assert tok.vocab_size == 261 + len(tok.merges) <= 800
+        # Add, URL-update, and exact content dedupe
+        d1 = corpus.add("Fresh astronomy notes about Jupiter and Saturn.", title="Planets", url="https://example.org/planets")
+        assert not d1["merged"]
+        d2 = corpus.add("Fresh astronomy notes about Jupiter, Saturn, and Uranus.", title="Planets v2", url="https://example.org/planets")
+        assert d2["id"] == d1["id"]
 
+        dup = corpus.add("Fresh astronomy notes about Jupiter, Saturn, and Uranus.", title="Copy")
+        assert dup["merged"] is True
 
-def test_bpe_golden_merges_match_js() -> None:
-    # The exact merge list web/bpe.js learns on this corpus (same golden
-    # asserted in tests/bpe.test.mjs) — JS/Python tokenizer parity.
-    gold = (
-        "the cat sat on the mat. the cat likes the warm sun. "
-        "a small cat sleeps on the warm mat in the sun."
-    )
-    tok = ByteBpeTokenizer()
-    tok.train([gold], vocab_size=280)
-    assert [list(p) for p in tok.merges] == [
-        [102, 121], [109, 106], [121, 262], [37, 120], [37, 263], [37, 104],
-        [266, 261], [37, 114], [37, 116], [37, 124], [102, 119], [122, 115],
-        [264, 272], [268, 261], [269, 115], [270, 271], [276, 114],
-    ], f"merges drifted from the JS implementation: {tok.merges}"
+        summary = corpus.summary()
+        assert summary["documents"] == 3
+        hits = corpus.retrieve_passages("What notes mention Jupiter and Uranus?")
+        assert any("Uranus" in h for h in hits)
 
-
-def test_bpe_save_load_and_tamper() -> None:
-    tok = ByteBpeTokenizer()
-    tok.train([TEXT * 6], vocab_size=700)
-    with tempfile.TemporaryDirectory() as td:
-        path = Path(td) / "bpe.json"
-        tok.save(path)
-        back = ByteBpeTokenizer.load(path)
-        assert back.encode("people in singapore") == tok.encode("people in singapore")
-        import json as _json
-
-        data = _json.loads(path.read_text(encoding="utf-8"))
-        data["id_to_token"][270] = "forgery"
-        path.write_text(_json.dumps(data), encoding="utf-8")
-        try:
-            ByteBpeTokenizer.load(path)
-        except ValueError:
-            pass
-        else:
-            raise AssertionError("tampered BPE vocab must be rejected")
-
-
-def test_legacy_unk_is_visible() -> None:
-    tok = EmberTokenizer()
-    tok.train([TEXT], vocab_size=1500)
-    ids = tok.encode("cat")
-    assert tok.decode(ids + [tok.unk_id]) == "cat�"
-
-
-if __name__ == "__main__":
-    test_tokenizer_roundtrip()
-    test_tokenizer_greedy_match()
-    test_tokenizer_save_load()
-    test_corpus()
-    test_bpe_roundtrip_and_determinism()
-    test_bpe_golden_merges_match_js()
-    test_bpe_save_load_and_tamper()
-    test_legacy_unk_is_visible()
-    print("python-side tests: OK")
+        assert corpus.remove(d1["id"]) is True
+        assert corpus.count() == 2
+        corpus.close()

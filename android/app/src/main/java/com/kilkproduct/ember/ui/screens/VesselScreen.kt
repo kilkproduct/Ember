@@ -124,7 +124,7 @@ fun VesselScreen(
                         onAction = onGoToFuel,
                     )
                 } else {
-                    InfoBanner("Cast a vessel: this builds the TensorFlow.js model tensors from your corpus.")
+                    InfoBanner("Cast a vessel: learns a byte-level BPE vocabulary and initializes Ember v3 float32 weights in Python + native C++.")
                 }
             }
         }

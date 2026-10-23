@@ -230,7 +230,7 @@ class EmberRepository private constructor(
                         backend = info.stringOr("backend", "—"),
                         runtime = info.stringOr("runtime"),
                         tfVersion = info.stringOr("tfVersion", "—"),
-                        webViewVersion = EmberEngine.currentWebViewVersion(),
+                        webViewVersion = EmberEngine.nativeRuntimeLabel(),
                     )
                 }
                 val statusJson = engine.call("status", timeoutMs = 120_000)
