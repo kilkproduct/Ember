@@ -36,6 +36,7 @@ class OverhaulContractTest {
     @Test fun largeVocabAndExplicitFFNIncreaseRealEstimate() {
         val cfg=ModelConfig(2,2,64,64,1500,0.0,4.0)
         val e=VesselEstimator.estimate(cfg)
+        assertTrue(VesselEstimator.estimate(cfg.copy(vocabSize=261)).params>0)
         assertEquals(219200L,e.params) // pinned against Python's tensor_specs
         assertTrue(VesselEstimator.estimate(cfg.copy(vocabSize=50000)).trainBytes>e.trainBytes)
         assertTrue(VesselEstimator.estimate(cfg.copy(intermediateSize=512)).trainBytes>e.trainBytes)

@@ -9,7 +9,7 @@ object VesselEstimator {
         val c=config.nEmbd.toLong();val layers=config.nLayer.toLong();val heads=config.nHead.toLong()
         val ctx=config.blockSize.toLong();val kv=config.nKvHead.toLong()
         require(batch in 1..32 && layers in 1..12 && c in 32..512 && heads in 1..16 && kv>0 && heads%kv==0L && c%heads==0L)
-        require(ctx in 32..2048 && config.vocabSize in 262..50000 && config.ffnMult.isFinite() && config.ffnMult>0 && config.ffnMult<=16)
+        require(ctx in 32..2048 && config.vocabSize in 261..50000 && config.ffnMult.isFinite() && config.ffnMult>0 && config.ffnMult<=16)
         val f=config.intermediateSize?.toLong() ?: kotlin.math.round(c*config.ffnMult).toLong()
         require(f in 1..8192)
         val params=config.vocabSize*c+c+layers*(2*c*c+2*c*(c/heads*kv)+3*c*f+2*c)
