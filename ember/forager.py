@@ -51,6 +51,7 @@ class Forager:
         self._lock = threading.RLock()
         self._host_slots=defaultdict(lambda:threading.BoundedSemaphore(2))
         self._host_next=defaultdict(float)
+        self._wiki_languages=["simple","en"]
         self._cache_dir=corpus.db_path.parent/"forage_http_cache"
         self._cache_dir.mkdir(exist_ok=True)
         self.metrics={k:0 for k in ("activeRequests","cached","fetched","failed","duplicates","rejected","bytesDownloaded","completedSources")}
@@ -86,7 +87,12 @@ class Forager:
         with self._lock:
             if self.running:
                 return {"running": True}
+            if options.get("resume") and not (self.saved_state or {}).get("pendingTopics"):
+                raise ValueError("No pending foraging topics to resume")
+            self._wiki_languages=["simple","en"] if options.get("wikiFamily",True) else ["en"]
             seeds_raw = str(options.get("seeds") or "").strip()
+            extra=str(options.get("wiki") or "").strip()
+            if extra:seeds_raw=", ".join(filter(None,[seeds_raw,extra]))
             subs_raw = str(options.get("subreddits") or "").strip()
             if not seeds_raw and not subs_raw:
                 seeds_raw = "astronomy, botany, oceanography, history of science"
@@ -304,7 +310,7 @@ class Forager:
                     pass
 
     def _fetch_wikipedia(self, topic: str, wander_queue: list[str] | None) -> None:
-        langs = ["simple", "en"]
+        langs = self._wiki_languages
         for lang in langs:
             if self._stop.is_set():
                 return

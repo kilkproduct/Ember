@@ -460,7 +460,7 @@ fun VoiceScreen(
                                     text = when {
                                         entry.valid == false -> "not usable: ${entry.error ?: "invalid file"}"
                                         else -> "${entry.arch.ifBlank { "gguf" }} · ctx ${entry.contextLength} · " +
-                                            "vocab ${entry.vocabSize} · ${Formats.bytes(entry.bytes)}"
+                                            "vocab ${entry.vocabSize} · ${Formats.bytes(entry.bytes)} · ${if(entry.storage=="external") "external URI" else if(entry.trained) "trained" else "app copy"}"
                                     },
                                     style = MaterialTheme.typography.labelSmall,
                                     color = if (entry.valid == false) {
@@ -470,6 +470,7 @@ fun VoiceScreen(
                                     },
                                 )
                             }
+                            if(entry.storage=="external")TextButton(onClick={vm.repo.forgetExternalModel(entry)},enabled=!generating && !ui.modelBusy) {Text("Forget")}
                             if (!entry.selected && entry.valid != false) {
                                 TextButton(
                                     onClick = { if (entry.trained) vm.selectTrainedModel() else vm.selectLibraryModel(entry.path) },
@@ -511,8 +512,7 @@ fun VoiceScreen(
                 Spacer(Modifier.height(6.dp))
                 Text(
                     text = "Seekable SAF models stay in their original location with retained permission. Other providers require a cancellable copy. " +
-                        "validates its GGUF metadata and tensors, and only then selects it — a model is never " +
-                        "reported ready just because the file exists.",
+                        "Registration checks structure; first generation validates native loading. Forget removes only the registration, never the original file.",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )

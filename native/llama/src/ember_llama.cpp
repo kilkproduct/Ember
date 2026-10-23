@@ -779,7 +779,7 @@ EMBER_API int ember_llama_generate(
         std::ostringstream w;
         w << "Prompt (" << prompt_ids.size() << " tokens) exceeded the context window (" << n_ctx
           << "); kept the most recent " << room << " tokens.";
-        warning = w.str();
+        warning += w.str();
         prompt_ids.erase(prompt_ids.begin(), prompt_ids.end() - room);
     }
 
@@ -835,6 +835,7 @@ EMBER_API int ember_llama_generate(
                 break;
             }
             if (n_past >= n_ctx) {
+                if(warning.find("oldest tokens")==std::string::npos)warning+=" Context filled; oldest tokens were removed to continue generation.";
                 // Learned GPT-2 positions cannot be shifted as if they were RoPE.
                 // Re-evaluate the newest context with positions reset to zero.
                 std::vector<llama_token> window(prompt_ids);

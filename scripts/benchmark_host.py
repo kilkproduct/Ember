@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Fixed host microbenchmarks, not Android-device performance claims."""
-import sys,os,time,json,platform,subprocess,tempfile,statistics,resource
+import sys,os,time,json,platform,subprocess,tempfile,statistics,resource,hashlib
 from pathlib import Path
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 import numpy as np
@@ -17,6 +17,8 @@ def measure(fn,n=5):
 
 def main():
     result={'commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
+      'working_tree_dirty':bool(subprocess.check_output(['git','status','--porcelain'],text=True).strip()),
+      'source_sha256':hashlib.sha256(b''.join(p.read_bytes() for p in sorted(Path('ember').glob('*.py')))).hexdigest(),
       'environment':{'python':platform.python_version(),'numpy':np.__version__,'machine':platform.machine(),
       'platform':platform.platform(),'cpu':platform.processor(),'cpus':os.cpu_count(),'openblas_threads':os.getenv('OPENBLAS_NUM_THREADS')}}
     texts=[f'Document {i}: The tide rises and falls. Unicode café 灯台 🔥. '*20 for i in range(200)]
@@ -39,6 +41,18 @@ def main():
         if e.available():
             result['model_load']=measure(lambda:e.load_model(gguf,EngineConfig(n_ctx=32,n_threads=2)),3)
             result['generation_32_tokens']=measure(lambda:e.generate('The tide',GenParams(max_tokens=32,temperature=0,stop_on_eos=False)),5)
+            latencies=[];cancellations=[]
+            for _ in range(5):
+                first=[];start=time.perf_counter()
+                def receive(piece,tid,n):
+                    first.append(time.perf_counter());return False
+                outcome=e.generate('The tide',GenParams(max_tokens=32,temperature=0,stop_on_eos=False),receive)
+                returned=time.perf_counter()
+                if first:
+                    latencies.append(first[0]-start);cancellations.append(returned-first[0])
+                assert outcome.stopped_by=='cancelled'
+            result['first_token_seconds_after_only']=latencies
+            result['cancel_after_callback_seconds_after_only']=cancellations
             e.close()
     result['peak_rss_kib']=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     print(json.dumps(result,indent=2))

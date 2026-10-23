@@ -489,7 +489,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         teachForm = teachForm.copy(response = last.text.trim())
     }
 
-    fun startForage() {
+    fun startForage(resume: Boolean = false) {
         val f = fuelForm
         if (!f.wikiOn && !f.redditArctic && !f.redditPullpush && !f.stack && !f.gutenberg &&
             !f.openlibrary && !f.hn && !f.wander
@@ -513,6 +513,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             wander = f.wander,
             autopilot = f.autopilot,
             autoFire = f.autoFire,
+            resume = resume,
         )
         repo.startForage(options)
     }
@@ -553,7 +554,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "wide-shallow" to VesselPreset(2,8,256,128,8000,"0",2),
             "gqa-4" to VesselPreset(4,8,128,256,4000,"0",4),
             "ffn-rich" to VesselPreset(3,4,128,128,4000,"0",2,"8"),
-            "long-context" to VesselPreset(2,4,64,2048,2000,"0",1),
+            "long-context" to VesselPreset(1,1,32,2048,2000,"0",1),
             "vocab-50k" to VesselPreset(2,4,64,128,50000,"0",1),
         )
 

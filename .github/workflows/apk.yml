@@ -195,7 +195,7 @@ jobs:
         working-directory: android
         run: |
           set -o pipefail
-          gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
+          gradle testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
 
       - name: Report Android unit test failures
         if: failure()

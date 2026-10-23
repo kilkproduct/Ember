@@ -405,6 +405,7 @@ data class ForagingSnapshot(
     val duplicates: Long = 0,
     val rejected: Long = 0,
     val bytesDownloaded: Long = 0,
+    val pendingTopics: Int = 0,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ForagingSnapshot {
@@ -415,6 +416,7 @@ data class ForagingSnapshot(
                 activeRequests=json.intOr("activeRequests"),fetched=json.longOr("fetched"),cached=json.longOr("cached"),
                 failed=json.longOr("failed"),duplicates=json.longOr("duplicates"),
                 rejected=json.longOr("rejected"),bytesDownloaded=json.longOr("bytesDownloaded"),
+                pendingTopics=json.optJSONObject("autosave")?.optJSONArray("pendingTopics")?.length() ?: 0,
                 lastDocument = json.stringOr("lastDocument"),
                 currentSeeds = json.stringOr("currentSeeds"),
                 startedAt = json.longOr("startedAt"),
@@ -1181,6 +1183,7 @@ data class ForageOptions(
     val wander: Boolean = true,
     val autopilot: Boolean = true,
     val autoFire: Boolean = false,
+    val resume: Boolean = false,
 ) {
     fun toJson(): JSONObject = JSONObject()
         .put("seeds", seeds)
@@ -1199,4 +1202,5 @@ data class ForageOptions(
         .put("wander", wander)
         .put("autopilot", autopilot)
         .put("autoFire", autoFire)
+        .put("resume",resume)
 }

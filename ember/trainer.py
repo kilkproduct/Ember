@@ -95,7 +95,7 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
     candidate.validate()
     n_params = candidate.n_params
     # Parameter states (16 B/param) + activation working set for batch=2
-    act_bytes = 2 * n_layer * (block_size * n_embd * 80 + n_head * block_size * block_size * 16)
+    act_bytes = 2 * n_layer * (block_size * (32*n_embd+12*candidate.ffn) + n_head * block_size * block_size * 16) + 2*block_size*vocab_size*16
     train_bytes = estimate_train_bytes(n_params) + act_bytes
 
     blocked = train_bytes > BLOCK_PHONE_BYTES
@@ -323,9 +323,15 @@ class Trainer:
                 # Recasting must work after a schema migration, but retain the
                 # incompatible file byte-for-byte before replacing active data.
                 import hashlib, shutil
-                digest=hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+                def digest_file(file):
+                    h=hashlib.sha256()
+                    with file.open("rb") as src:
+                        for chunk in iter(lambda:src.read(1024*1024),b""):h.update(chunk)
+                    return h.hexdigest()
+                digest=digest_file(path)
                 backup=self.ckpts_dir/(path.stem+"-legacy-"+digest+".emb")
                 if not backup.exists(): shutil.copy2(path,backup)
+                if digest_file(backup)!=digest:raise OSError("Legacy checkpoint backup verification failed; original retained")
                 previous="legacy-backed-up"
         if path.exists() and previous is None:
             # Existing EMB4 checkpoints without optimizer references remain readable.
@@ -731,7 +737,7 @@ class Trainer:
             batcher.rng.bit_generator.state=bs["rng"]
             batcher._cursor=bs["cursor"]
             batcher._order=np.array(bs["order"],dtype=np.int64) if bs["order"] is not None else None
-        working_bytes = estimate_train_bytes(self.cfg.n_params) + batch_size*self.cfg.n_layer*(self.cfg.block_size*self.cfg.n_embd*80 + self.cfg.n_head*self.cfg.block_size**2*16)
+        working_bytes = estimate_train_bytes(self.cfg.n_params) + batch_size*self.cfg.n_layer*(self.cfg.block_size*(32*self.cfg.n_embd+12*self.cfg.ffn) + self.cfg.n_head*self.cfg.block_size**2*16) + batch_size*self.cfg.block_size*self.cfg.vocab_size*16
         if working_bytes > BLOCK_PHONE_BYTES:
             self.running = False
             raise ValueError("Training batch/context exceeds mobile memory budget; reduce batch or context.")
@@ -786,7 +792,8 @@ class Trainer:
                         outcome="doused"
                         break
                     if grads is None or count == 0 or valid_micro != accum:
-                        continue
+                        outcome="failed";error_msg="Non-finite loss/gradients or empty loss mask; optimizer update refused"
+                        break
                     grads={k:g/count for k,g in grads.items()}
                     loss=loss_sum/count
                     gnorm, clipped = clip_grad_norm(grads, grad_clip)
@@ -1035,6 +1042,15 @@ class Trainer:
             self.corpus.set_kv("inference:selected_model",path)
             self._engine_model_path=""
         return {**entry,"imported":True,"selected":self._imported_gguf==Path(path)}
+
+    def unregister_external_model(self,uri):
+        with self._lock:
+            entry=self.external_models.pop(uri,None)
+            if entry and self._imported_gguf==Path(entry["path"]):
+                self._imported_gguf=None;self._engine_model_path=""
+                self.corpus.set_kv("inference:selected_external",None)
+                self.corpus.set_kv("inference:selected_model",None)
+            return {"removed":bool(entry),"uri":uri}
 
     def list_library_models(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []

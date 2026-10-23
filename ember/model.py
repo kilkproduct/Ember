@@ -282,16 +282,19 @@ def _cross_entropy_backward(logits, targets):
     if n_valid == 0:
         return 0.0, np.zeros_like(flat)
     m = np.max(flat, axis=-1, keepdims=True)
-    e = np.exp(flat - m)
-    s = np.sum(e, axis=-1, keepdims=True)
-    logp = flat - m - np.log(s)
+    # One vocabulary-sized working buffer, reused as the gradient. Never
+    # materialize full log-probabilities or a second probability matrix.
+    gradient = flat - m
+    np.exp(gradient, out=gradient)
+    sums = np.sum(gradient, axis=-1, keepdims=True)
     idx = np.nonzero(valid)[0]
-    loss = float(-np.mean(logp[idx, tgt[idx]]))
-    probs = e / s
-    dlogits = probs
-    dlogits[idx, tgt[idx]] -= 1.0
-    dlogits = dlogits * (valid.astype(np.float32)[:, None] / float(n_valid))
-    return loss, dlogits.astype(np.float32)
+    nll = np.log(sums[idx, 0]) - (flat[idx, tgt[idx]] - m[idx, 0])
+    loss = float(np.mean(nll))
+    gradient /= sums
+    gradient[idx, tgt[idx]] -= 1.0
+    gradient *= valid.astype(np.float32)[:, None] / float(n_valid)
+    return loss, gradient
+
 
 
 # --------------------------------------------------------------------------

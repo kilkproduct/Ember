@@ -12,7 +12,7 @@ from ember.model import ModelConfig,Llama
 from ember.inference import LlamaCppEngine,EngineConfig,GenParams
 
 
-def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph'):
+def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph',quantized=False):
     tok=train_bpe(['Hello world. A small deterministic fixture. '*20],vocab_size=300)
     tokens,types,merges=gguf_vocab_entries(tok.vocab,tok.merges,special_ids=(256,257,258,259,260))
     start=len(tokens);end=start+1
@@ -40,14 +40,15 @@ def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph'):
     w.add_u32('tokenizer.ggml.eos_token_id',end)
     w.add_bool('tokenizer.ggml.add_bos_token',False)
     w.add_string('tokenizer.chat_template',"{% for message in messages %}{{ '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}")
-    for k,v in tensors.items():w.add_tensor(k,v)
+    for k,v in tensors.items():w.add_tensor(k,v,quantize=quantized and v.ndim==2)
     path.write_bytes(w.build())
     return start,end
 
 
+@pytest.mark.parametrize('quantized',[False,True])
 @pytest.mark.parametrize('arch,name',[('qwen2','Qwen2'),('qwen2','Qwen2.5'),('qwen3','Qwen3')])
-def test_dense_qwen_load_template_context_stream_cancel_and_recovery(tmp_path,arch,name):
-    path=tmp_path/(name+'.gguf');start,end=qwen_fixture(path,arch,name)
+def test_dense_qwen_load_template_context_stream_cancel_and_recovery(tmp_path,arch,name,quantized):
+    path=tmp_path/(name+'.gguf');start,end=qwen_fixture(path,arch,name,quantized)
     info=validate_gguf_file(path)
     assert info['arch']==arch and info['contextLength']==2048 and info['tokenizerPre']=='qwen2'
     e=LlamaCppEngine()

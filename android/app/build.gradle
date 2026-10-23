@@ -107,8 +107,8 @@ chaquopy {
     defaultConfig {
         version "3.13"
         pip {
-            install "numpy"
-            install "zstandard"
+            install "numpy==1.26.2"
+            install "zstandard==0.23.0"
         }
     }
     sourceSets {

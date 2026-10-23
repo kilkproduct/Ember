@@ -557,6 +557,9 @@ class EmberBackend:
             raw = p.get("path")
             return self.trainer.select_model(None if raw in (None, "") else str(raw))
 
+        if method == "model.unregisterExternal":
+            return self.trainer.unregister_external_model(str(p["uri"]))
+
         if method == "model.registerExternal":
             return self.trainer.register_external_model(str(p["path"]),str(p["uri"]),str(p.get("name","External model")),bool(p.get("select",True)))
 

@@ -147,3 +147,61 @@ def test_actual_50000_vocab_checkpoint_loss_export_and_native_tokenizer(tmp_path
         assert e.tokenize(text)==tok.encode(text)
         assert e.generate(text,GenParams(max_tokens=2,temperature=0,stop_on_eos=False)).new_tokens==2
     finally:e.close()
+
+
+def test_external_descriptor_selection_and_restart_does_not_reuse_stale_fd(tmp_path):
+    from ember.backend import EmberBackend
+    path=tmp_path/'external.gguf';tok=train_bpe(['A real fixture passage. '*5],300)
+    cfg=ModelConfig(n_layer=1,n_head=2,n_embd=32,vocab_size=tok.vocab_size)
+    export_gguf(path,cfg,Llama(cfg,seed=4).params,tok)
+    backend=EmberBackend(tmp_path/'app')
+    try:
+        with path.open('rb') as f:
+            fd=f'/proc/self/fd/{f.fileno()}'
+            backend.dispatch('model.registerExternal',{'path':fd,'uri':'content://fixture/1','name':'fixture'})
+            result=backend.dispatch('model.select',{'path':fd})
+            assert result['selected']==fd
+            assert backend.trainer.inference_model_path.as_posix()==fd
+            assert backend.dispatch('model.list')['models'][-1]['storage']=='external'
+    finally:backend.close()
+    backend=EmberBackend(tmp_path/'app')
+    try:assert backend.trainer._imported_gguf is None
+    finally:backend.close()
+
+
+def test_stream_rejects_unbounded_single_line(tmp_path):
+    path=tmp_path/'oversized.jsonl'
+    with path.open('w') as f:
+        f.write('{"text":"')
+        for _ in range(9*1024):f.write('x'*1024)
+        f.write('"}\n')
+    mgr=ImportManager(Corpus(tmp_path/'db'));mgr.stage_path('oversized',path)
+    with pytest.raises(ValueError,match='safety limit'):mgr.commit('oversized')
+
+
+def test_native_invalid_resources_and_clamped_context_warning(tmp_path):
+    tok=train_bpe(['A real fixture passage. '*5],300)
+    cfg=ModelConfig(n_layer=1,n_head=2,n_embd=32,block_size=32,vocab_size=tok.vocab_size)
+    path=tmp_path/'resources.gguf';export_gguf(path,cfg,Llama(cfg,seed=4).params,tok)
+    e=LlamaCppEngine()
+    try:
+        with pytest.raises(InferenceError,match='microbatch'):e.load_model(path,EngineConfig(n_batch=16,n_ubatch=64))
+        with pytest.raises(InferenceError):e.load_model(path,EngineConfig(n_ctx=9000))
+        e.load_model(path,EngineConfig(n_ctx=2048,n_batch=64,n_ubatch=16,n_threads=2))
+        result=e.generate('A real',GenParams(max_tokens=1,temperature=0))
+        assert 'clamped' in result.warning.lower()
+    finally:e.close()
+
+
+def test_reused_cross_entropy_buffer_matches_float64_oracle_without_mutating_logits():
+    from ember.model import _cross_entropy_backward
+    rng=np.random.default_rng(13);x=rng.standard_normal((2,3,50000),dtype=np.float32)
+    before=x.copy();targets=np.array([[49999,1,-100],[0,234,45000]])
+    loss,grad=_cross_entropy_backward(x,targets)
+    flat=x.reshape(-1,50000).astype(np.float64);labels=targets.ravel();valid=labels>=0
+    shifted=flat-flat.max(axis=1,keepdims=True);prob=np.exp(shifted);prob/=prob.sum(axis=1,keepdims=True)
+    expected_loss=-np.log(prob[np.flatnonzero(valid),labels[valid]]).mean()
+    expected=prob.copy();expected[np.flatnonzero(valid),labels[valid]]-=1;expected[~valid]=0;expected/=valid.sum()
+    assert abs(loss-expected_loss)<2e-6
+    np.testing.assert_allclose(grad,expected,rtol=2e-6,atol=1e-8)
+    np.testing.assert_array_equal(x,before)

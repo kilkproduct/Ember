@@ -181,6 +181,8 @@ data class LibraryModel(
     val embeddingLength: Int = 0,
     val emberFormat: String = "",
     val quantizedTensors: Int = 0,
+    val storage: String = "copied",
+    val uri: String = "",
     val trained: Boolean = false,
     val step: Long = 0,
 ) {
@@ -200,6 +202,7 @@ data class LibraryModel(
             embeddingLength = json.optInt("embeddingLength", 0),
             emberFormat = json.optString("emberFormat", ""),
             quantizedTensors = json.optInt("quantizedTensors", 0),
+            storage=json.optString("storage","copied"),uri=json.optString("uri",""),
             trained = json.optBoolean("trained", false),
             step = json.optLong("step", 0),
         )
@@ -1345,16 +1348,8 @@ class EmberRepository private constructor(
 
     fun estimateVessel(config: ModelConfig) {
         try {
-            val c=config.nEmbd.toLong();val layers=config.nLayer.toLong();val heads=config.nHead.toLong()
-            val ctx=config.blockSize.toLong();val kv=config.nKvHead.toLong()
-            require(heads>0 && kv>0 && heads%kv==0L && c%heads==0L)
-            val f=config.intermediateSize?.toLong() ?: kotlin.math.round(c*config.ffnMult).toLong()
-            val params=config.vocabSize*c+c+layers*(2*c*c+2*c*(c/heads*kv)+3*c*f+2*c)
-            val memory=params*16+2*layers*(ctx*c*80+heads*ctx*ctx*16)
-            val blocked=memory>512L*1024*1024
-            val j=JSONObject().put("params",params).put("trainBytes",memory).put("vocabSize",config.vocabSize)
-                .put("blocked",blocked).put("warning",if(blocked) "Training estimate exceeds mobile safety budget; reduce batch/context/width." else JSONObject.NULL)
-            _state.update {it.copy(vesselEstimate=VesselEstimate.fromJson(j),vesselEstimateError=null)}
+            val estimate=VesselEstimator.estimate(config)
+            _state.update {it.copy(vesselEstimate=estimate,vesselEstimateError=null)}
         } catch(t: Throwable) {reportVesselConfigError(t.message ?: "Invalid dimensions")}
     }
 
@@ -1582,11 +1577,13 @@ class EmberRepository private constructor(
      * The file is copied into app-private storage first (so it survives the URI
      * permission expiring), then validated structurally before it is selected.
      */
-    private val externalDescriptors = mutableMapOf<String,ParcelFileDescriptor>()
+    private val externalDescriptors = java.util.concurrent.ConcurrentHashMap<String,ParcelFileDescriptor>()
     private var modelImportJob: Job? = null
 
     private suspend fun registerExternal(uri: Uri, name: String, select: Boolean): JSONObject {
         return withContext(Dispatchers.IO) {
+            if(externalDescriptors.size>=32 && !externalDescriptors.containsKey(uri.toString()))
+                throw EmberBackendException("32 external models are registered. Forget one to free a descriptor before adding another.")
             var descriptor: ParcelFileDescriptor? = null
             try {
                 descriptor=app.contentResolver.openFileDescriptor(uri,"r")
@@ -1613,6 +1610,21 @@ class EmberRepository private constructor(
                 if(t is CancellationException) throw t
                 addNotice(NoticeLevel.WARNING,"External model unavailable","${entry.optString("name")}: permission revoked or file moved. Select it again. ${t.message}")
             }
+        }
+    }
+
+    fun forgetExternalModel(model: LibraryModel) {
+        launchOperation(Ops.MODEL_IMPORT,"Could not forget external model") {
+            if(model.selected)engine.call("model.unload")
+            engine.call("model.unregisterExternal",JSONObject().put("uri",model.uri))
+            externalDescriptors.remove(model.uri)?.close()
+            val prefs=app.getSharedPreferences("external_models",Context.MODE_PRIVATE)
+            val entries=JSONArray(prefs.getString("models","[]") ?: "[]");val kept=JSONArray()
+            for(i in 0 until entries.length())if(entries.getJSONObject(i).optString("uri")!=model.uri)kept.put(entries.getJSONObject(i))
+            prefs.edit().putString("models",kept.toString()).apply()
+            runCatching {app.contentResolver.releasePersistableUriPermission(Uri.parse(model.uri),Intent.FLAG_GRANT_READ_URI_PERMISSION)}
+            refreshStatus()
+            addNotice(NoticeLevel.INFO,"External registration forgotten","The original file was not deleted.")
         }
     }
 
