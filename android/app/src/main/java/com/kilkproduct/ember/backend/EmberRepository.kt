@@ -3,6 +3,11 @@ package com.kilkproduct.ember.backend
 import android.app.Application
 import android.content.Context
 import android.net.Uri
+import android.content.Intent
+import android.os.ParcelFileDescriptor
+import android.system.Os
+import android.system.OsConstants
+import kotlinx.coroutines.ensureActive
 import com.kilkproduct.ember.BuildConfig
 import com.kilkproduct.ember.data.Preferences
 import com.kilkproduct.ember.service.EmberNotifications
@@ -142,6 +147,7 @@ data class UiState(
     val streamingTokens: Int = 0,
     val streamingRequestId: String? = null,
     val modelBusy: Boolean = false,
+    val modelImportDetail: String = "",
     val contextLength: Int = 512,
     val quantization: String = "f32",
 ) {
@@ -315,6 +321,7 @@ class EmberRepository private constructor(
                         inferenceError = info.stringOrNull("error") ?: info.stringOrNull("nativeError"),
                     )
                 }
+                restoreExternalModels()
                 val statusJson = engine.call("status", timeoutMs = 120_000)
                 applyStatus(EmberStatus.fromJson(statusJson))
                 applyInferenceStatus(statusJson)
@@ -1337,27 +1344,18 @@ class EmberRepository private constructor(
     // ---------------------------------------------------------------------
 
     fun estimateVessel(config: ModelConfig) {
-        val seq = estimateSeq.incrementAndGet()
-        scope.launch {
-            try {
-                val json = engine.call(
-                    "vessel.estimate",
-                    JSONObject().put("config", config.toJson()),
-                    timeoutMs = 30_000,
-                )
-                if (seq == estimateSeq.get()) {
-                    _state.update { it.copy(vesselEstimate = VesselEstimate.fromJson(json), vesselEstimateError = null) }
-                }
-            } catch (e: CancellationException) {
-                throw e
-            } catch (t: Throwable) {
-                if (seq == estimateSeq.get()) {
-                    _state.update {
-                        it.copy(vesselEstimate = null, vesselEstimateError = t.message ?: "Invalid configuration")
-                    }
-                }
-            }
-        }
+        try {
+            val c=config.nEmbd.toLong();val layers=config.nLayer.toLong();val heads=config.nHead.toLong()
+            val ctx=config.blockSize.toLong();val kv=config.nKvHead.toLong()
+            require(heads>0 && kv>0 && heads%kv==0L && c%heads==0L)
+            val f=config.intermediateSize?.toLong() ?: kotlin.math.round(c*config.ffnMult).toLong()
+            val params=config.vocabSize*c+c+layers*(2*c*c+2*c*(c/heads*kv)+3*c*f+2*c)
+            val memory=params*16+2*layers*(ctx*c*80+heads*ctx*ctx*16)
+            val blocked=memory>512L*1024*1024
+            val j=JSONObject().put("params",params).put("trainBytes",memory).put("vocabSize",config.vocabSize)
+                .put("blocked",blocked).put("warning",if(blocked) "Training estimate exceeds mobile safety budget; reduce batch/context/width." else JSONObject.NULL)
+            _state.update {it.copy(vesselEstimate=VesselEstimate.fromJson(j),vesselEstimateError=null)}
+        } catch(t: Throwable) {reportVesselConfigError(t.message ?: "Invalid dimensions")}
     }
 
     fun reportVesselConfigError(
@@ -1413,6 +1411,9 @@ class EmberRepository private constructor(
                 .put("balance", options.balance)
                 .put("lessonLoss", options.lessonLoss)
                 .put("samplePrompt", options.samplePrompt)
+                .put("weightDecay",options.weightDecay)
+                .put("gradientAccumulation",options.gradientAccumulation)
+                .put("checkpointEvery",options.checkpointEvery)
             val result = engine.call("train.start", params, timeoutMs = 300_000)
             _state.update {
                 it.copy(
@@ -1504,6 +1505,9 @@ class EmberRepository private constructor(
                     .put("lang", options.language)
                     .put("stopOnBoundary", options.stopOnBoundary)
                     .put("nCtx", options.contextLength)
+                    .put("nThreads",options.threads)
+                    .put("nBatch",options.batchSize)
+                    .put("nUbatch",options.microBatch)
                 val json = engine.call("gen.run", params, timeoutMs = 900_000)
                 val result = GenerationResult.fromJson(json)
                 val streamed = _state.value.streamingText
@@ -1575,22 +1579,81 @@ class EmberRepository private constructor(
      * The file is copied into app-private storage first (so it survives the URI
      * permission expiring), then validated structurally before it is selected.
      */
+    private val externalDescriptors = mutableMapOf<String,ParcelFileDescriptor>()
+    private var modelImportJob: Job? = null
+
+    private suspend fun registerExternal(uri: Uri, name: String, select: Boolean): JSONObject {
+        return withContext(Dispatchers.IO) {
+            var descriptor: ParcelFileDescriptor? = null
+            try {
+                descriptor=app.contentResolver.openFileDescriptor(uri,"r")
+                    ?: throw java.io.IOException("Provider could not open this model")
+                Os.lseek(descriptor.fileDescriptor,0,OsConstants.SEEK_CUR)
+                if (descriptor.statSize<=0) throw java.io.IOException("Provider does not expose a seekable file")
+                val result=engine.call("model.registerExternal",JSONObject()
+                    .put("path","/proc/self/fd/${descriptor.fd}").put("uri",uri.toString())
+                    .put("name",name).put("select",select),timeoutMs=300_000)
+                externalDescriptors.put(uri.toString(),descriptor)?.close()
+                descriptor=null
+                result
+            } finally { descriptor?.close() }
+        }
+    }
+
+    private suspend fun restoreExternalModels() {
+        val stored=app.getSharedPreferences("external_models",Context.MODE_PRIVATE).getString("models","[]") ?: "[]"
+        val entries=JSONArray(stored)
+        for (i in 0 until entries.length()) {
+            val entry=entries.getJSONObject(i)
+            try { registerExternal(Uri.parse(entry.getString("uri")),entry.getString("name"),false) }
+            catch (t: Throwable) {
+                if(t is CancellationException) throw t
+                addNotice(NoticeLevel.WARNING,"External model unavailable","${entry.optString("name")}: permission revoked or file moved. Select it again. ${t.message}")
+            }
+        }
+    }
+
+    fun cancelModelImport() { modelImportJob?.cancel() }
+
     fun importModel(uri: Uri) {
         if (!gate.tryStart(Ops.MODEL_IMPORT)) return
         markBusy(Ops.MODEL_IMPORT, true)
         _state.update { it.copy(modelBusy = true, inferenceError = null) }
-        scope.launch {
+        modelImportJob = scope.launch {
             var token: String? = null
             try {
                 val name = withContext(Dispatchers.IO) { Files.displayName(app, uri) }
-                val mime = withContext(Dispatchers.IO) { Files.mimeType(app, uri) }
-                val staged = withContext(Dispatchers.IO) { engine.stageImport(uri, name, mime) }
-                token = staged.token
-                val result = engine.call(
-                    "model.importGguf",
-                    JSONObject().put("token", staged.token).put("name", name).put("select", true),
-                    timeoutMs = 600_000,
-                )
+                _state.update { it.copy(modelImportDetail="Inspecting model metadata…") }
+                val result = try {
+                    withContext(Dispatchers.IO) {
+                        app.contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    }
+                    registerExternal(uri,name,true).also {
+                        val prefs=app.getSharedPreferences("external_models",Context.MODE_PRIVATE)
+                        val entries=JSONArray(prefs.getString("models","[]") ?: "[]")
+                        val saved=JSONArray()
+                        for (i in 0 until entries.length()) if(entries.getJSONObject(i).optString("uri")!=uri.toString()) saved.put(entries.getJSONObject(i))
+                        saved.put(JSONObject().put("uri",uri.toString()).put("name",name))
+                        prefs.edit().putString("models",saved.toString()).apply()
+                        _state.update { state -> state.copy(modelImportDetail="Registered external model · no model copy · native validation on first load") }
+                    }
+                } catch(t: Throwable) {
+                    if(t is CancellationException) throw t
+                    // Only non-seekable/provider failures may need copying; an
+                    // invalid GGUF must fail validation rather than copying gigabytes.
+                    if(t is EmberBackendException) throw t
+                    addNotice(NoticeLevel.INFO,"Copy required","This provider cannot retain direct seekable access. Copying into Ember storage.")
+                    val mime=withContext(Dispatchers.IO) { Files.mimeType(app,uri) }
+                    val staged=withContext(Dispatchers.IO) {
+                        val taskContext=coroutineContext
+                        engine.stageImport(uri,name,mime,maxBytes=16L*1024*1024*1024,
+                            checkCancelled={taskContext.ensureActive()},onProgress={bytes ->
+                                _state.update { it.copy(modelImportDetail="Copied ${Formats.bytes(bytes)} · validation pending") }
+                            })
+                    }
+                    token=staged.token
+                    engine.call("model.importGguf",JSONObject().put("token",staged.token).put("name",name).put("select",true),timeoutMs=600_000)
+                }
                 addNotice(
                     NoticeLevel.SUCCESS,
                     "Model imported",
@@ -1611,7 +1674,7 @@ class EmberRepository private constructor(
                             nCtx = result.intOr("contextLength"),
                             modelBytes = result.longOr("bytes"),
                         ),
-                        contextLength = result.intOr("contextLength").coerceAtLeast(64),
+                        contextLength = result.intOr("contextLength").coerceIn(64,512),
                         modelSource = "imported",
                         inferenceError = null,
                     )

@@ -87,7 +87,7 @@ fun EmberCard(
     accent: Color? = null,
     trailing: (@Composable () -> Unit)? = null,
     contentPadding: androidx.compose.foundation.layout.PaddingValues =
-        androidx.compose.foundation.layout.PaddingValues(16.dp),
+        androidx.compose.foundation.layout.PaddingValues(12.dp),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     Surface(
@@ -177,8 +177,7 @@ fun StatTile(
                 text = value,
                 style = MaterialTheme.typography.titleMedium,
                 color = valueColor,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
+                softWrap = true,
             )
             Text(
                 text = label,

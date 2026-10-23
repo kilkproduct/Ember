@@ -57,6 +57,7 @@ typedef struct ember_llama_config {
     int32_t n_gpu_layers;   /* 0 = CPU only (the default; GPU offload is opt-in)              */
     int32_t use_mmap;       /* 1 = mmap weights (lower RSS), 0 = read into RAM                */
     int32_t check_tensors;  /* 1 = validate tensor data while loading                         */
+    int32_t n_ubatch;       /* physical microbatch; 0 = min(batch, 64) */
 } ember_llama_config_t;
 
 /* Sampling configuration for one generation request. */

@@ -131,7 +131,7 @@ Java_com_kilkproduct_ember_backend_LlamaInference_nativeDestroy(JNIEnv*, jobject
 JNIEXPORT jbyteArray JNICALL
 Java_com_kilkproduct_ember_backend_LlamaInference_nativeLoad(
     JNIEnv* env, jobject, jlong handle, jbyteArray pathUtf8,
-    jint nCtx, jint nBatch, jint nThreads, jint nGpuLayers, jboolean useMmap, jboolean checkTensors
+    jint nCtx, jint nBatch, jint nThreads, jint nGpuLayers, jboolean useMmap, jboolean checkTensors, jint nUbatch
 ) {
     try {
         auto* engine = reinterpret_cast<ember_llama_t*>(handle);
@@ -142,6 +142,7 @@ Java_com_kilkproduct_ember_backend_LlamaInference_nativeLoad(
         ember_llama_config_t cfg{};
         cfg.n_ctx = nCtx;
         cfg.n_batch = nBatch;
+        cfg.n_ubatch = nUbatch;
         cfg.n_threads = nThreads;
         cfg.n_gpu_layers = nGpuLayers;
         cfg.use_mmap = useMmap ? 1 : 0;

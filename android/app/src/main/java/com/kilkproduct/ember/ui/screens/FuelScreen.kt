@@ -261,6 +261,8 @@ fun FuelScreen(
                             modifier = Modifier.weight(1f),
                         )
                     }
+                    Text("${ui.status.foraging.activeRequests} active · ${ui.status.foraging.fetched} fetched · ${ui.status.foraging.failed} failed",style=MaterialTheme.typography.bodySmall)
+                    Text("${ui.status.foraging.duplicates} duplicates · ${ui.status.foraging.rejected} rejected · ${Formats.bytes(ui.status.foraging.bytesDownloaded)} downloaded",style=MaterialTheme.typography.bodySmall)
                     if (ui.status.foraging.lastDocument.isNotBlank()) {
                         Spacer(Modifier.height(8.dp))
                         Text(

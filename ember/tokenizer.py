@@ -275,6 +275,7 @@ def train_bpe(
     pre-tokenised chunk counts are held in memory (needed by the GPT-2 style
     merge loop), never the corpus itself.
     """
+    if int(vocab_size)>50000: raise ValueError("Ember training vocabulary maximum is 50,000; imported model vocabularies are independent")
     vocab_size = max(FIRST_MERGE_ID + 1, int(vocab_size))
     counts = _chunk_counts(texts, progress=progress, total_hint=total_hint)
     if not counts:

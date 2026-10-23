@@ -79,6 +79,8 @@ data class ModelConfig(
     val maxTrainTokens: Int = 3000000,
     val maxValTokens: Int = 250000,
     val tokenizerChars: Int = 2000000,
+    val intermediateSize: Int? = null,
+    val seed: Int = 42,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ModelConfig? {
@@ -110,6 +112,8 @@ data class ModelConfig(
         .put("maxTrainTokens", maxTrainTokens)
         .put("maxValTokens", maxValTokens)
         .put("tokenizerChars", tokenizerChars)
+        .put("intermediate_size", intermediateSize ?: JSONObject.NULL)
+        .put("seed",seed)
 }
 
 data class LastRun(
@@ -389,6 +393,12 @@ data class ForagingSnapshot(
     val currentSeeds: String = "",
     val startedAt: Long = 0,
     val error: String? = null,
+    val activeRequests: Int = 0,
+    val fetched: Long = 0,
+    val failed: Long = 0,
+    val duplicates: Long = 0,
+    val rejected: Long = 0,
+    val bytesDownloaded: Long = 0,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ForagingSnapshot {
@@ -396,6 +406,9 @@ data class ForagingSnapshot(
             return ForagingSnapshot(
                 running = json.boolOr("running"),
                 documentsAccepted = json.longOr("documentsAccepted"),
+                activeRequests=json.intOr("activeRequests"),fetched=json.longOr("fetched"),
+                failed=json.longOr("failed"),duplicates=json.longOr("duplicates"),
+                rejected=json.longOr("rejected"),bytesDownloaded=json.longOr("bytesDownloaded"),
                 lastDocument = json.stringOr("lastDocument"),
                 currentSeeds = json.stringOr("currentSeeds"),
                 startedAt = json.longOr("startedAt"),
@@ -869,9 +882,11 @@ data class TrainingProgress(
     val valLoss: Double?,
     val bestValLoss: Double?,
     val passes: Long,
+    val etaSeconds: Double? = null,
 ) {
     companion object {
         fun fromJson(json: JSONObject) = TrainingProgress(
+            etaSeconds=json.doubleOrNull("etaSeconds"),
             step = json.longOr("step"),
             until = json.longOr("until"),
             startStep = json.longOr("startStep"),
@@ -1112,6 +1127,9 @@ data class TrainingOptions(
     val balance: String = "off",
     val lessonLoss: String = "both",
     val samplePrompt: String = "",
+    val weightDecay: Double = 0.01,
+    val gradientAccumulation: Int = 1,
+    val checkpointEvery: Int = 50,
 )
 
 data class GenerationOptions(
@@ -1129,6 +1147,9 @@ data class GenerationOptions(
     /** llama.cpp context length; 0 keeps whatever the model was exported with. */
     val contextLength: Int = 0,
     val repeatLastN: Int = 64,
+    val threads: Int = 0,
+    val batchSize: Int = 256,
+    val microBatch: Int = 64,
 )
 
 data class ForageOptions(

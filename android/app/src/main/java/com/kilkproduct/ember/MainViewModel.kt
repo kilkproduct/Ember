@@ -37,6 +37,9 @@ data class TrainForm(
     val balance: String = "off",
     val lessonLoss: String = "both",
     val samplePrompt: String = "",
+    val weightDecay: String = "0.01",
+    val accumulation: String = "1",
+    val checkpointEvery: String = "50",
 )
 
 data class VesselForm(
@@ -53,6 +56,9 @@ data class VesselForm(
     val ropeTheta: String = "500000",
     val maxTrainTokens: String = "3000000",
     val tokenizerChars: String = "2000000",
+    val intermediate: String = "",
+    val seed: String = "42",
+    val presetName: String = "My configuration",
     val lr: String = "0.0003",
 )
 
@@ -60,6 +66,9 @@ data class VoiceForm(
     val prompt: String = "",
     val maxNew: String = "80",
     val contextLength: String = "512",
+    val threads: String = "0",
+    val batchSize: String = "256",
+    val microBatch: String = "64",
     val temperature: String = "0.9",
     val topK: String = "40",
     val topP: String = "0.95",
@@ -144,6 +153,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ctx = preset.ctx.toString(),
             vocab = preset.vocab.toString(),
             dropout = preset.dropout,
+            kvHeads=preset.kv.toString(),
+            ffn=preset.ffn,
+            intermediate="",
         )
         scheduleEstimate()
     }
@@ -209,8 +221,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val tokenBudget = form.maxTrainTokens.toIntOrNull() ?: return null
         val tokenizerBudget = form.tokenizerChars.toIntOrNull() ?: return null
         if (kv < 1 || heads % kv != 0 || !theta.isFinite() || theta <= 0 || tokenBudget < 32 || tokenizerBudget < 32) return null
-        if (layers !in 2..6 || heads !in 2..8 || embd !in 32..256) return null
-        if (ctx !in 32..256 || vocab !in 500..6000) return null
+        if (layers !in 1..12 || heads !in 1..16 || embd !in 32..512) return null
+        if (ctx !in 32..2048 || vocab !in 262..50000) return null
         if (embd % heads != 0 || (embd / heads) % 2 != 0 || dropout != 0.0) return null
         return ModelConfig(
             nLayer = layers,
@@ -224,6 +236,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             ropeTheta = theta,
             maxTrainTokens = tokenBudget,
             tokenizerChars = tokenizerBudget,
+            intermediateSize=form.intermediate.toIntOrNull(),
+            seed=form.seed.toIntOrNull() ?: 42,
         )
     }
 
@@ -259,10 +273,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             repo.reportVesselConfigError()
             return
         }
-        estimateJob = scope.launch {
-            delay(320)
-            repo.estimateVessel(config)
-        }
+        repo.estimateVessel(config)
+    }
+
+    fun saveCustomPreset() {
+        val cfg=configFromForm() ?: return
+        val name=vesselForm.presetName.trim().take(60)
+        if(name.isEmpty())return
+        getApplication<Application>().getSharedPreferences("custom_presets",0).edit()
+            .putString(name,cfg.toJson().toString()).apply()
+        repo.addNotice(NoticeLevel.SUCCESS,"Preset saved",name)
+    }
+    fun loadCustomPreset() {
+        val raw=getApplication<Application>().getSharedPreferences("custom_presets",0).getString(vesselForm.presetName.trim(),null)
+        if(raw==null) {repo.addNotice(NoticeLevel.INFO,"Preset not found","Enter the name used when saving");return}
+        val j=org.json.JSONObject(raw)
+        vesselForm=vesselForm.copy(preset="custom",layers=j.optInt("nLayer").toString(),
+            heads=j.optInt("nHead").toString(),embd=j.optInt("nEmbd").toString(),ctx=j.optInt("blockSize").toString(),
+            vocab=j.optInt("vocabSize").toString(),kvHeads=j.optInt("nKvHead",1).toString(),ffn=j.optDouble("ffnMult",4.0).toString(),
+            ropeTheta=j.optDouble("ropeTheta",500000.0).toString(),seed=j.optInt("seed",42).toString(),
+            intermediate=if(j.isNull("intermediate_size")) "" else j.optInt("intermediate_size").toString())
+        scheduleEstimate()
     }
 
     fun castVessel() {
@@ -282,7 +313,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             repo.addNotice(
                 NoticeLevel.ERROR,
                 "Vessel configuration is out of range",
-                "Layers 2–6 · heads 2–8 · width 32–256 · context 32–256 · vocab 500–6000 · dropout 0 (Llama).",
+                "Layers 1–12 · heads 1–16 · width 32–512 · context 32–2048 · vocab 262–50,000 · dropout 0 (Llama).",
             )
             return
         }
@@ -332,6 +363,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             balance = f.balance,
             lessonLoss = f.lessonLoss,
             samplePrompt = f.samplePrompt,
+            weightDecay=f.weightDecay.toDoubleOrNull() ?: .01,
+            gradientAccumulation=(f.accumulation.toIntOrNull() ?: 1).coerceIn(1,64),
+            checkpointEvery=(f.checkpointEvery.toIntOrNull() ?: 50).coerceAtLeast(0),
         )
         repo.startTraining(options)
     }
@@ -346,6 +380,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val options = GenerationOptions(
             prompt = prompt,
             maxNew = (f.maxNew.toIntOrNull() ?: 80).coerceIn(1, 2048),
+            threads=(f.threads.toIntOrNull() ?: 0).coerceIn(0,8),
+            batchSize=(f.batchSize.toIntOrNull() ?: 256).coerceIn(16,2048),
+            microBatch=(f.microBatch.toIntOrNull() ?: 64).coerceIn(1,2048),
             contextLength = (f.contextLength.toIntOrNull() ?: 0).coerceIn(0, 8192),
             temperature = (f.temperature.toDoubleOrNull() ?: 0.9).coerceIn(0.05, 2.0),
             topK = (f.topK.toIntOrNull() ?: 40).coerceIn(0, 200),
@@ -464,6 +501,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val ctx: Int,
             val vocab: Int,
             val dropout: String,
+            val kv: Int = 1,
+            val ffn: String = "4",
         )
 
         val VESSEL_PRESETS: Map<String, VesselPreset> = linkedMapOf(
@@ -471,6 +510,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             "tiny" to VesselPreset(2, 2, 64, 64, 2000, "0"),
             "small" to VesselPreset(4, 4, 128, 128, 3000, "0"),
             "medium" to VesselPreset(6, 6, 192, 192, 4000, "0"),
+            "micro" to VesselPreset(1,2,32,32,500,"0"),
+            "deep-narrow" to VesselPreset(8,4,64,128,2000,"0",2),
+            "wide-shallow" to VesselPreset(2,8,256,128,8000,"0",2),
+            "gqa-4" to VesselPreset(4,8,128,256,4000,"0",4),
+            "ffn-rich" to VesselPreset(3,4,128,128,4000,"0",2,"8"),
+            "long-context" to VesselPreset(2,4,64,2048,2000,"0",1),
+            "vocab-50k" to VesselPreset(2,4,64,128,50000,"0",1),
         )
 
         fun activeVoicePreset(form: VoiceForm): String? =

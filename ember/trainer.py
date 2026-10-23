@@ -28,6 +28,7 @@ from .model import (
     ModelConfig,
     check_params,
     load_model,
+    read_checkpoint_metadata,
     load_model_bytes,
     model_from_dict,
     model_to_dict,
@@ -154,6 +155,7 @@ class Trainer:
         # Inference is served by llama.cpp through ember.inference. The trainer
         # owns the GGUF export that the engine loads; it never generates text in
         # NumPy on a production path.
+        self.external_models: dict[str,dict] = {}
         self.library_dir = self.models_dir / "library"
         self.library_dir.mkdir(parents=True, exist_ok=True)
         self._gguf_dirty: bool = True
@@ -316,7 +318,7 @@ class Trainer:
         opt = None
         previous = None
         if path.exists():
-            try: previous = load_model(path)[2].get("optimizer_file")
+            try: previous = read_checkpoint_metadata(path).get("optimizer_file")
             except ValueError:
                 # Recasting must work after a schema migration, but retain the
                 # incompatible file byte-for-byte before replacing active data.
@@ -327,7 +329,7 @@ class Trainer:
                 previous="legacy-backed-up"
         if path.exists() and previous is None:
             # Existing EMB4 checkpoints without optimizer references remain readable.
-            load_model(path)
+            read_checkpoint_metadata(path)
         if self.optimizer is not None and self.optimizer.t > 0:
             opt = path.with_name(path.stem+".state-"+uuid.uuid4().hex+".npz")
             self.optimizer.save_npz(opt)
@@ -423,6 +425,7 @@ class Trainer:
         n_embd = int(cfg_in.get("nEmbd") or cfg_in.get("n_embd") or base["n_embd"])
         block_size = int(cfg_in.get("blockSize") or cfg_in.get("block_size") or base["block_size"])
         target_vocab = int(cfg_in.get("vocabSize") or cfg_in.get("vocab_size") or base["vocab_size"])
+        self.requested_vocab=target_vocab
         ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or 4.0)
         dropout = float(cfg_in.get("dropout", base.get("dropout", 0.0)))
         base_lr = float(params.get("lr", cfg_in.get("lr", 3e-4)))
@@ -471,6 +474,7 @@ class Trainer:
             tok = train_bpe(
                 tokenizer_sample(),
                 vocab_size=target_vocab,
+                progress=lambda done,total: _stage("tokenizer", .1+.45*done/max(1,total)) if done%32==0 else None,
                 min_pair_count=2,
                 total_hint=n_docs,
             )
@@ -639,6 +643,7 @@ class Trainer:
         base_lr = float(opts.get("lr", 3e-4))
         accum = int(opts.get("gradientAccumulation",1))
         if not 1 <= accum <= 64: raise ValueError("gradientAccumulation must be 1..64")
+        checkpoint_every=max(0,int(opts.get("checkpointEvery",50)))
         sample_every = max(0, int(opts.get("every", 25)))
         val_every = max(0, int(opts.get("validateEvery", 50)))
         grad_clip = float(opts.get("gradClip", 1.0))
@@ -730,6 +735,8 @@ class Trainer:
             f"(batch={batch_size}, lr={base_lr:g}, clip={grad_clip:g}, boundaries={boundaries})"
         )
 
+        from .progress import WorkProgress
+        progress_rate=WorkProgress()
         try:
             for local_i in range(steps):
                 if self._stop_event.is_set():
@@ -800,7 +807,10 @@ class Trainer:
                     if len(self.losses) > 600:
                         self.losses = self.losses[-600:]
 
+                measured_progress=progress_rate.update(completed,steps)
                 progress_payload = {
+                    "etaSeconds": measured_progress["etaSeconds"],
+                    "workState": measured_progress["state"],
                     "step": self.step,
                     "until": target_step,
                     "startStep": start_step,
@@ -841,7 +851,7 @@ class Trainer:
                     self.samples = self.samples[:12]
                     self._emit("train.sample", entry)
 
-                if completed % 50 == 0:
+                if checkpoint_every>0 and completed % checkpoint_every == 0:
                     self._write_autosave()
 
         except Exception as exc:
@@ -1001,6 +1011,20 @@ class Trainer:
     # ------------------------------------------------------------------
     # GGUF model library (user-imported models)
     # ------------------------------------------------------------------
+    def register_external_model(self,path,uri,name,select=True):
+        # Android owns a seekable ParcelFileDescriptor for this process lifetime.
+        # URI permission, reopening after restart and revocation are Android duties.
+        if not str(path).startswith("/proc/self/fd/"): raise ValueError("external models require an Android-owned file descriptor")
+        info=validate_gguf_file(path)
+        entry={**info,"name":name,"libraryName":name,"storage":"external","uri":uri,"path":path}
+        self.external_models[uri]=entry
+        if select or self.corpus.get_kv("inference:selected_external")==uri:
+            self._imported_gguf=Path(path)
+            self.corpus.set_kv("inference:selected_external",uri)
+            self.corpus.set_kv("inference:selected_model",path)
+            self._engine_model_path=""
+        return {**entry,"imported":True,"selected":self._imported_gguf==Path(path)}
+
     def list_library_models(self) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for path in sorted(self.library_dir.glob("*.gguf")):
@@ -1062,6 +1086,8 @@ class Trainer:
                 entry["valid"] = False
                 entry["error"] = str(exc)
             out.insert(0, entry)
+        for entry in self.external_models.values():
+            out.append({**entry,"selected":self._imported_gguf==Path(entry["path"]),"valid":Path(entry["path"]).exists()})
         return out
 
     def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True) -> dict[str, Any]:
@@ -1096,7 +1122,9 @@ class Trainer:
         # Re-validate the copy: the file must be complete on this device, not just
         # at the source location.
         info = validate_gguf_file(dest)
+        engine.unload()  # Android JNI must not coexist with a Python validation context.
         if select:
+            self.corpus.set_kv("inference:selected_external",None)
             self.corpus.set_kv("inference:selected_model", str(dest))
             self._imported_gguf = dest
             self._engine_model_path = ""
@@ -1116,7 +1144,8 @@ class Trainer:
             selected = self.active_gguf_path
         else:
             candidate = Path(path)
-            if candidate.parent != self.library_dir:
+            external=next((e for e in self.external_models.values() if e["path"]==str(candidate)),None)
+            if candidate.parent != self.library_dir and external is None:
                 raise InferenceError(
                     "Only models in the Ember model library can be selected; import it first.",
                     code=-4,
@@ -1125,6 +1154,8 @@ class Trainer:
             validate_gguf_file(candidate)
             self._imported_gguf = candidate
             selected = candidate
+        external=next((e for e in self.external_models.values() if e["path"]==str(selected)),None)
+        self.corpus.set_kv("inference:selected_external",external["uri"] if external else None)
         self.corpus.set_kv("inference:selected_model", str(self._imported_gguf) if self._imported_gguf else None)
         self._engine_model_path = ""
         self._engine_model_mtime = -1.0
@@ -1546,6 +1577,7 @@ class Trainer:
             "bestValLoss": self.best_val_loss,
             "nParams": self.cfg.n_params if self.cfg else 0,
             "vocabSize": self.tokenizer.vocab_size if self.tokenizer else 0,
+            "requestedVocabSize": getattr(self,"requested_vocab",0),
             "tokenizerType": TOKENIZER_TYPE,
             "corpusTokens": ts.n_tokens if ts else 0,
             "valTokens": vs.n_tokens if vs else 0,

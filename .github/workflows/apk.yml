@@ -195,7 +195,7 @@ jobs:
         working-directory: android
         run: |
           set -o pipefail
-          gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
+          gradle testDebugUnitTest assembleDebug assembleRelease --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
 
       - name: Report Android unit test failures
         if: failure()
@@ -244,8 +244,26 @@ jobs:
           BODY=$(sed -e 's/%/%25/g' -e 's/\r//g' /tmp/errors.txt | awk '{printf "%s%%0A", $0}')
           echo "::error::$BODY"
 
-      - name: Name the APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk Ember-debug.apk
+      - name: Measure baseline APK from exact pre-overhaul commit
+        run: |
+          git fetch origin 412f8c1c6a26440d1d1043e429a534d7e1fc5751
+          mkdir -p /tmp/ember-baseline
+          git archive 412f8c1c6a26440d1d1043e429a534d7e1fc5751 | tar -x -C /tmp/ember-baseline
+          ln -s "$PWD/third_party/llama.cpp" /tmp/ember-baseline/third_party/llama.cpp
+          gradle -p /tmp/ember-baseline/android assembleDebug --no-daemon
+          python scripts/apk_metrics.py /tmp/ember-baseline/android/app/build/outputs/apk/debug/app-debug.apk > baseline-apk-metrics.json
+
+      - name: Name the APKs and record measured package sizes
+        run: |
+          cp android/app/build/outputs/apk/debug/app-universal-debug.apk Ember-debug.apk
+          cp android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk Ember-arm64-v8a-debug.apk
+          cp android/app/build/outputs/apk/debug/app-x86_64-debug.apk Ember-x86_64-debug.apk
+          python scripts/apk_metrics.py Ember-debug.apk Ember-arm64-v8a-debug.apk Ember-x86_64-debug.apk > apk-metrics.json
+          python - <<'PYMETRICS'
+          import json
+          for r in json.load(open('baseline-apk-metrics.json')) + json.load(open('apk-metrics.json')):
+              print(f"::notice::{r['apk']}: APK {r['bytes']} bytes, native libraries {r['nativeBytes']} bytes")
+          PYMETRICS
 
       - name: Verify APK native libraries, Python runtime, and packaged assets
         run: |
@@ -300,6 +318,11 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: Ember-debug
-          path: Ember-debug.apk
+          path: |
+            Ember-debug.apk
+            Ember-arm64-v8a-debug.apk
+            Ember-x86_64-debug.apk
+            apk-metrics.json
+            baseline-apk-metrics.json
           if-no-files-found: error
           retention-days: 30

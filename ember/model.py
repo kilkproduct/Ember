@@ -84,6 +84,7 @@ class ModelConfig:
             raise ValueError("n_embd must be >= 1")
         if self.block_size < 1:
             raise ValueError("block_size must be >= 1")
+        if self.vocab_size>50000:raise ValueError("Ember training vocabulary maximum is 50,000 (not a limit for imported GGUF models)")
         if self.vocab_size < 262:
             raise ValueError("vocab_size must leave room for the 256 byte tokens and specials")
         if self.n_embd % self.n_head != 0:
@@ -342,6 +343,18 @@ def save_model(path, cfg: ModelConfig, params: dict[str, np.ndarray], meta: dict
     import os
 
     os.replace(tmp, path)
+
+
+def read_checkpoint_metadata(path):
+    """Read identity/config only for snapshot publication, not weight validation."""
+    with open(path,"rb") as f:
+        prefix=f.read(12)
+        if len(prefix)!=12 or prefix[:4]!=FORMAT_MAGIC:raise ValueError("legacy or truncated checkpoint")
+        version,size=struct.unpack("<II",prefix[4:])
+        if version!=FORMAT_VERSION or size>64*1024*1024:raise ValueError("unsupported checkpoint header")
+        header=json.loads(f.read(size))
+        ModelConfig.from_dict(header)
+        return header.get("meta",{})
 
 
 def load_model(path) -> tuple[ModelConfig, dict[str, np.ndarray], dict]:

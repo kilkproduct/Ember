@@ -296,6 +296,7 @@ class EmberEngine private constructor(private val app: Application) {
                     nCtx = (params.optInt("nCtx", 0).takeIf { it > 0 } ?: ctxFromPrepare.takeIf { it > 0 } ?: 512)
                         .coerceIn(64, 8192),
                     nBatch = params.optInt("nBatch", 256).coerceIn(16, 2048),
+                    nUbatch = params.optInt("nUbatch",64).coerceIn(1,2048),
                     nThreads = params.optInt("nThreads", 0).coerceIn(0, 8),
                     nGpuLayers = params.optInt("nGpuLayers", 0).coerceIn(0, 999),
                 )
@@ -379,7 +380,8 @@ class EmberEngine private constructor(private val app: Application) {
     // SAF file staging on internal storage
     // ---------------------------------------------------------------------
 
-    fun stageImport(uri: Uri, displayName: String, mime: String): StagedImport {
+    fun stageImport(uri: Uri, displayName: String, mime: String,
+        maxBytes: Long = MAX_IMPORT_BYTES, checkCancelled: () -> Unit = {}, onProgress: (Long) -> Unit = {}): StagedImport {
         val token = UUID.randomUUID().toString().replace("-", "")
         val dir = importsDir()
         val ext = displayName.substringAfterLast('.', "")
@@ -390,6 +392,7 @@ class EmberEngine private constructor(private val app: Application) {
             throw IOException("There is not enough free storage to stage this file for import.")
         }
         var total = 0L
+        var reported = 0L
         try {
             val input = app.contentResolver.openInputStream(uri)
                 ?: throw IOException("The selected file could not be opened.")
@@ -397,13 +400,16 @@ class EmberEngine private constructor(private val app: Application) {
                 FileOutputStream(file).use { output ->
                     val buffer = ByteArray(64 * 1024)
                     while (true) {
+                        checkCancelled()
+                        if(dir.usableSpace < MIN_FREE_BYTES) throw IOException("Not enough storage to continue import")
                         val read = source.read(buffer)
                         if (read < 0) break
                         total += read
-                        if (total > MAX_IMPORT_BYTES) {
-                            throw IOException("That file exceeds the ${MAX_IMPORT_BYTES / 1048576} MB import limit.")
+                        if (total > maxBytes) {
+                            throw IOException("That file exceeds the ${maxBytes / 1048576} MB import limit.")
                         }
                         output.write(buffer, 0, read)
+                        if(total-reported>=4*1024*1024) { onProgress(total);reported=total }
                     }
                 }
             }

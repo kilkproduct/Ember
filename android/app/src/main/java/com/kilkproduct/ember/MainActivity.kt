@@ -112,11 +112,11 @@ import com.kilkproduct.ember.ui.theme.EmberTheme
 import com.kilkproduct.ember.ui.theme.EmberWarning
 
 private enum class Tab(val label: String) {
-    FUEL("Fuel"),
+    FUEL("Data"),
     TEACHERS("Teachers"),
     VESSEL("Vessel"),
     FIRE("Fire"),
-    VOICE("Voice"),
+    VOICE("Chat"),
 }
 
 private enum class SheetId {
@@ -143,7 +143,7 @@ private fun EmberApp(vm: MainViewModel) {
     val ui by vm.repo.state.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val activity = context as? Activity
-    var tab by rememberSaveable { mutableStateOf(Tab.FUEL.name) }
+    var tab by rememberSaveable { mutableStateOf(Tab.VOICE.name) }
     var sheetName by rememberSaveable { mutableStateOf(SheetId.NONE.name) }
     val snackbarHost = remember { SnackbarHostState() }
     val sheet = SheetId.valueOf(sheetName)
@@ -295,6 +295,21 @@ private fun EmberApp(vm: MainViewModel) {
                     onRetryEngine = { vm.repo.retryInitialization() },
                     onStopTraining = { vm.repo.stopTraining() },
                 )
+                if(ui.workActive || ui.modelBusy) {
+                    Surface(color=MaterialTheme.colorScheme.surfaceVariant,modifier=Modifier.fillMaxWidth()) {
+                        Row(modifier=Modifier.padding(horizontal=16.dp,vertical=8.dp),verticalAlignment=Alignment.CenterVertically) {
+                            Text(when {
+                                ui.modelBusy -> ui.modelImportDetail.ifBlank { "Model operation in progress" }
+                                ui.importBusy -> "Import · ${ui.importProgress?.records ?: 0} records processed"
+                                ui.generating -> "Generating · ${ui.streamingTokens} tokens"
+                                ui.trainingActive -> "Fire · step ${ui.progress?.step ?: ui.status.model.step} · ${Formats.tps(ui.status.model.trainTps)} training"
+                                ui.foragingActive -> "Foraging · ${ui.status.foraging.documentsAccepted} saved · ${ui.status.foraging.activeRequests} requests active"
+                                else -> "Background work in progress"
+                            },style=MaterialTheme.typography.labelMedium,modifier=Modifier.weight(1f))
+                            TextButton(onClick={tab=when {ui.trainingActive->Tab.FIRE.name;ui.foragingActive||ui.importBusy->Tab.FUEL.name;else->Tab.VOICE.name}}) {Text("Open")}
+                        }
+                    }
+                }
                 val booting = !ui.initialized && ui.backendError == null
                 val tabState = rememberSaveableStateHolder()
                 // Phones stay edge-to-edge; on a tablet or a folded-open
@@ -304,11 +319,8 @@ private fun EmberApp(vm: MainViewModel) {
                     contentAlignment = Alignment.TopCenter,
                 ) {
                     Box(modifier = Modifier.widthIn(max = 720.dp).fillMaxSize()) {
-                        AnimatedContent(
-                            targetState = Tab.valueOf(tab),
-                            transitionSpec = { fadeIn(tween(140)) togetherWith fadeOut(tween(90)) },
-                            label = "tab",
-                        ) { current ->
+                        val current=Tab.valueOf(tab)
+                        androidx.compose.runtime.key(current) {
                             // Keeps each tab's scroll position and local field
                             // state when the user switches away and back.
                             tabState.SaveableStateProvider(current.name) {
@@ -545,9 +557,9 @@ private fun EmberHeader(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = "Ember",
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = EmberOrange,
+                        text = "EMBER / local workstation",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
                         text = when {
@@ -678,7 +690,7 @@ private fun EmberBottomBar(selected: Tab, workActive: Boolean, onSelect: (Tab) -
         containerColor = MaterialTheme.colorScheme.surface,
         tonalElevation = 0.dp,
     ) {
-        Tab.entries.forEach { tab ->
+        listOf(Tab.VOICE,Tab.FUEL,Tab.VESSEL,Tab.FIRE,Tab.TEACHERS).forEach { tab ->
             NavigationBarItem(
                 selected = selected == tab,
                 onClick = { if (selected != tab) onSelect(tab) },

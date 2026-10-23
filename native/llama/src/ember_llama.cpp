@@ -104,7 +104,10 @@ std::string model_meta(const llama_model* model, const char* key) {
     char buf[512];
     int32_t n = llama_model_meta_val_str(model, key, buf, sizeof(buf));
     if (n < 0) return {};
-    return std::string(buf, static_cast<size_t>(std::min<int32_t>(n, static_cast<int32_t>(sizeof(buf) - 1))));
+    if (n < static_cast<int32_t>(sizeof(buf))) return std::string(buf,n);
+    std::vector<char> full(static_cast<size_t>(n)+1);
+    llama_model_meta_val_str(model,key,full.data(),full.size());
+    return std::string(full.data(),n);
 }
 
 /* Length of the longest prefix of `s` that ends on a UTF-8 character boundary. */
@@ -346,6 +349,11 @@ EMBER_API int ember_llama_load(
     if (config) cfg = *config;
     if (cfg.n_ctx <= 0) cfg.n_ctx = 512;
     if (cfg.n_batch <= 0) cfg.n_batch = 256;
+    if (cfg.n_ubatch <= 0) cfg.n_ubatch = std::min(cfg.n_batch,64);
+    if (cfg.n_ubatch>cfg.n_batch || cfg.n_gpu_layers != 0 || cfg.n_ctx>8192 || cfg.n_batch>2048) {
+        engine->set_error(EMBER_LLAMA_ERR_ARGS,"CPU-only build: require microbatch <= batch <= 2048, context <= 8192, GPU layers = 0");
+        return engine->code;
+    }
     if (cfg.n_threads <= 0) cfg.n_threads = conservative_thread_count();
     if (cfg.n_gpu_layers < 0) cfg.n_gpu_layers = 0;
 
@@ -389,7 +397,7 @@ EMBER_API int ember_llama_load(
     cp.type_v = GGML_TYPE_F32;
     cp.n_ctx = static_cast<uint32_t>(cfg.n_ctx);
     cp.n_batch = static_cast<uint32_t>(cfg.n_batch);
-    cp.n_ubatch = static_cast<uint32_t>(cfg.n_batch);
+    cp.n_ubatch = static_cast<uint32_t>(cfg.n_ubatch);
     cp.n_threads = cfg.n_threads;
     cp.n_threads_batch = cfg.n_threads;
 
@@ -500,6 +508,9 @@ EMBER_API int ember_llama_model_info(const ember_llama_t* engine, char* json_out
         << ",\"name\":" << "\"" << json_escape(model_meta(engine->model, "general.name")) << "\""
         << ",\"emberFormat\":" << "\"" << json_escape(model_meta(engine->model, "ember.format_version")) << "\""
         << ",\"vocabSize\":" << llama_vocab_n_tokens(engine->vocab)
+        << ",\"parameters\":" << llama_model_n_params(engine->model)
+        << ",\"microBatch\":" << engine->cfg.n_ubatch
+        << ",\"hasChatTemplate\":" << (llama_model_chat_template(engine->model,nullptr) ? "true":"false")
         << ",\"nCtxTrain\":" << llama_model_n_ctx_train(engine->model)
         << ",\"nCtx\":" << engine->n_ctx
         << ",\"nBatch\":" << engine->n_batch
@@ -532,12 +543,12 @@ EMBER_API int ember_llama_tokenize(
         return engine->code;
     }
     const int32_t needed = -llama_tokenize(
-        engine->vocab, text, static_cast<int32_t>(text_len), nullptr, 0, add_special != 0, false);
+        engine->vocab, text, static_cast<int32_t>(text_len), nullptr, 0, (add_special & 1) != 0, (add_special & 2) != 0);
     if (needed <= 0) return 0;
     if (out_ids && max_ids >= static_cast<size_t>(needed)) {
         int32_t n = llama_tokenize(
             engine->vocab, text, static_cast<int32_t>(text_len), out_ids,
-            static_cast<int32_t>(max_ids), add_special != 0, false);
+            static_cast<int32_t>(max_ids), (add_special & 1) != 0, (add_special & 2) != 0);
         if (n < 0) {
             engine->set_error(EMBER_LLAMA_ERR_TOKENIZE, "Tokenization failed (buffer too small).");
             return engine->code;
@@ -651,20 +662,38 @@ EMBER_API int ember_llama_generate(
 
     const auto t_start = std::chrono::steady_clock::now();
     std::string warning;
+    if (engine->cfg.n_ctx != engine->n_ctx) warning="Requested context was clamped to the model's native training limit. ";
     std::string stopped_by = "length";
     int result_code = EMBER_LLAMA_OK;
 
+    std::string formatted_prompt;
+    bool templated=false;
+    const char* chat_template=llama_model_chat_template(engine->model,nullptr);
+    if (chat_template && *chat_template && model_meta(engine->model,"ember.format_version").empty()) {
+        std::string content(prompt_utf8 ? prompt_utf8 : "",prompt_len);
+        llama_chat_message message{"user",content.c_str()};
+        int32_t needed=llama_chat_apply_template(chat_template,&message,1,true,nullptr,0);
+        if (needed<0) {
+            engine->set_error(EMBER_LLAMA_ERR_MODEL_INCOMPAT,"This embedded chat template is not supported by pinned llama.cpp's built-in formatter.");
+            write_error_json(json_out,max_json,engine->code,engine->err);
+            return engine->code;
+        }
+        std::vector<char> formatted(static_cast<size_t>(needed)+1);
+        llama_chat_apply_template(chat_template,&message,1,true,formatted.data(),formatted.size());
+        formatted_prompt.assign(formatted.data(),needed);
+        prompt_utf8=formatted_prompt.data();prompt_len=formatted_prompt.size();templated=true;
+    }
     // ---- 1. tokenize the prompt -------------------------------------------
     std::vector<llama_token> prompt_ids;
     if (prompt_utf8 && prompt_len > 0) {
         int32_t needed = -llama_tokenize(
-            engine->vocab, prompt_utf8, static_cast<int32_t>(prompt_len), nullptr, 0, false, false);
+            engine->vocab, prompt_utf8, static_cast<int32_t>(prompt_len), nullptr, 0, false, templated);
         if (needed < 0) needed = 0;
         if (needed > 0) {
             prompt_ids.resize(static_cast<size_t>(needed) + 1);
             int32_t n = llama_tokenize(
                 engine->vocab, prompt_utf8, static_cast<int32_t>(prompt_len), prompt_ids.data(),
-                static_cast<int32_t>(prompt_ids.size()), false, false);
+                static_cast<int32_t>(prompt_ids.size()), false, templated);
             if (n < 0) {
                 engine->set_error(EMBER_LLAMA_ERR_TOKENIZE, "Prompt tokenization failed.");
                 write_error_json(json_out, max_json, engine->code, engine->err);
@@ -677,7 +706,7 @@ EMBER_API int ember_llama_generate(
     }
 
     // ---- 2. prepend BOS (Ember's training streams start with <bos>) -------
-    if (p.prepend_bos) {
+    if (p.prepend_bos && !templated && (!model_meta(engine->model,"ember.format_version").empty() || llama_vocab_get_add_bos(engine->vocab))) {
         const llama_token bos = llama_vocab_bos(engine->vocab);
         if (bos != LLAMA_TOKEN_NULL) {
             prompt_ids.insert(prompt_ids.begin(), bos);

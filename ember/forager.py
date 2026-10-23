@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 import json
+import random
+import urllib.error
+from concurrent.futures import ThreadPoolExecutor
+from collections import defaultdict
+from .progress import WorkProgress
 import re
 import threading
 import time
@@ -15,10 +20,17 @@ from .corpus import Corpus, clean_document_text
 USER_AGENT = "EmberFoundry/0.4 (+https://github.com/kilkproduct/Ember)"
 
 
-def _http_json(url: str, timeout: float = 15.0) -> Any:
+def _http_json(url: str, timeout: float = 8.0, on_bytes=None) -> Any:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", errors="replace"))
+        data=bytearray()
+        while True:
+            chunk=resp.read(64*1024)
+            if not chunk:break
+            data.extend(chunk)
+            if on_bytes:on_bytes(len(chunk))
+            if len(data)>8*1024*1024:raise ValueError("API response exceeds 8 MiB limit")
+        return json.loads(data.decode("utf-8",errors="strict"))
 
 
 class Forager:
@@ -33,7 +45,12 @@ class Forager:
         self.corpus = corpus
         self._emit = emit_event
         self._auto_fire_cb = auto_fire_cb
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
+        self._host_slots=defaultdict(lambda:threading.BoundedSemaphore(2))
+        self.metrics={k:0 for k in ("activeRequests","fetched","failed","duplicates","rejected","bytesDownloaded","completedSources")}
+        self.progress=WorkProgress()
+        self._budget=500
+        self._last_summary=0.0
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
         self.running = False
@@ -47,6 +64,8 @@ class Forager:
 
     def status(self) -> dict[str, Any]:
         return {
+            **self.metrics,
+            "progress": self.progress.update(self.metrics["completedSources"]),
             "running": self.running,
             "documentsAccepted": self.documents_accepted,
             "lastDocument": self.last_document,
@@ -64,6 +83,8 @@ class Forager:
             subs_raw = str(options.get("subreddits") or "").strip()
             if not seeds_raw and not subs_raw:
                 seeds_raw = "astronomy, botany, oceanography, history of science"
+            self.metrics={k:0 for k in self.metrics}
+            self.progress=WorkProgress()
             self._stop.clear()
             self.running = True
             self.documents_accepted = 0
@@ -88,9 +109,47 @@ class Forager:
             self.logs = self.logs[-200:]
         self._emit("forage.log", entry)
 
-    def _accept(self, title: str, text: str, source: str, url: str = "", meta: dict | None = None) -> bool:
+    def _request(self,url):
+        host=urllib.parse.urlsplit(url).netloc
+        slot=self._host_slots[host]
+        while not self._stop.is_set():
+            if slot.acquire(timeout=.1):break
+        else:raise InterruptedError("Forage cancelled")
+        def received(n):
+            with self._lock:self.metrics["bytesDownloaded"]+=n
+            if self._stop.is_set():raise InterruptedError("Forage cancelled")
+        try:
+            with self._lock:self.metrics["activeRequests"]+=1
+            for attempt in range(3):
+                if self._stop.is_set():raise InterruptedError("Forage cancelled")
+                try:
+                    result=_http_json(url,on_bytes=received)
+                    with self._lock:self.metrics["fetched"]+=1
+                    return result
+                except urllib.error.HTTPError as exc:
+                    if exc.code not in (429,500,502,503,504) or attempt==2:raise
+                    retry=exc.headers.get("Retry-After","") if exc.headers else ""
+                    delay=min(30,float(retry)) if retry.isdigit() else 2**attempt+random.random()*.2
+                    if self._stop.wait(delay):raise InterruptedError("Forage cancelled")
+                except (TimeoutError,urllib.error.URLError):
+                    if attempt==2:raise
+                    if self._stop.wait(2**attempt):raise InterruptedError("Forage cancelled")
+        except Exception:
+            with self._lock:self.metrics["failed"]+=1
+            raise
+        finally:
+            with self._lock:self.metrics["activeRequests"]-=1
+            slot.release()
+
+    def _accept(self,*args,**kwargs):
+        with self._lock:
+            if self._stop.is_set() or self.documents_accepted>=self._budget:return False
+            return self._accept_locked(*args,**kwargs)
+
+    def _accept_locked(self, title: str, text: str, source: str, url: str = "", meta: dict | None = None) -> bool:
         cleaned = clean_document_text(text, strip_html=True)
         if len(cleaned) < 120:
+            self.metrics["rejected"]+=1
             return False
         doc = self.corpus.add(
             text=cleaned,
@@ -99,7 +158,7 @@ class Forager:
             url=url,
             weight=1,
             kind="page",
-            meta=meta,
+            meta={**(meta or {}),"retrievedAt":int(time.time()),"extraction":"public-api"},
         )
         if not doc.get("merged"):
             self.documents_accepted += 1
@@ -115,16 +174,22 @@ class Forager:
                     "documentsAccepted": self.documents_accepted,
                 },
             )
-            self._emit("corpus.changed", self.corpus.summary())
+            now=time.monotonic()
+            if now-self._last_summary>=.5:
+                self._last_summary=now
+                self._emit("corpus.changed", self.corpus.summary())
             return True
+        self.metrics["duplicates"]+=1
         return False
 
     def _worker(self, opts: dict[str, Any]) -> None:
         budget = max(1, min(500, int(opts.get("budget") or 24)))
         seeds = [s.strip() for s in re.split(r"[,\n;]+", str(opts.get("seeds") or "")) if s.strip()]
         subs = [s.strip().lstrip("r/") for s in re.split(r"[,\s]+", str(opts.get("subreddits") or "")) if s.strip()]
-        seen_topics: set[str] = set()
-        queue = list(seeds)
+        self._budget=budget
+        resume=self.saved_state if opts.get("resume") else None
+        seen_topics=set(resume.get("seenTopics",[])) if resume else set()
+        queue=list(resume.get("pendingTopics",seeds)) if resume else list(seeds)
         autopilot = bool(opts.get("autopilot", True))
 
         try:
@@ -136,23 +201,21 @@ class Forager:
                 seen_topics.add(topic.lower())
                 self.current_seeds = topic
 
-                if opts.get("wikiOn", True) and not self._stop.is_set():
-                    self._fetch_wikipedia(topic, queue if (autopilot and opts.get("wander", True)) else None)
-
-                if (opts.get("hn", True)) and self.documents_accepted < budget and not self._stop.is_set():
-                    self._fetch_hn(topic)
-
-                if (opts.get("gutenberg", True)) and self.documents_accepted < budget and not self._stop.is_set():
-                    self._fetch_gutendex(topic)
-
-                if (opts.get("openlibrary", True)) and self.documents_accepted < budget and not self._stop.is_set():
-                    self._fetch_openlibrary(topic)
-
+                jobs=[]
+                if opts.get("wikiOn",True):jobs.append((self._fetch_wikipedia,(topic,queue if autopilot and opts.get("wander",True) else None)))
+                for key,fn in (("hn",self._fetch_hn),("gutenberg",self._fetch_gutendex),("openlibrary",self._fetch_openlibrary),("stack",self._fetch_stack)):
+                    if opts.get(key, key!="stack"):jobs.append((fn,(topic,)))
                 for sub in subs[:3]:
-                    if self.documents_accepted >= budget or self._stop.is_set():
-                        break
-                    self._fetch_reddit_arctic(sub, topic)
-
+                    if opts.get("redditArctic",True):jobs.append((self._fetch_reddit_arctic,(sub,topic)))
+                    if opts.get("redditPullpush",False):jobs.append((self._fetch_reddit_pullpush,(sub,topic)))
+                # Sources use different hosts. Each host has a separate 2-request
+                # bound; writes/budget checks are serialized and updates throttled.
+                with ThreadPoolExecutor(max_workers=4,thread_name_prefix="ember-fetch") as pool:
+                    futures=[pool.submit(fn,*args) for fn,args in jobs if not self._stop.is_set()]
+                    for future in futures:
+                        future.result()
+                        with self._lock:self.metrics["completedSources"]+=1
+                        self._emit("forage.progress",self.status())
                 state_blob = {
                     "running": not self._stop.is_set(),
                     "documentsAccepted": self.documents_accepted,
@@ -161,6 +224,8 @@ class Forager:
                     "startedAt": self.started_at,
                     "updatedAt": int(time.time() * 1000),
                     "options": opts,
+                    "pendingTopics":list(queue),
+                    "seenTopics":sorted(seen_topics),
                 }
                 self.saved_state = state_blob
                 self.corpus.set_kv("forager:autosave", state_blob)
@@ -180,6 +245,7 @@ class Forager:
                 "error": self.error,
                 "corpus": self.corpus.summary(),
             }
+            self._emit("corpus.changed",self.corpus.summary())
             self._emit("forage.finished", payload)
             self._emit("forage.done", payload)
             if opts.get("autoFire") and self.documents_accepted > 0 and not self._stop.is_set() and self._auto_fire_cb:
@@ -199,7 +265,7 @@ class Forager:
                     f"https://{lang}.wikipedia.org/w/api.php?"
                     f"action=query&list=search&srsearch={q}&srlimit=3&format=json"
                 )
-                data = _http_json(search_url)
+                data = self._request(search_url)
                 hits = data.get("query", {}).get("search", [])
                 for hit in hits:
                     if self._stop.is_set():
@@ -211,7 +277,7 @@ class Forager:
                         f"https://{lang}.wikipedia.org/w/api.php?"
                         f"action=query&prop=extracts|links&explaintext=1&pllimit=8&titles={urllib.parse.quote(title)}&format=json"
                     )
-                    pages = _http_json(ext_url).get("query", {}).get("pages", {})
+                    pages = self._request(ext_url).get("query", {}).get("pages", {})
                     for page in pages.values():
                         extract = page.get("extract") or ""
                         if extract:
@@ -232,7 +298,7 @@ class Forager:
     def _fetch_hn(self, topic: str) -> None:
         try:
             url = f"https://hn.algolia.com/api/v1/search?query={urllib.parse.quote(topic)}&tags=comment&hitsPerPage=4"
-            data = _http_json(url)
+            data = self._request(url)
             for hit in data.get("hits", []):
                 body = hit.get("comment_text") or hit.get("story_text") or ""
                 if body:
@@ -248,7 +314,7 @@ class Forager:
     def _fetch_gutendex(self, topic: str) -> None:
         try:
             url = f"https://gutendex.com/books?search={urllib.parse.quote(topic)}"
-            data = _http_json(url)
+            data = self._request(url)
             for book in data.get("results", [])[:2]:
                 summaries = book.get("summaries") or []
                 subjects = ", ".join(book.get("subjects") or [])
@@ -266,7 +332,7 @@ class Forager:
     def _fetch_openlibrary(self, topic: str) -> None:
         try:
             url = f"https://openlibrary.org/search.json?q={urllib.parse.quote(topic)}&limit=3"
-            data = _http_json(url)
+            data = self._request(url)
             for doc in data.get("docs", [])[:3]:
                 first_sentence = doc.get("first_sentence")
                 if isinstance(first_sentence, list):
@@ -285,7 +351,7 @@ class Forager:
                 "https://arctic-shift.photon-reddit.com/api/posts/search?"
                 f"subreddit={urllib.parse.quote(subreddit)}&title={urllib.parse.quote(topic)}&limit=3"
             )
-            data = _http_json(url)
+            data = self._request(url)
             for post in data.get("data", [])[:3]:
                 body = post.get("selftext") or ""
                 title = post.get("title") or ""
@@ -299,3 +365,20 @@ class Forager:
                     )
         except Exception as exc:
             self._log(f"  reddit r/{subreddit} skipped: {exc}")
+
+    def _fetch_stack(self,topic):
+        try:
+            url="https://api.stackexchange.com/2.3/search/advanced?site=stackoverflow&filter=withbody&pagesize=3&q="+urllib.parse.quote(topic)
+            data=self._request(url)
+            if data.get("backoff"):
+                self._stop.wait(min(30,float(data["backoff"])))
+            for item in data.get("items",[]):
+                self._accept(item.get("title",topic),item.get("body", ""),"stackoverflow",item.get("link",""))
+        except Exception as exc:self._log(f"Stack Exchange unavailable: {exc}")
+
+    def _fetch_reddit_pullpush(self,subreddit,topic):
+        try:
+            url="https://api.pullpush.io/reddit/search/submission/?size=3&subreddit="+urllib.parse.quote(subreddit)+"&q="+urllib.parse.quote(topic)
+            for item in self._request(url).get("data",[]):
+                self._accept(item.get("title",topic),item.get("selftext", ""),"reddit-pullpush", "https://www.reddit.com"+item.get("permalink",""))
+        except Exception as exc:self._log(f"PullPush unavailable: {exc}")

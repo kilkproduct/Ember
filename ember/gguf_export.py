@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import mmap
 import os
 import struct
 import time
@@ -554,15 +555,18 @@ def _dtype_nbytes(dtype: int, dims: Sequence[int]) -> int:
     numel = 1
     for d in dims:
         numel *= int(d)
-    if dtype == GGML_F32:
-        return numel * 4
-    if dtype == GGML_F16:
-        return numel * 2
-    if dtype == GGML_Q8_0:
-        if numel % _Q8_0_BLOCK != 0:
-            raise GgufExportError(f"Q8_0 tensor with {numel} elements is not block aligned")
-        return (numel // _Q8_0_BLOCK) * _Q8_0_BLOCK_BYTES
-    raise GgufExportError(f"unsupported GGUF tensor dtype {dtype}")
+    # Pinned upstream gguf/constants.py GGML_QUANT_SIZES. No runtime dependency
+    # on gguf-py in the APK; unsupported/new types fail closed.
+    sizes = {0:(1,4),1:(1,2),2:(32,18),3:(32,20),6:(32,22),7:(32,24),8:(32,34),9:(32,40),
+        10:(256,84),11:(256,110),12:(256,144),13:(256,176),14:(256,210),15:(256,292),
+        16:(256,66),17:(256,74),18:(256,98),19:(256,50),20:(32,18),21:(256,110),
+        22:(256,82),23:(256,136),24:(1,1),25:(1,2),26:(1,4),27:(1,8),28:(1,8),
+        29:(256,56),30:(1,2),34:(256,54),35:(256,66),39:(32,17),40:(64,36),41:(128,18)}
+    if dtype not in sizes: raise GgufExportError(f"unsupported GGUF tensor dtype {dtype}")
+    block,size=sizes[dtype]
+    if not dims or any(d<=0 for d in dims) or dims[0]%block or numel%block:
+        raise GgufExportError(f"tensor dtype {dtype} has invalid block alignment/dimensions {dims}")
+    return numel//block*size
 
 
 def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> GgufHeader:
@@ -574,7 +578,7 @@ def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> 
     if size < 24:
         raise GgufExportError(f"{p.name} is too small to be a GGUF model ({size} bytes)")
     with open(p, "rb") as fh:
-        head = fh.read(min(size, max_bytes))
+        head = mmap.mmap(fh.fileno(), length=min(size,max_bytes), access=mmap.ACCESS_READ)
 
     magic = struct.unpack_from("<I", head, 0)[0]
     if magic != GGUF_MAGIC:
@@ -665,6 +669,7 @@ def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> 
         raise GgufExportError(
             f"{p.name} is truncated: header claims {data_start + last_end} bytes but the file is {size}"
         )
+    head.close()
     return GgufHeader(
         version=version,
         arch=str(metadata.get("general.architecture", "")),
@@ -695,7 +700,7 @@ def describe_incompatible_bytes(head: bytes, *, name: str = "model") -> str:
     return f"{name}: not a GGUF file (bad magic {head[:4]!r})"
 
 
-def validate_gguf_file(path: str | Path) -> dict[str, Any]:
+def _validate_gguf_file(path: str | Path) -> dict[str, Any]:
     """Full structural validation of a candidate model file.
 
     A model is never reported ready merely because a file exists: this checks
@@ -717,74 +722,63 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
         raise GgufExportError(f"{p.name} is only {size} bytes — too small to be a language model")
 
     header = read_gguf_header(p)
-    if header.arch != ARCH_LLAMA:
+    if header.arch not in ("llama", "qwen2", "qwen3"):
         raise GgufExportError(
             f"{p.name}: architecture {header.arch!r} is not supported by this Ember build "
-            f"(expected {ARCH_LLAMA!r})"
+            f"(supported dense architectures: llama, qwen2 [including Qwen2.5], qwen3)"
         )
 
     md = header.metadata
-    required_keys = (
-        f"{ARCH_LLAMA}.context_length",
-        f"{ARCH_LLAMA}.embedding_length",
-        f"{ARCH_LLAMA}.block_count",
-        f"{ARCH_LLAMA}.feed_forward_length",
-        f"{ARCH_LLAMA}.attention.head_count",
-        f"{ARCH_LLAMA}.attention.layer_norm_rms_epsilon",
-        "llama.attention.head_count_kv",
-        "llama.rope.dimension_count",
-        "llama.rope.freq_base",
-        "tokenizer.ggml.model",
-        "tokenizer.ggml.tokens",
-        "tokenizer.ggml.token_type",
-        "tokenizer.ggml.eos_token_id",
-    )
-    missing_keys = [k for k in required_keys if k not in md]
-    if missing_keys:
-        raise GgufExportError(f"{p.name}: missing GGUF metadata {missing_keys[:6]}")
-
-    n_embd = int(md[f"{ARCH_LLAMA}.embedding_length"])
-    n_layer = int(md[f"{ARCH_LLAMA}.block_count"])
-    n_ctx = int(md[f"{ARCH_LLAMA}.context_length"])
-    n_head = int(md[f"{ARCH_LLAMA}.attention.head_count"])
-    n_ff = int(md[f"{ARCH_LLAMA}.feed_forward_length"])
-    tokens = list(md["tokenizer.ggml.tokens"])
-    n_vocab = len(tokens)
-
-    if n_embd < 1 or n_layer < 1 or n_ctx < 1 or n_head < 1 or n_ff < 1 or n_vocab < 2:
-        raise GgufExportError(f"{p.name}: implausible dimensions in metadata")
-    if n_embd % n_head != 0:
-        raise GgufExportError(f"{p.name}: embedding {n_embd} is not divisible by {n_head} heads")
-
-    n_kv = int(md["llama.attention.head_count_kv"])
-    if n_kv < 1 or n_head % n_kv or (n_embd//n_head)%2:
-        raise GgufExportError("invalid GQA/head dimensions")
-    if int(md["llama.rope.dimension_count"]) != n_embd//n_head:
-        raise GgufExportError("RoPE dimension must equal head dimension")
-    if not np.isfinite(md["llama.rope.freq_base"]) or md["llama.rope.freq_base"] <= 0:
-        raise GgufExportError("invalid RoPE frequency base")
-    if md.get("llama.rope.scaling.type", "none") != "none":
-        raise GgufExportError("this build supports unscaled RoPE only")
-    expected = {"token_embd.weight": (n_embd,n_vocab), "output_norm.weight": (n_embd,)}
-    kv = n_kv*(n_embd//n_head)
+    arch=header.arch
+    def required(suffix):
+        key=f"{arch}.{suffix}"
+        if key not in md: raise GgufExportError(f"{p.name}: missing GGUF metadata {key}")
+        return md[key]
+    n_embd=int(required("embedding_length"));n_layer=int(required("block_count"))
+    n_ctx=int(required("context_length"));n_head=int(required("attention.head_count"))
+    n_ff=int(required("feed_forward_length"));eps=float(required("attention.layer_norm_rms_epsilon"))
+    tokens=md.get("tokenizer.ggml.tokens",[]);n_vocab=len(tokens)
+    if min(n_embd,n_layer,n_ctx,n_head,n_ff,n_vocab)<1 or not np.isfinite(eps) or eps<=0:
+        raise GgufExportError("implausible dimensions/RMS epsilon in GGUF metadata")
+    n_kv=int(md.get(f"{arch}.attention.head_count_kv",n_head))
+    head_dim=int(md.get(f"{arch}.attention.key_length",n_embd//n_head))
+    value_dim=int(md.get(f"{arch}.attention.value_length",head_dim))
+    if n_kv<1 or n_head%n_kv or head_dim<2 or head_dim%2 or value_dim!=head_dim:
+        raise GgufExportError("invalid/unsupported GQA and head dimensions")
+    rope_dim=int(md.get(f"{arch}.rope.dimension_count",head_dim))
+    theta=float(md.get(f"{arch}.rope.freq_base",10000.))
+    if rope_dim!=head_dim or not np.isfinite(theta) or theta<=0:
+        raise GgufExportError("invalid RoPE dimension/frequency base")
+    # Scaling, tokenizer pre-rules and special IDs are owned by upstream. Do not
+    # force Ember training's vocabulary/scaling policy on imported checkpoints.
+    if not md.get("tokenizer.ggml.model"): raise GgufExportError("missing tokenizer model")
+    expected={"token_embd.weight":(n_embd,n_vocab),"output_norm.weight":(n_embd,)}
+    kv=n_kv*head_dim;q=n_head*head_dim
     for i in range(n_layer):
         pfx=f"blk.{i}."
-        expected.update({pfx+"attn_norm.weight": (n_embd,), pfx+"ffn_norm.weight": (n_embd,),
-            pfx+"attn_q.weight": (n_embd,n_embd), pfx+"attn_k.weight": (n_embd,kv),
-            pfx+"attn_v.weight": (n_embd,kv), pfx+"attn_output.weight": (n_embd,n_embd),
-            pfx+"ffn_gate.weight": (n_embd,n_ff), pfx+"ffn_up.weight": (n_embd,n_ff),
-            pfx+"ffn_down.weight": (n_ff,n_embd)})
-
-    if md["tokenizer.ggml.model"] != "gpt2" or md.get("tokenizer.ggml.pre") != "gpt-2":
-        raise GgufExportError("This Ember build requires the GPT-2 byte-level BPE tokenizer.")
+        expected.update({pfx+"attn_norm.weight":(n_embd,),pfx+"ffn_norm.weight":(n_embd,),
+            pfx+"attn_q.weight":(n_embd,q),pfx+"attn_k.weight":(n_embd,kv),
+            pfx+"attn_v.weight":(n_embd,kv),pfx+"attn_output.weight":(q,n_embd),
+            pfx+"ffn_gate.weight":(n_embd,n_ff),pfx+"ffn_up.weight":(n_embd,n_ff),
+            pfx+"ffn_down.weight":(n_ff,n_embd)})
+        if arch=="qwen3":
+            expected.update({pfx+"attn_q_norm.weight":(head_dim,),pfx+"attn_k_norm.weight":(head_dim,)})
+    if "tokenizer.ggml.token_type" not in md:
+        md["tokenizer.ggml.token_type"]=[1]*n_vocab
     if len(md["tokenizer.ggml.token_type"]) != n_vocab:
         raise GgufExportError("tokenizer tokens/types length mismatch")
-    for key in ("bos_token_id", "eos_token_id", "padding_token_id", "unknown_token_id"):
+    for key in ("bos_token_id", "eos_token_id", "eot_token_id", "padding_token_id", "unknown_token_id"):
         value = md.get("tokenizer.ggml."+key)
         if value is not None and not (0 <= int(value) < n_vocab):
             raise GgufExportError(f"invalid tokenizer {key}")
     found = {t.name: t for t in header.tensors}
     if "output.weight" in found: expected["output.weight"] = (n_embd, n_vocab)
+    # Optional projection biases are supported by upstream dense Qwen2/Llama.
+    for name,tensor in found.items():
+        if name.endswith(".bias") and name[:-5]+".weight" in expected:
+            dims=expected[name[:-5]+".weight"]
+            expected[name]=(dims[-1],)
+        if name.endswith("rope_freqs.weight"): expected[name]=(head_dim//2,)
     extra = set(found) - set(expected)
     if extra: raise GgufExportError(f"unexpected GGUF tensors: {sorted(extra)}")
     missing = [n for n in expected if n not in found]
@@ -818,13 +812,34 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
         "vocabSize": n_vocab,
         "tensorCount": len(header.tensors),
         "quantizedTensors": [t.name for t in header.tensors if t.dtype != GGML_F32],
-        "eosTokenId": int(md["tokenizer.ggml.eos_token_id"]),
+        "eosTokenId": int(md.get("tokenizer.ggml.eos_token_id", -1)),
         "bosTokenId": int(md.get("tokenizer.ggml.bos_token_id", -1)),
         "tokenizerModel": str(md.get("tokenizer.ggml.model", "")),
         "tokenizerPre": str(md.get("tokenizer.ggml.pre", "")),
         "name": str(md.get("general.name", "")),
+        "family": "Qwen2 / Qwen2.5" if arch=="qwen2" else arch,
+        "parameters": sum(int(np.prod(t.dims)) for t in header.tensors),
+        "fileType": int(md.get("general.file_type",0)),
+        "chatTemplate": str(md.get("tokenizer.chat_template","")),
+        "headCountKv": n_kv,
+        "estimatedKvBytesPerToken": 2*n_layer*n_kv*head_dim*4,
+        "estimatedMemory2048": size+2*n_layer*n_kv*head_dim*4*min(n_ctx,2048)+64*1024*1024,
+        "compatibility": "structurally valid; native load required",
         "valid": True,
     }
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=16)
+def _cached_validation(path,size,mtime):
+    return _validate_gguf_file(path)
+
+def validate_gguf_file(path):
+    p=Path(path)
+    if not p.exists(): raise GgufExportError(f"model file does not exist: {p}")
+    st=p.stat()
+    return dict(_cached_validation(str(p),st.st_size,st.st_mtime_ns))
 
 
 def main() -> int:

@@ -562,6 +562,18 @@ def inspect_bytes(
     }
 
 
+def _stream_source(path,name):
+    """Probe bounded text samples; retain legacy container/Parquet functionality."""
+    with open(path,"rb") as f:head=f.read(8)
+    codec=_detect_compression(head)
+    opener={"gzip":gzip.open,"bzip2":bz2.open,"xz":lzma.open}.get(codec,open)
+    if codec and codec not in ("gzip","bzip2","xz"):return None
+    with opener(path,"rb") as f:sample=f.read(256*1024)
+    fmt,encoding=_sniff_inner_format(sample,name)
+    if fmt not in ("jsonl","csv","tsv"):return None
+    return opener,fmt,encoding,codec,sample
+
+
 @dataclass
 class _ImportJob:
     token: str
@@ -630,8 +642,19 @@ class ImportManager:
         p = Path(path)
         if not p.exists():
             raise ValueError(f"Staged file does not exist: {p}")
-        raw = p.read_bytes()
-        preview = inspect_bytes(raw, name=name or p.name, mime=mime, token=token)
+        stream=_stream_source(p,name or p.name)
+        if stream:
+            opener,fmt,encoding,codec,sample=stream
+            # Preview is explicitly sampled; never scan or count the entire file.
+            if fmt=="jsonl" and b"\n" in sample:sample=sample[:sample.rfind(b"\n")+1]
+            preview=inspect_bytes(sample,name=name or p.name,mime=mime,token=token)
+            preview.update({"bytes":p.stat().st_size,"format":fmt,"resumable":True,
+                            "compression":[codec] if codec else []})
+            preview.setdefault("notes",[]).append("Bounded sample preview; document total is unknown until import completes.")
+        else:
+            if p.stat().st_size>MAX_DECOMPRESSED_BYTES:raise ValueError("This container exceeds the bounded legacy parser limit; use streaming JSONL/CSV or split the archive.")
+            raw=p.read_bytes()
+            preview=inspect_bytes(raw,name=name or p.name,mime=mime,token=token)
         with self._lock:
             job = _ImportJob(
                 token=token,
@@ -688,6 +711,10 @@ class ImportManager:
             job.pause_flag = False
             start_offset = job.records
 
+        if job.path is not None:
+            stream=_stream_source(job.path,job.name)
+            if stream:return self._commit_streaming(job,stream,on_progress,t0)
+            if job.path.stat().st_size>MAX_DECOMPRESSED_BYTES:raise ValueError("Use streaming JSONL/CSV for datasets beyond the bounded parser limit")
         raw = job.path.read_bytes() if job.path is not None else (job.raw_text or "").encode("utf-8")
         comp: list[str] = []
         arch: list[str] = []
@@ -803,6 +830,71 @@ class ImportManager:
             "format": job.data_format,
             "warnings": [],
         }
+
+    def _commit_streaming(self,job,stream,on_progress,t0):
+        opener,fmt,encoding,codec,sample=stream
+        source_size=job.path.stat().st_size
+        malformed=0;seen=0;batch=[];last_report=0.;consumed=0
+        start=job.records
+        def flush():
+            nonlocal last_report
+            if batch:
+                counts=self.corpus.add_many(batch);batch.clear()
+                job.accepted+=counts["accepted"];job.merged+=counts["merged"];job.skipped+=counts["skipped"]
+            job.records=seen;job.updated_at=int(time.time()*1000)
+            # Persist committed cursor only. A crash replays at most one batch;
+            # corpus content hashes make that replay idempotent.
+            with self._lock:self._persist_manifest()
+            now=time.perf_counter()
+            if on_progress and now-last_report>=.15:
+                last_report=now
+                on_progress({"token":job.token,"documents":job.accepted,"processed":job.records,
+                    "total":0,"percent":min(99,max(1,int(100*consumed/max(1,source_size)))) if not codec else 0,"stage":"committing","records":job.records,"merged":job.merged,
+                    "skipped":job.skipped,"failed":0,"bytesRead":consumed,"sourceBytes":source_size,"entries":1,
+                    "elapsedMs":int((now-t0)*1000),"malformed":job.malformed+malformed,
+                    "documentsPerSecond":max(0,job.records-start)/max(.001,now-t0),
+                    "message":"Streaming records; total unknown until completion"})
+        try:
+            with opener(job.path,"rb") as binary:
+                with io.TextIOWrapper(binary,encoding=encoding,errors="strict",newline="") as text:
+                    rows=csv.DictReader(text,delimiter="\t" if fmt=="tsv" else ",") if fmt!="jsonl" else text
+                    for index,row in enumerate(rows):
+                        if job.cancel_flag or job.pause_flag:break
+                        consumed=binary.tell()
+                        if fmt=="jsonl":
+                            if not row.strip():continue
+                            try:obj=json.loads(row)
+                            except json.JSONDecodeError:
+                                if seen>=start:malformed+=1
+                                continue
+                        else:obj=row
+                        if not isinstance(obj,dict):
+                            if seen>=start:malformed+=1
+                            continue
+                        doc=_extract_record_doc(obj,f"{Path(job.name).stem} #{index+1}",f"import:{Path(job.name).stem[:60]}")
+                        if not doc:continue
+                        seen+=1
+                        if seen<=start:continue
+                        doc["meta"]={**(doc.get("meta") or {}),"sourceFile":job.name,"record":index+1,"format":fmt}
+                        batch.append(doc)
+                        if len(batch)>=100:flush()
+            if not job.cancel_flag:flush()
+            job.status="cancelled" if job.cancel_flag else "paused" if job.pause_flag else "completed"
+        except Exception:
+            job.status="failed"
+            raise
+        finally:
+            job.malformed+=malformed
+            with self._lock:self._persist_manifest()
+        result={"outcome":job.status,"documents":job.accepted,"accepted":job.accepted,"merged":job.merged,
+            "skipped":job.skipped,"malformed":job.malformed,"failedEntries":0,"failed":0,"records":job.records,
+            "bytesRead":consumed,"byteBasis":"decompressed" if codec else "source",
+            "decompressedBytes":consumed,"elapsedMs":int((time.perf_counter()-t0)*1000),
+            "resumeRecords":start,"format":fmt,"warnings":[]}
+        if on_progress:on_progress({**result,"token":job.token,"stage":job.status,"processed":job.records,
+            "total":job.records if job.status=="completed" else 0,"percent":100 if job.status=="completed" else (min(99,max(1,int(100*consumed/max(1,source_size)))) if not codec else 0),
+            "sourceBytes":source_size,"entries":1})
+        return result
 
     def pause(self, token: str) -> dict[str, Any]:
         with self._lock:

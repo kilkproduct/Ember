@@ -1,6 +1,8 @@
 package com.kilkproduct.ember.ui.theme
 
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
@@ -128,17 +130,22 @@ private val EmberTypography = Typography(
 )
 
 private val EmberShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp),
-    small = RoundedCornerShape(8.dp),
-    medium = RoundedCornerShape(12.dp),
-    large = RoundedCornerShape(16.dp),
-    extraLarge = RoundedCornerShape(20.dp),
+    extraSmall = RoundedCornerShape(2.dp),
+    small = RoundedCornerShape(4.dp),
+    medium = RoundedCornerShape(6.dp),
+    large = RoundedCornerShape(8.dp),
+    extraLarge = RoundedCornerShape(10.dp),
 )
 
 @Composable
 fun EmberTheme(content: @Composable () -> Unit) {
     MaterialTheme(
-        colorScheme = EmberColorScheme,
+        colorScheme = if(isSystemInDarkTheme()) EmberColorScheme else lightColorScheme(
+            primary=Color(0xFF92451F),onPrimary=Color.White,
+            secondary=Color(0xFF17645B),background=Color(0xFFF5F3EF),
+            surface=Color(0xFFFFFEFB),surfaceVariant=Color(0xFFEAE7E0),
+            onSurface=Color(0xFF201F1C),onBackground=Color(0xFF201F1C),
+            onSurfaceVariant=Color(0xFF57554F),outline=Color(0xFF77736A),outlineVariant=Color(0xFFD1CDC3)) ,
         typography = EmberTypography,
         shapes = EmberShapes,
         content = content,

@@ -23,6 +23,10 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -61,6 +65,7 @@ fun VoiceScreen(
     val generating = ui.generating || Ops.GENERATE in ui.busy
     val last = ui.lastGeneration
     val teachForm = vm.teachForm
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     val teachBusy = Ops.LESSON_ADD in ui.busy
 
     LazyColumn(
@@ -68,10 +73,10 @@ fun VoiceScreen(
         contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = 6.dp, bottom = 28.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        if (!ui.modelReady) {
+        if (!ui.modelReady && !ui.inferenceReady) {
             item(key = "nocast") {
                 InfoBanner(
-                    message = "No brain yet. Cast a vessel, or import one, before speaking.",
+                    message = "Choose a local GGUF in Model library below, or train your own in Vessel → Fire.",
                     tone = EmberWarning,
                     actionLabel = "Open Vessel",
                     onAction = onOpenVessel,
@@ -81,8 +86,8 @@ fun VoiceScreen(
 
         item(key = "prompt") {
             EmberCard(
-                title = "Speak",
-                subtitle = "Generation runs in compiled native C++ on your current float32 weights.",
+                title = "Prompt",
+                subtitle = "Local llama.cpp · prompts and responses stay on this device",
             ) {
                 EmberTextField(
                     label = "Prompt",
@@ -95,140 +100,6 @@ fun VoiceScreen(
                     enabled = !generating,
                 )
                 Spacer(Modifier.height(10.dp))
-                SectionHeading("Sampling preset")
-                val activePreset = MainViewModel.activeVoicePreset(form)
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("precise" to "Precise", "balanced" to "Balanced", "creative" to "Creative").forEach { (id, label) ->
-                        FilterChip(
-                            selected = activePreset == id,
-                            onClick = { vm.applyVoicePreset(id) },
-                            enabled = !generating,
-                            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
-                        )
-                    }
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    NumberStepper(
-                        label = "Tokens",
-                        value = form.maxNew,
-                        onValueChange = { value -> vm.updateVoice { it.copy(maxNew = value) } },
-                        step = 10.0,
-                        min = 8.0,
-                        max = 300.0,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                    )
-                    NumberStepper(
-                        label = "Temperature",
-                        value = form.temperature,
-                        onValueChange = { value -> vm.updateVoice { it.copy(temperature = value) } },
-                        step = 0.05,
-                        min = 0.05,
-                        max = 2.0,
-                        decimals = 2,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    NumberStepper(
-                        label = "Context",
-                        value = form.contextLength,
-                        onValueChange = { value -> vm.updateVoice { it.copy(contextLength = value) } },
-                        step = 64.0,
-                        min = 64.0,
-                        max = 4096.0,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                        helper = "llama.cpp context length (clamped to the model)",
-                    )
-                    NumberStepper(
-                        label = "Top-k",
-                        value = form.topK,
-                        onValueChange = { value -> vm.updateVoice { it.copy(topK = value) } },
-                        step = 10.0,
-                        min = 0.0,
-                        max = 200.0,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                    )
-                    NumberStepper(
-                        label = "Top-p",
-                        value = form.topP,
-                        onValueChange = { value -> vm.updateVoice { it.copy(topP = value) } },
-                        step = 0.05,
-                        min = 0.0,
-                        max = 1.0,
-                        decimals = 2,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    NumberStepper(
-                        label = "Repetition",
-                        value = form.repetition,
-                        onValueChange = { value -> vm.updateVoice { it.copy(repetition = value) } },
-                        step = 0.05,
-                        min = 1.0,
-                        max = 2.0,
-                        decimals = 2,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                    )
-                    EmberTextField(
-                        label = "Seed",
-                        value = form.seed,
-                        onValueChange = { value -> vm.updateVoice { it.copy(seed = value) } },
-                        placeholder = "random",
-                        helper = "Blank = random",
-                        numeric = true,
-                        modifier = Modifier.weight(1f),
-                        enabled = !generating,
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                EmberTextField(
-                    label = "Write as r/ (optional)",
-                    value = form.subreddit,
-                    onValueChange = { value -> vm.updateVoice { it.copy(subreddit = value) } },
-                    placeholder = "bikewrench",
-                    enabled = !generating,
-                )
-                Spacer(Modifier.height(10.dp))
-                ChoiceRow(
-                    label = "Task",
-                    options = listOf(
-                        "continue" to "Continue",
-                        "translate" to "Translate",
-                        "summarize" to "Summarize",
-                        "documents" to "From documents",
-                    ),
-                    selected = form.task,
-                    onSelect = { value -> vm.updateVoice { it.copy(task = value) } },
-                    enabled = !generating,
-                )
-                if (form.task == "translate") {
-                    Spacer(Modifier.height(10.dp))
-                    EmberTextField(
-                        label = "Translate to",
-                        value = form.language,
-                        onValueChange = { value -> vm.updateVoice { it.copy(language = value) } },
-                        enabled = !generating,
-                    )
-                }
-                Spacer(Modifier.height(10.dp))
-                ChoiceRow(
-                    label = "Ending",
-                    options = listOf("stop" to "Stop at document end", "continue" to "Keep going"),
-                    selected = if (form.stopOnBoundary) "stop" else "continue",
-                    onSelect = { value -> vm.updateVoice { it.copy(stopOnBoundary = value == "stop") } },
-                    enabled = !generating,
-                )
-                Spacer(Modifier.height(14.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Button(
                         onClick = { vm.generate() },
@@ -268,7 +139,7 @@ fun VoiceScreen(
 
         item(key = "output") {
             EmberCard(
-                title = "Answer",
+                title = "Response",
                 subtitle = if (generating) {
                     "Streaming from llama.cpp · ${ui.streamingTokens} tokens"
                 } else {
@@ -395,9 +266,159 @@ fun VoiceScreen(
             }
         }
 
+        item(key="generation-settings") {
+            EmberCard(title="Generation settings") {
+                Text("Context ${form.contextLength} · output ${form.maxNew} tokens · threads ${form.threads}",style=MaterialTheme.typography.bodySmall)
+                TextButton(onClick={showSettings=!showSettings}) {Text(if(showSettings) "Hide advanced settings" else "Edit sampling and resources")}
+                if(showSettings) {
+                SectionHeading("Sampling preset")
+                val activePreset = MainViewModel.activeVoicePreset(form)
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    listOf("precise" to "Precise", "balanced" to "Balanced", "creative" to "Creative").forEach { (id, label) ->
+                        FilterChip(
+                            selected = activePreset == id,
+                            onClick = { vm.applyVoicePreset(id) },
+                            enabled = !generating,
+                            label = { Text(label, style = MaterialTheme.typography.labelMedium) },
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    NumberStepper(
+                        label = "Tokens",
+                        value = form.maxNew,
+                        onValueChange = { value -> vm.updateVoice { it.copy(maxNew = value) } },
+                        step = 10.0,
+                        min = 8.0,
+                        max = 2048.0,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                    )
+                    NumberStepper(
+                        label = "Temperature",
+                        value = form.temperature,
+                        onValueChange = { value -> vm.updateVoice { it.copy(temperature = value) } },
+                        step = 0.05,
+                        min = 0.05,
+                        max = 2.0,
+                        decimals = 2,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    NumberStepper(
+                        label = "Context",
+                        value = form.contextLength,
+                        onValueChange = { value -> vm.updateVoice { it.copy(contextLength = value) } },
+                        step = 64.0,
+                        min = 64.0,
+                        max = 4096.0,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                        helper = "Requested session context; cannot exceed native training context. Oldest prompt tokens are dropped with a warning when full.",
+                    )
+                    NumberStepper(
+                        label = "Top-k",
+                        value = form.topK,
+                        onValueChange = { value -> vm.updateVoice { it.copy(topK = value) } },
+                        step = 10.0,
+                        min = 0.0,
+                        max = 200.0,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                    )
+                    NumberStepper(
+                        label = "Top-p",
+                        value = form.topP,
+                        onValueChange = { value -> vm.updateVoice { it.copy(topP = value) } },
+                        step = 0.05,
+                        min = 0.0,
+                        max = 1.0,
+                        decimals = 2,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    NumberStepper(
+                        label = "Repetition",
+                        value = form.repetition,
+                        onValueChange = { value -> vm.updateVoice { it.copy(repetition = value) } },
+                        step = 0.05,
+                        min = 1.0,
+                        max = 2.0,
+                        decimals = 2,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                    )
+                    EmberTextField(
+                        label = "Seed",
+                        value = form.seed,
+                        onValueChange = { value -> vm.updateVoice { it.copy(seed = value) } },
+                        placeholder = "random",
+                        helper = "Blank = random",
+                        numeric = true,
+                        modifier = Modifier.weight(1f),
+                        enabled = !generating,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                EmberTextField(
+                    label = "Write as r/ (optional)",
+                    value = form.subreddit,
+                    onValueChange = { value -> vm.updateVoice { it.copy(subreddit = value) } },
+                    placeholder = "bikewrench",
+                    enabled = !generating,
+                )
+                Spacer(Modifier.height(10.dp))
+                ChoiceRow(
+                    label = "Task",
+                    options = listOf(
+                        "continue" to "Continue",
+                        "translate" to "Translate",
+                        "summarize" to "Summarize",
+                        "documents" to "From documents",
+                    ),
+                    selected = form.task,
+                    onSelect = { value -> vm.updateVoice { it.copy(task = value) } },
+                    enabled = !generating,
+                )
+                if (form.task == "translate") {
+                    Spacer(Modifier.height(10.dp))
+                    EmberTextField(
+                        label = "Translate to",
+                        value = form.language,
+                        onValueChange = { value -> vm.updateVoice { it.copy(language = value) } },
+                        enabled = !generating,
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                ChoiceRow(
+                    label = "Ending",
+                    options = listOf("stop" to "Stop at document end", "continue" to "Keep going"),
+                    selected = if (form.stopOnBoundary) "stop" else "continue",
+                    onSelect = { value -> vm.updateVoice { it.copy(stopOnBoundary = value == "stop") } },
+                    enabled = !generating,
+                )
+                Spacer(Modifier.height(14.dp))
+
+                    NumberStepper(label="CPU threads (0 = automatic)",value=form.threads,
+                        onValueChange={v->vm.updateVoice {it.copy(threads=v)}},step=1.0,min=0.0,max=8.0,enabled=!generating)
+                    NumberStepper(label="Prompt batch",value=form.batchSize,
+                        onValueChange={v->vm.updateVoice {it.copy(batchSize=v)}},step=32.0,min=16.0,max=2048.0,enabled=!generating)
+                    NumberStepper(label="Physical microbatch",value=form.microBatch,
+                        onValueChange={v->vm.updateVoice {it.copy(microBatch=v)}},step=16.0,min=1.0,max=2048.0,enabled=!generating,
+                        helper="Must not exceed prompt batch. Smaller microbatches reduce working memory; CPU-only build.")
+                }
+            }
+        }
         item(key = "engine") {
             EmberCard(
-                title = "Inference engine",
+                title = "Model library and runtime",
                 subtitle = "llama.cpp runs every generation locally. No API key, no server, no network.",
             ) {
                 KeyValueRow("Backend", ui.inferenceBackend)
@@ -473,6 +494,8 @@ fun VoiceScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    if(ui.modelImportDetail.isNotBlank()) Text(ui.modelImportDetail,style=MaterialTheme.typography.bodySmall)
+                    if(ui.modelBusy) TextButton(onClick={vm.repo.cancelModelImport()}) { Text("Cancel import") }
                     Button(onClick = onImportModel, enabled = !ui.modelBusy && !generating && !ui.trainingActive && !generating) { Text("Import GGUF model") }
                     TextButton(onClick = { vm.repo.exportGguf() }, enabled = ui.modelReady && !ui.exportBusy) { Text("Export GGUF") }
                     TextButton(onClick = { vm.validateModel() }, enabled = !ui.modelBusy && !generating && !ui.trainingActive) { Text("Validate") }

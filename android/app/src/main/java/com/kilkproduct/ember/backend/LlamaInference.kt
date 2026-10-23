@@ -84,6 +84,7 @@ class LlamaInference {
         nGpuLayers: Int,
         useMmap: Boolean,
         checkTensors: Boolean,
+        nUbatch: Int,
     ): ByteArray
 
     private external fun nativeModelInfo(handle: Long): ByteArray
@@ -148,6 +149,7 @@ class LlamaInference {
                 settings.nGpuLayers,
                 settings.useMmap,
                 settings.checkTensors,
+                settings.nUbatch.coerceAtMost(settings.nBatch),
             )
             val response = parse(raw)
             if (!response.optBoolean("ok", false)) {
@@ -262,6 +264,7 @@ class LlamaInference {
 data class EngineSettings(
     val nCtx: Int = 512,
     val nBatch: Int = 256,
+    val nUbatch: Int = 64,
     val nThreads: Int = 0,        // 0 = native auto (capped at 4)
     val nGpuLayers: Int = 0,      // CPU-only by default; GPU offload is opt-in
     val useMmap: Boolean = true,
@@ -273,6 +276,7 @@ data class EngineSettings(
             return EngineSettings(
                 nCtx = json.optInt("nCtx", 512).coerceIn(64, 8192),
                 nBatch = json.optInt("nBatch", 256).coerceIn(16, 2048),
+                nUbatch = json.optInt("nUbatch",64).coerceIn(1,2048),
                 nThreads = json.optInt("nThreads", 0).coerceIn(0, 8),
                 nGpuLayers = json.optInt("nGpuLayers", 0).coerceIn(0, 999),
                 useMmap = json.optBoolean("useMmap", true),
@@ -284,6 +288,7 @@ data class EngineSettings(
     fun toJson(): JSONObject = JSONObject()
         .put("nCtx", nCtx)
         .put("nBatch", nBatch)
+        .put("nUbatch", nUbatch)
         .put("nThreads", nThreads)
         .put("nGpuLayers", nGpuLayers)
         .put("useMmap", useMmap)

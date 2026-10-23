@@ -124,7 +124,7 @@ fun VesselScreen(
                         onAction = onGoToFuel,
                     )
                 } else {
-                    InfoBanner("Cast a vessel: learns a byte-level BPE vocabulary and initializes Ember v3 float32 weights in Python + native C++.")
+                    InfoBanner("Cast fits byte-BPE on training documents and initializes EMB4 Llama weights. Fire performs actual training.")
                 }
             }
         }
@@ -132,11 +132,15 @@ fun VesselScreen(
         item(key = "shape") {
             EmberCard(
                 title = "Vessel shape",
-                subtitle = "Larger vessels learn more but train slowly on a phone. Presets are honest starting points.",
+                subtitle = "Llama decoder configurations. Long contexts and large vocabularies may exceed phone memory; estimates are admission checks, not fit guarantees.",
             ) {
+                EmberTextField(label="Custom preset name",value=form.presetName,onValueChange={v->vm.updateVessel{it.copy(presetName=v)}})
+                Row {TextButton(onClick={vm.saveCustomPreset()}) {Text("Save configuration")};TextButton(onClick={vm.loadCustomPreset()}) {Text("Load saved")}}
+                EmberTextField(label="Feed-forward width (blank uses multiplier)",value=form.intermediate,onValueChange={v->vm.updateVessel{it.copy(intermediate=v,preset="custom")}})
+                EmberTextField(label="Initialization seed",value=form.seed,onValueChange={v->vm.updateVessel{it.copy(seed=v)}})
                 SectionHeading("Presets")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    listOf("phone" to "Phone", "tiny" to "Tiny", "small" to "Small", "medium" to "Medium").forEach { (id, label) ->
+                    MainViewModel.VESSEL_PRESETS.keys.map { it to it.replace('-',' ') }.forEach { (id, label) ->
                         FilterChip(
                             selected = form.preset == id,
                             onClick = { vm.applyVesselPreset(id) },
@@ -152,8 +156,8 @@ fun VesselScreen(
                         value = form.layers,
                         onValueChange = { value -> vm.updateVessel { it.copy(layers = value, preset = "custom") } },
                         step = 1.0,
-                        min = 2.0,
-                        max = 6.0,
+                        min = 1.0,
+                        max = 12.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -162,8 +166,8 @@ fun VesselScreen(
                         value = form.heads,
                         onValueChange = { value -> vm.updateVessel { it.copy(heads = value, preset = "custom") } },
                         step = 1.0,
-                        min = 2.0,
-                        max = 8.0,
+                        min = 1.0,
+                        max = 16.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -176,7 +180,7 @@ fun VesselScreen(
                         onValueChange = { value -> vm.updateVessel { it.copy(embd = value, preset = "custom") } },
                         step = 16.0,
                         min = 32.0,
-                        max = 256.0,
+                        max = 512.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -186,7 +190,7 @@ fun VesselScreen(
                         onValueChange = { value -> vm.updateVessel { it.copy(ctx = value, preset = "custom") } },
                         step = 32.0,
                         min = 32.0,
-                        max = 256.0,
+                        max = 2048.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
                     )
@@ -198,11 +202,11 @@ fun VesselScreen(
                         value = form.vocab,
                         onValueChange = { value -> vm.updateVessel { it.copy(vocab = value, preset = "custom") } },
                         step = 500.0,
-                        min = 500.0,
-                        max = 6000.0,
+                        min = 262.0,
+                        max = 50000.0,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
-                        helper = "Vocabulary is clamped to tokens actually seen.",
+                        helper = "Maximum 50,000. Actual vocabulary may be smaller if useful merges run out; no filler tokens are created.",
                     )
                     NumberStepper(
                         label = "Dropout (Llama: 0)",
@@ -221,7 +225,7 @@ fun VesselScreen(
                 NumberStepper(
                     label = "KV heads (must divide query heads)", value = form.kvHeads,
                     onValueChange = { value -> vm.updateVessel { it.copy(kvHeads = value) } },
-                    step = 1.0, min = 1.0, max = 8.0, enabled = !casting,
+                    step = 1.0, min = 1.0, max = 16.0, enabled = !casting,
                 )
                 NumberStepper(
                     label = "RoPE frequency base", value = form.ropeTheta,
@@ -280,7 +284,7 @@ fun VesselScreen(
         }
 
         item(key = "estimate") {
-            EmberCard(title = "Estimate") {
+            EmberCard(title = "Allocation estimate — not a completion timer") {
                 val estimate = ui.vesselEstimate
                 if (estimate != null) {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

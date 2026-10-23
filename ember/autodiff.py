@@ -20,8 +20,9 @@ class Tensor:
         self.grad = None
 
     def add_grad(self, g):
-        g = reduce_like(g, self.data.shape).astype(np.float32)
-        self.grad = g if self.grad is None else self.grad + g
+        g = reduce_like(g,self.data.shape).astype(np.float32,copy=False)
+        if self.grad is None:self.grad=g.copy()
+        else:self.grad+=g
 
     def __add__(self, other):
         other = as_tensor(other)
@@ -35,8 +36,11 @@ class Tensor:
 
     def __matmul__(self, other):
         other = as_tensor(other)
-        return Tensor(self.data @ other.data, ((self, lambda g:g @ other.data.swapaxes(-1,-2)),
-                                               (other, lambda g:self.data.swapaxes(-1,-2) @ g)))
+        def weight_grad(g):
+            if other.data.ndim==2 and self.data.ndim>=2:
+                return self.data.reshape(-1,self.data.shape[-1]).T @ g.reshape(-1,g.shape[-1])
+            return self.data.swapaxes(-1,-2) @ g
+        return Tensor(self.data @ other.data, ((self, lambda g:g @ other.data.swapaxes(-1,-2)),(other,weight_grad)))
 
     def reshape(self, *shape):
         return Tensor(self.data.reshape(*shape), ((self, lambda g:g.reshape(self.data.shape)),))

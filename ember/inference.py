@@ -170,6 +170,7 @@ class EngineConfig:
 
     n_ctx: int = 512
     n_batch: int = 256
+    n_ubatch: int = 64
     n_threads: int = 0        # 0 = auto (capped to 4 by the native layer)
     n_gpu_layers: int = 0     # CPU-only by default; GPU offload is opt-in
     use_mmap: bool = True
@@ -217,7 +218,7 @@ class InferenceEngine:
     def model_info(self) -> ModelInfo:
         raise NotImplementedError
 
-    def tokenize(self, text: str, add_special: bool = False) -> list[int]:
+    def tokenize(self, text: str, add_special: bool = False, parse_special: bool = False) -> list[int]:
         raise NotImplementedError
 
     def detokenize(self, ids: Sequence[int], remove_special: bool = True) -> str:
@@ -257,6 +258,7 @@ class _CConfig(ctypes.Structure):
         ("n_gpu_layers", ctypes.c_int32),
         ("use_mmap", ctypes.c_int32),
         ("check_tensors", ctypes.c_int32),
+        ("n_ubatch", ctypes.c_int32),
     ]
 
 
@@ -416,11 +418,13 @@ class LlamaCppEngine(InferenceEngine):
         cfg = config or EngineConfig()
         if not (1 <= cfg.n_ctx <= 8192 and 1 <= cfg.n_batch <= 2048 and 0 <= cfg.n_threads <= 8):
             raise InferenceError("Context, batch or thread count is out of range.", code=-1, name="invalid-arguments")
+        if cfg.n_ubatch<1: raise InferenceError("microbatch must be positive",code=-1,name="invalid-arguments")
         if cfg.n_gpu_layers != 0:
             raise InferenceError("This build is CPU-only; GPU offload is not enabled.", code=-1, name="invalid-arguments")
         c_cfg = _CConfig(
             n_ctx=int(cfg.n_ctx),
             n_batch=int(cfg.n_batch),
+            n_ubatch=int(min(cfg.n_ubatch,cfg.n_batch)),
             n_threads=int(cfg.n_threads),
             n_gpu_layers=int(cfg.n_gpu_layers),
             use_mmap=1 if cfg.use_mmap else 0,
@@ -465,18 +469,18 @@ class LlamaCppEngine(InferenceEngine):
                 self._raise(rc, "model info unavailable")
         return ModelInfo.from_json(json.loads(buf.value.decode("utf-8", "replace")))
 
-    def tokenize(self, text: str, add_special: bool = False) -> list[int]:
+    def tokenize(self, text: str, add_special: bool = False, parse_special: bool = False) -> list[int]:
         if not self.available():
             raise InferenceError(self._load_error or "native engine unavailable", code=-2, name="backend-not-initialized")
         raw = text.encode("utf-8")
         with self._lock:
-            probe = self._lib.ember_llama_tokenize(self._handle, raw, len(raw), 1 if add_special else 0, None, 0)
+            probe = self._lib.ember_llama_tokenize(self._handle, raw, len(raw), (1 if add_special else 0) | (2 if parse_special else 0), None, 0)
             if probe < 0:
                 self._raise(probe, "tokenization failed")
             if probe == 0:
                 return []
             buf = (ctypes.c_int32 * (probe + 8))()
-            n = self._lib.ember_llama_tokenize(self._handle, raw, len(raw), 1 if add_special else 0, buf, len(buf))
+            n = self._lib.ember_llama_tokenize(self._handle, raw, len(raw), (1 if add_special else 0) | (2 if parse_special else 0), buf, len(buf))
             if n < 0:
                 self._raise(n, "tokenization failed")
             return [int(buf[i]) for i in range(n)]

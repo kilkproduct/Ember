@@ -22,8 +22,8 @@ android {
         applicationId "com.kilkproduct.ember"
         minSdk 24
         targetSdk 34
-        versionCode 5
-        versionName "0.6.0"
+        versionCode 6
+        versionName "0.7.0"
 
         vectorDrawables.useSupportLibrary = true
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
@@ -56,12 +56,23 @@ android {
         }
     }
 
+    splits {
+        abi {
+            enable true
+            reset()
+            include "arm64-v8a", "x86_64"
+            universalApk true
+        }
+    }
+
     buildTypes {
         debug {
             minifyEnabled false
         }
         release {
-            minifyEnabled false
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro"
             // Release signing is configured by the distributor; never sign a
             // production release with the development/debug key.
         }
