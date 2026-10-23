@@ -20,6 +20,7 @@
 #include <deque>
 #include <mutex>
 #include <memory>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -591,7 +592,10 @@ EMBER_API int ember_llama_logits(ember_llama_t* e, const int32_t* ids, size_t n,
         if (llama_decode(e->ctx, batch)) return EMBER_LLAMA_ERR_DECODE;
     }
     const float* logits = llama_get_logits_ith(e->ctx, -1);
-    if (!logits) return EMBER_LLAMA_ERR_DECODE;
+    if (!logits || !std::all_of(logits, logits+v, [](float x) { return std::isfinite(x); })) {
+        e->set_error(EMBER_LLAMA_ERR_DECODE, "The model produced non-finite logits.");
+        return EMBER_LLAMA_ERR_DECODE;
+    }
     std::memcpy(out, logits, v*sizeof(float));
     return 0;
 }
@@ -631,6 +635,12 @@ EMBER_API int ember_llama_generate(
         p.seed = LLAMA_DEFAULT_SEED;
         p.stop_on_eos = 1;
         p.prepend_bos = 1;
+    }
+    // Resolve llama.cpp's random sentinel ourselves so the returned seed is
+    // replayable; returning UINT32_MAX would misleadingly randomize again.
+    if (p.seed == LLAMA_DEFAULT_SEED) {
+        p.seed = std::random_device{}();
+        if (p.seed == LLAMA_DEFAULT_SEED) --p.seed;
     }
     if (p.max_tokens < 0) p.max_tokens = 0;
     if (p.max_tokens > 8192) p.max_tokens = 8192;
@@ -758,6 +768,15 @@ EMBER_API int ember_llama_generate(
                 n_past = n_ctx;
             }
 
+            const float* scores = llama_get_logits_ith(engine->ctx, -1);
+            const int vocab_size = llama_vocab_n_tokens(engine->vocab);
+            if (!scores || !std::all_of(scores, scores + vocab_size, [](float v) { return std::isfinite(v); })) {
+                engine->set_error(EMBER_LLAMA_ERR_DECODE,
+                    "The model produced non-finite logits. Retrain or select a different GGUF model.");
+                stopped_by = "error";
+                result_code = EMBER_LLAMA_ERR_DECODE;
+                break;
+            }
             const llama_token next = llama_sampler_sample(chain, engine->ctx, -1);
             // llama_sampler_sample already accepts the token in this pinned API.
 

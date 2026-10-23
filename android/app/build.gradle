@@ -62,8 +62,8 @@ android {
         }
         release {
             minifyEnabled false
-            // Debug signing keeps the side-loadable APK flow intact.
-            signingConfig signingConfigs.debug
+            // Release signing is configured by the distributor; never sign a
+            // production release with the development/debug key.
         }
     }
 

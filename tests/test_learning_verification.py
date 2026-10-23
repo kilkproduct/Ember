@@ -28,7 +28,7 @@ import pytest
 
 from ember.backend import EmberBackend
 from ember.dataset import IGNORE_INDEX, Batcher
-from ember.inference import LlamaCppEngine, EngineConfig, GenParams
+from ember.inference import LlamaCppEngine, EngineConfig, GenParams, InferenceError
 
 # Eight short documents with a strongly learnable, repetitive structure. Small on
 # purpose: the point is to verify the implementation, not to train a good model.
@@ -258,9 +258,21 @@ def test_diverging_run_is_refused_instead_of_writing_nan_weights(tmp_path) -> No
         recorded = [l for l in be.trainer.losses if np.isfinite(l)]
         assert len(recorded) == len(be.trainer.losses), "non-finite losses must never be recorded as metrics"
 
-        # A runaway run is not a usable language model: require finite native
-        # logits on the bounded model *before* the deliberate instability test.
-        assert be.trainer.step >= 0
+        # Native loading must succeed for finite tensor bytes, but an overflowed
+        # graph must never reach the sampler unchecked: require finite logits or
+        # an explicit structured decode failure, not a native crash.
+        engine = LlamaCppEngine()
+        assert engine.available(), engine.load_error
+        try:
+            engine.load_model(be.trainer.sync_gguf(force=True), EngineConfig(n_ctx=64, n_threads=2))
+            try:
+                logits = engine.forward_logits([257])
+            except InferenceError as exc:
+                assert exc.code == -9 and "non-finite" in str(exc)
+            else:
+                assert np.isfinite(logits).all()
+        finally:
+            engine.close()
     finally:
         be.close()
 

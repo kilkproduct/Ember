@@ -113,3 +113,10 @@ def test_library_selection_survives_restart_and_samples_refresh(fixture, tmp_pat
         assert [s['step'] for s in b.trainer.samples] == [4,2]
         assert read_gguf_header(b.trainer.active_gguf_path).metadata['ember.source_step'] == 4
     finally: b.close()
+
+def test_random_seed_is_actual_replayable_seed(fixture):
+    engine, _, _, _ = fixture
+    first = engine.generate('hello', GenParams(max_tokens=8, temperature=.9, stop_on_eos=False))
+    assert first.seed != 0xFFFFFFFF
+    again = engine.generate('hello', GenParams(max_tokens=8, temperature=.9, seed=first.seed, stop_on_eos=False))
+    assert first.token_ids == again.token_ids

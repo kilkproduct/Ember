@@ -252,8 +252,10 @@ Java_com_kilkproduct_ember_backend_LlamaInference_nativeGenerate(
         if (global_listener) {
             env->DeleteGlobalRef(global_listener);
         }
-        if (ctx.broken && env->ExceptionCheck()) {
-            // Let Kotlin see the listener's exception after we clean up.
+        if (ctx.broken) {
+            // Clear a pending listener exception before making any more JNI calls;
+            // return a structured failure after the global reference is released.
+            if (env->ExceptionCheck()) env->ExceptionClear();
             return error_json(env, EMBER_LLAMA_ERR_INTERNAL, "Token listener failed during generation.");
         }
 
