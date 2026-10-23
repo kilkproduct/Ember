@@ -11,4 +11,4 @@ tests/test_learning_verification.py::test_diverging_run_is_refused_instead_of_wr
     r = (np.mean(x.data*x.data, axis=-1, keepdims=True)+eps)**-0.5
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-162 passed, 2 warnings in 9.56s
+162 passed, 2 warnings in 10.05s

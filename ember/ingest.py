@@ -604,6 +604,7 @@ class _ImportJob:
     resume_records: int = 0
     identity: list[int] = field(default_factory=list)
     rejected: int = 0
+    duplicates: int = 0
     accepted: int = 0
     merged: int = 0
     skipped: int = 0
@@ -649,6 +650,7 @@ class ImportManager:
                 status=status,
                 identity=row.get("identity", []),
                 rejected=int(row.get("rejected", 0)),
+                duplicates=int(row.get("duplicates", 0)),
                 data_format=str(row.get("dataFormat") or "text"),
                 accepted=int(row.get("documents") or row.get("accepted") or 0),
                 merged=int(row.get("merged") or 0),
@@ -893,29 +895,38 @@ class ImportManager:
         batch=[]
         pending_rejected=0
         last_report=0.
+        rate_time=t0
+        rate_rows=start
+        rolling_rate=0.
         batch_chars=0
         reader=None
         rows=None
         def report(final=False):
-            nonlocal last_report
+            nonlocal last_report,rate_time,rate_rows,rolling_rate
             now=time.perf_counter()
             if on_progress and (final or now-last_report>=.15):
                 last_report=now
+                delta=now-rate_time
+                if delta>=.15:
+                    measured=max(0,job.records-rate_rows)/delta
+                    rolling_rate=measured if not rolling_rate else .3*measured+.7*rolling_rate
+                    rate_time=now;rate_rows=job.records
                 on_progress({"token":job.token,"name":job.name,"stage":job.status,
                     "format":"parquet","processed":job.records,"records":job.records,
                     "total":reader.num_rows,"percent":100 if job.status=="completed" else
                         min(99,int(100*job.records/max(1,reader.num_rows))),
-                    "documents":job.accepted,"documentsSaved":job.accepted+job.merged,
-                    "merged":job.merged,"skipped":job.skipped,"rejected":job.rejected,
+                    "documents":job.accepted,"documentsSaved":job.accepted+job.merged-job.duplicates,"duplicates":job.duplicates,
+                    "merged":job.merged,"skipped":job.skipped,"rejected":job.rejected,"duplicates":job.duplicates,
                     "rowGroupsProcessed":reader.row_groups_processed,"rowGroups":len(reader.row_groups),
                     "bytesRead":reader.bytes_read,"byteBasis":"projected pages and footer (includes resume replay)",
                     "sourceBytes":job.path.stat().st_size,"entries":1,
                     "elapsedMs":int((now-t0)*1000),
-                    "documentsPerSecond":max(0,job.records-start)/max(.001,now-t0)})
+                    "documentsPerSecond":rolling_rate})
         def flush():
             nonlocal pending_rejected,batch_chars
             if batch:
                 counts=self.corpus.add_many(batch)
+                job.duplicates+=counts.get("duplicates",0)
                 job.accepted+=counts["accepted"];job.merged+=counts["merged"];job.skipped+=counts["skipped"]
                 batch.clear()
             job.rejected+=pending_rejected;pending_rejected=0;batch_chars=0
@@ -950,7 +961,7 @@ class ImportManager:
                     rows.close()
                 result={"outcome":job.status,"format":"parquet","records":job.records,
                         "documents":job.accepted,"accepted":job.accepted,"merged":job.merged,
-                        "skipped":job.skipped,"rejected":job.rejected,"malformed":0,"failed":0,
+                        "skipped":job.skipped,"rejected":job.rejected,"duplicates":job.duplicates,"malformed":0,"failed":0,
                         "failedEntries":0,"resumeRecords":start,"bytesRead":reader.bytes_read,
                         "rowGroupsProcessed":reader.row_groups_processed,"warnings":[],
                         "elapsedMs":int((time.perf_counter()-t0)*1000)}
@@ -1102,6 +1113,7 @@ class ImportManager:
                 "records": j.records,
                 "identity": j.identity,
                 "rejected": j.rejected,
+                "duplicates": j.duplicates,
                 "updatedAt": j.updated_at,
                 "resumable": j.path is not None and j.path.exists(),
             }

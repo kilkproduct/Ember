@@ -300,6 +300,8 @@ class ParquetFile:
             self.bytes_read = footer_len + 12
             self.row_groups = meta.get(4, [])
             self.num_rows = int(meta.get(3, 0))
+            if self.num_rows < 0 or any(int(rg.get(3, 0)) < 0 for rg in self.row_groups) or sum(int(rg.get(3, 0)) for rg in self.row_groups) != self.num_rows:
+                raise ValueError("Parquet footer row count does not match its row groups")
             schema = meta.get(2, [])
             self.columns = []
             for idx, elem in enumerate(schema[1:]):

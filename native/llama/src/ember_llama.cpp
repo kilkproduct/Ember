@@ -473,7 +473,7 @@ EMBER_API int ember_llama_load(
     if (!ctx) {
         engine->set_error(EMBER_LLAMA_ERR_CONTEXT,
                           "Could not allocate a generation context for n_ctx=" + std::to_string(cfg.n_ctx) +
-                          ". Try a shorter context length — the model plus KV cache does not fit in memory.");
+                          ". Upstream context initialization: " + g_load_errors);
         return engine->code;
     }
 

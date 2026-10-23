@@ -457,10 +457,9 @@ class EmberEngine private constructor(private val app: Application) {
         try {
             File(app.cacheDir, "imports").deleteRecursively()
             File(app.cacheDir, "exports").deleteRecursively()
-            val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
-            importsDir().listFiles()?.forEach { file ->
-                if (file.lastModified() < cutoff) file.delete()
-            }
+            // Durable staged inputs may belong to paused/resumable imports.
+            // Age alone is not permission to delete a user's dataset. Explicit
+            // discard/completion releases these through releaseImport().
         } catch (_: Throwable) {
         }
     }

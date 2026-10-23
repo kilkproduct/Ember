@@ -295,6 +295,7 @@ class Corpus:
         accepted = 0
         merged = 0
         skipped = 0
+        duplicates = 0
         now = time.time()
         with self._lock:
             cur = self._conn.cursor()
@@ -330,6 +331,7 @@ class Corpus:
                         row = cur.execute("SELECT id FROM documents WHERE chash = ? LIMIT 1", (chash,)).fetchone()
                         if row is not None:
                             merged += 1
+                            duplicates += 1
                             continue
 
                     doc_id = str(raw.get("id") or chash[:12])
@@ -347,7 +349,7 @@ class Corpus:
             except Exception:
                 self._conn.rollback()
                 raise
-        return {"accepted": accepted, "merged": merged, "skipped": skipped}
+        return {"accepted": accepted, "merged": merged, "skipped": skipped, "duplicates": duplicates}
 
     def remove(self, doc_id: str) -> bool:
         with self._lock:
