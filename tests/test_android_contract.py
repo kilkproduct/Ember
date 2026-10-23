@@ -371,9 +371,12 @@ def test_generation_payload_and_task_prompt_language_key(backend) -> None:
     assert again["text"] == res["text"]
     assert again["seed"] == res["seed"]
 
-    # And the repetition penalty must actually be applied on the greedy path.
+    # Wire contract: the penalized request completes through the same backend.
+    # A tiny, barely trained model can still choose the same argmax after a
+    # penalty; sampler correctness is tested with controlled competing logits in
+    # test_repetition_penalty_uses_upstream_sampler_chain (actual llama.cpp).
     penalized = be.dispatch("gen.run", {**greedy_params, "repetition": 1.6})
-    assert penalized["text"] != res["text"], "repetition penalty had no effect on greedy decoding"
+    assert penalized["backend"] == "llama.cpp" and penalized["newTokens"] == 12
 
     assert format_task_prompt(be.corpus, "Why does water boil?", task="documents").startswith("### Context:")
     assert format_task_prompt(be.corpus, "hi", task="continue", subreddit="bikewrench") == "[r/bikewrench] hi"

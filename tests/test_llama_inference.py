@@ -120,3 +120,21 @@ def test_random_seed_is_actual_replayable_seed(fixture):
     assert first.seed != 0xFFFFFFFF
     again = engine.generate('hello', GenParams(max_tokens=8, temperature=.9, seed=first.seed, stop_on_eos=False))
     assert first.token_ids == again.token_ids
+
+def test_repetition_penalty_uses_upstream_sampler_chain(fixture, tmp_path):
+    engine, tok, model, _ = fixture
+    # A controlled *valid GPT-2 graph*, not a mocked sampler: zero blocks, final
+    # norm bias selects dimension 0, and two output rows compete at logits 2/1.8.
+    # First token is A. After repeat_penalty=1.6 its score is 1.25, so B must win.
+    for weight in model.params.values(): weight.fill(0)
+    model.params['ln_f.bias'][0] = 1
+    model.params['wte'][ord('A'), 0] = 2
+    model.params['wte'][ord('B'), 0] = 1.8
+    path = tmp_path/'penalties.gguf'
+    export_gguf(path, model.cfg, model.params, tok)
+    engine.load_model(path, EngineConfig(n_ctx=64, n_threads=2))
+    plain = engine.generate('', GenParams(max_tokens=6, temperature=0, repeat_penalty=1, seed=1))
+    penalized = engine.generate('', GenParams(max_tokens=6, temperature=0, repeat_penalty=1.6, seed=1))
+    assert plain.token_ids == [ord('A')]*6
+    assert penalized.token_ids[:2] == [ord('A'), ord('B')]
+    assert plain.text != penalized.text
