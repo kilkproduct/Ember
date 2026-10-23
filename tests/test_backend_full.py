@@ -120,14 +120,15 @@ def test_analytic_gradients_match_numerical_finite_differences() -> None:
 
     for name in (
         "wte",
-        "wpe",
-        "blk.0.ln1.gain",
-        "blk.0.attn.qkv.weight",
-        "blk.0.attn.proj.bias",
-        "blk.1.mlp.fc.weight",
-        "blk.1.mlp.proj.weight",
-        "ln_f.gain",
-        "ln_f.bias",
+        "blk.0.attn_q.weight",
+        "blk.0.attn_k.weight",
+        "blk.0.attn_v.weight",
+        "blk.0.attn_output.weight",
+        "blk.0.ffn_gate.weight",
+        "blk.0.ffn_up.weight",
+        "blk.0.ffn_down.weight",
+        "blk.0.attn_norm.weight",
+        "output_norm.weight",
     ):
         arr = gpt.params[name].reshape(-1)
         g_arr = grads[name].reshape(-1)

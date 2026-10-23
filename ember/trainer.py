@@ -80,9 +80,16 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
         raise ValueError(f"Embedding size ({n_embd}) must be divisible by head count ({n_head}).")
     vocab_size = max(262, vocab_size)
 
-    n_params = estimate_params(n_layer, n_head, n_embd, block_size, vocab_size, ffn_mult)
+    candidate = ModelConfig(n_layer=n_layer, n_head=n_head, n_embd=n_embd,
+                            block_size=block_size, vocab_size=vocab_size, ffn_mult=ffn_mult,
+                            n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head", 1))),
+                            rope_theta=float(cfg_in.get("ropeTheta", cfg_in.get("rope_theta",500000))),
+                            intermediate_size=cfg_in.get("intermediate_size"),
+                            dropout=float(cfg_in.get("dropout",0)))
+    candidate.validate()
+    n_params = candidate.n_params
     # Parameter states (16 B/param) + activation working set for batch=2
-    act_bytes = 2 * block_size * n_embd * n_layer * 48
+    act_bytes = 2 * n_layer * (block_size * n_embd * 80 + n_head * block_size * block_size * 16)
     train_bytes = estimate_train_bytes(n_params) + act_bytes
 
     blocked = train_bytes > BLOCK_PHONE_BYTES
@@ -151,6 +158,10 @@ class Trainer:
         self._engine_model_path: str = ""
         self._engine_model_mtime: float = -1.0
         self.quantization: str = "f32"
+        prep = self.corpus.get_kv("training:preparation") or {}
+        self.max_train_tokens = int(prep.get("maxTrainTokens", 3_000_000))
+        self.max_val_tokens = int(prep.get("maxValTokens", 250_000))
+        self.tokenizer_chars = int(prep.get("tokenizerChars", 2_000_000))
 
         # Persistent metrics & run state
         self.step: int = 0
@@ -343,6 +354,8 @@ class Trainer:
                 self.corpus.iter_documents(batch_size=64),
                 self.tokenizer,
                 holdout_ids=holdout,
+                max_tokens=self.max_train_tokens,
+                max_val_tokens=self.max_val_tokens,
                 mask_lesson_prompts=mask_lp,
                 balance=bal,
             )
@@ -363,6 +376,12 @@ class Trainer:
             raise ValueError("Add at least one document to Fuel before casting a vessel.")
 
         cfg_in = _unwrap_vessel_params(params)
+        for key, attr in (("maxTrainTokens","max_train_tokens"),("maxValTokens","max_val_tokens"),("tokenizerChars","tokenizer_chars")):
+            value = int(cfg_in.get(key,getattr(self,attr)))
+            if value < 32: raise ValueError(f"{key} must be >=32")
+            setattr(self,attr,value)
+        self.corpus.set_kv("training:preparation", {"maxTrainTokens":self.max_train_tokens,
+            "maxValTokens":self.max_val_tokens,"tokenizerChars":self.tokenizer_chars})
         preset = str(cfg_in.get("preset") or "").lower()
         base = PRESETS.get(preset, PRESETS["phone"])
         n_layer = int(cfg_in.get("nLayer") or cfg_in.get("n_layer") or base["n_layer"])
@@ -402,8 +421,21 @@ class Trainer:
             _stage("corpus", 0.08)
             n_docs = self.corpus.count()
             _stage("tokenizer", 0.25)
+            # Tokenizer fitting excludes validation documents and uses an explicit
+            # bounded sample; source documents are never modified or deleted.
+            holdout = compute_holdout_ids(self.corpus.id_kind_pairs(), holdout_frac=0.05)
+            self.corpus.set_kv("training:split", {"version":1,"algorithm":"blake2b-doc-id-v1",
+                "holdoutFraction":0.05,"validationIds":sorted(holdout),"corpusRevision":self.corpus.revision})
+            def tokenizer_sample():
+                remaining = self.tokenizer_chars
+                for doc in self.corpus.iter_documents(batch_size=64):
+                    if doc.id in holdout: continue
+                    text = doc.text[:remaining]
+                    if text: yield text
+                    remaining -= len(text)
+                    if remaining <= 0: break
             tok = train_bpe(
-                self.corpus.iter_texts(batch_size=64),
+                tokenizer_sample(),
                 vocab_size=target_vocab,
                 min_pair_count=2,
                 total_hint=n_docs,
@@ -417,12 +449,20 @@ class Trainer:
                 self.corpus.iter_documents(batch_size=64),
                 tok,
                 holdout_ids=holdout,
+                max_tokens=self.max_train_tokens,
+                max_val_tokens=self.max_val_tokens,
                 mask_lesson_prompts=(self.lesson_loss_mode == "response"),
                 balance=self.balance_mode,
             )
 
             _stage("model", 0.88)
             cfg = ModelConfig(
+                n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head",1))),
+                rope_theta=float(cfg_in.get("ropeTheta",cfg_in.get("rope_theta",500000))),
+                rope_scaling=str(cfg_in.get("rope_scaling","none")),
+                tie_embeddings=bool(cfg_in.get("tie_embeddings",True)),
+                norm_eps=float(cfg_in.get("norm_eps",1e-5)),
+                intermediate_size=cfg_in.get("intermediate_size"),
                 n_layer=n_layer,
                 n_head=n_head,
                 n_embd=n_embd,
@@ -617,6 +657,10 @@ class Trainer:
             sampler=sampler_mode,
             boundaries=boundaries,
         )
+        working_bytes = estimate_train_bytes(self.cfg.n_params) + batch_size*self.cfg.n_layer*(self.cfg.block_size*self.cfg.n_embd*80 + self.cfg.n_head*self.cfg.block_size**2*16)
+        if working_bytes > BLOCK_PHONE_BYTES:
+            self.running = False
+            raise ValueError("Training batch/context exceeds mobile memory budget; reduce batch or context.")
         drop_rng = np.random.default_rng(start_step + 17)
         ema: float | None = None
         completed = 0
@@ -1472,7 +1516,10 @@ class Trainer:
             "gradClip": self.grad_clip,
             "sampler": self.sampler_mode,
             "passes": self.passes,
-            "streamFormat": 3,
+            "architecture": "llama",
+            "preparationLimits": {"maxTrainTokens":self.max_train_tokens,"maxValTokens":self.max_val_tokens,
+                                  "tokenizerChars":self.tokenizer_chars},
+            "streamFormat": 4,
             "docBoundaryMask": self.boundaries_mode == "respect",
             "maskBoundaryLoss": True,
             "maskLessonPrompts": self.lesson_loss_mode == "response",

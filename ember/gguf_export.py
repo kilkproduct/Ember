@@ -1,38 +1,4 @@
-"""Deterministic GGUF export for Ember models (llama.cpp ``gpt2`` architecture).
-
-Ember trains a small decoder-only transformer in NumPy.  llama.cpp already
-implements that exact architecture under ``general.architecture = "gpt2"``
-(``src/models/gpt2.cpp`` at the pinned revision):
-
-================================  ==========================================
-llama.cpp gpt2 tensor             Ember v3 parameter
-================================  ==========================================
-``token_embd.weight``             ``wte``            (tied output head)
-``position_embd.weight``          ``wpe``            (learned positions)
-``output_norm.weight/bias``       ``ln_f.gain/bias``
-``blk.N.attn_norm.weight/bias``   ``blk.N.ln1.gain/bias``
-``blk.N.attn_qkv.weight/bias``    ``blk.N.attn.qkv.weight`` **transposed**
-``blk.N.attn_output.weight/bias`` ``blk.N.attn.proj.weight`` **transposed**
-``blk.N.ffn_norm.weight/bias``    ``blk.N.ln2.gain/bias``
-``blk.N.ffn_up.weight/bias``      ``blk.N.mlp.fc.weight`` **transposed**
-``blk.N.ffn_down.weight/bias``    ``blk.N.mlp.proj.weight`` **transposed**
-``output.weight``                 omitted when embeddings are tied
-================================  ==========================================
-
-The transpose is required because GGUF/ggml store a linear layer as
-``ne0 = in_features`` (fastest axis) while Ember stores the ``x @ W`` form, the
-same convention HuggingFace GPT-2 Conv1D uses — ``conversion/gpt2.py`` upstream
-applies the identical ``transpose(1, 0)``.
-
-The FFN activation also matches without any change: ggml's ``GGML_OP_GELU``
-computes ``0.5*x*(1+tanh(sqrt(2/pi)*x*(1+0.044715*x^2)))``, which is exactly
-:func:`ember.spec.gelu`.
-
-This module is a self-contained GGUF v3 writer plus a header reader, so export
-and on-device validation work without the upstream ``gguf`` package (which is
-only used by the test suite as an independent verifier).
-"""
-
+"""Atomic EMB4 Llama to GGUF v3 converter and strict model inspector."""
 from __future__ import annotations
 
 import json
@@ -63,12 +29,12 @@ GGML_Q8_0 = 8
 FILE_TYPE_ALL_F32 = 0
 FILE_TYPE_MOSTLY_Q8_0 = 7
 
-ARCH_GPT2 = "gpt2"
+ARCH_LLAMA = "llama"
 
 #: Explicit format boundary. Anything that is not a GGUF file carrying this key
 #: (or an upstream GGUF gpt2 model) is reported to the user as incompatible
 #: rather than being silently treated as loadable.
-EMBER_MODEL_FORMAT = "gguf-gpt2-v1"
+EMBER_MODEL_FORMAT = "gguf-llama-v2"
 EMBER_FORMAT_KEY = "ember.format_version"
 
 # GGUF metadata value types (gguf-py/gguf/constants.py::GGUFValueType)
@@ -147,7 +113,7 @@ def quantize_q8_0(arr: np.ndarray) -> bytes:
 class GgufWriter:
     """Minimal GGUF v3 writer (stdlib + numpy only)."""
 
-    def __init__(self, arch: str = ARCH_GPT2, alignment: int = GGUF_DEFAULT_ALIGNMENT) -> None:
+    def __init__(self, arch: str = ARCH_LLAMA, alignment: int = GGUF_DEFAULT_ALIGNMENT) -> None:
         if alignment <= 0 or (alignment & (alignment - 1)) != 0:
             raise GgufExportError("alignment must be a positive power of two")
         self.arch = arch
@@ -313,7 +279,7 @@ def _infer_type(value: Any) -> int:
 # ---------------------------------------------------------------------------
 
 
-def ember_to_gpt2_tensors(cfg: ModelConfig, params: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def ember_to_llama_tensors(cfg: ModelConfig, params: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Rename/transpose Ember parameters into llama.cpp ``gpt2`` tensors."""
     expected = dict(tensor_specs(cfg))
     extra = set(params) - set(expected)
@@ -329,27 +295,13 @@ def ember_to_gpt2_tensors(cfg: ModelConfig, params: dict[str, np.ndarray]) -> di
                 "this checkpoint does not match its own configuration"
             )
 
-    out: dict[str, np.ndarray] = {
-        "token_embd.weight": params["wte"],
-        "position_embd.weight": params["wpe"],
-        "output_norm.weight": params["ln_f.gain"],
-        "output_norm.bias": params["ln_f.bias"],
-    }
+    out = {"token_embd.weight": params["wte"], "output_norm.weight": params["output_norm.weight"]}
     for i in range(cfg.n_layer):
-        src, dst = f"blk.{i}.", f"blk.{i}."
-        out[dst + "attn_norm.weight"] = params[src + "ln1.gain"]
-        out[dst + "attn_norm.bias"] = params[src + "ln1.bias"]
-        out[dst + "attn_qkv.weight"] = np.ascontiguousarray(params[src + "attn.qkv.weight"].T)
-        out[dst + "attn_qkv.bias"] = params[src + "attn.qkv.bias"]
-        out[dst + "attn_output.weight"] = np.ascontiguousarray(params[src + "attn.proj.weight"].T)
-        out[dst + "attn_output.bias"] = params[src + "attn.proj.bias"]
-        out[dst + "ffn_norm.weight"] = params[src + "ln2.gain"]
-        out[dst + "ffn_norm.bias"] = params[src + "ln2.bias"]
-        out[dst + "ffn_up.weight"] = np.ascontiguousarray(params[src + "mlp.fc.weight"].T)
-        out[dst + "ffn_up.bias"] = params[src + "mlp.fc.bias"]
-        out[dst + "ffn_down.weight"] = np.ascontiguousarray(params[src + "mlp.proj.weight"].T)
-        out[dst + "ffn_down.bias"] = params[src + "mlp.proj.bias"]
-
+        prefix = f"blk.{i}."
+        for name in ("attn_norm", "ffn_norm"):
+            out[prefix+name+".weight"] = params[prefix+name+".weight"]
+        for name in ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"):
+            out[prefix+name+".weight"] = np.ascontiguousarray(params[prefix+name+".weight"].T)
     if not cfg.tie_embeddings:
         out["output.weight"] = params["lm_head.weight"]
     return out
@@ -359,7 +311,10 @@ def ember_to_gpt2_tensors(cfg: ModelConfig, params: dict[str, np.ndarray]) -> di
 #: positional embeddings and all biases stay float32 (upstream quantizers do the
 #: same, and llama.cpp requires ``position_embd`` rows for ``ggml_get_rows``).
 QUANTIZABLE_SUFFIXES = (
-    "attn_qkv.weight",
+    "attn_q.weight",
+    "attn_k.weight",
+    "attn_v.weight",
+    "ffn_gate.weight",
     "attn_output.weight",
     "ffn_up.weight",
     "ffn_down.weight",
@@ -374,7 +329,7 @@ class ExportReport:
     quantized_tensors: list[str] = field(default_factory=list)
     float_tensors: list[str] = field(default_factory=list)
     file_type: int = FILE_TYPE_ALL_F32
-    arch: str = ARCH_GPT2
+    arch: str = ARCH_LLAMA
     context_length: int = 0
     embedding_length: int = 0
     block_count: int = 0
@@ -458,20 +413,23 @@ def export_gguf(
         raise GgufExportError(f"unsupported quantization {quantization!r} (use 'f32' or 'q8_0')")
 
     validate_export_config(cfg, tokenizer)
-    tensors = ember_to_gpt2_tensors(cfg, params)
+    tensors = ember_to_llama_tensors(cfg, params)
 
-    writer = GgufWriter(arch=ARCH_GPT2)
-    writer.add_string("general.architecture", ARCH_GPT2)
+    writer = GgufWriter(arch=ARCH_LLAMA)
+    writer.add_string("general.architecture", ARCH_LLAMA)
     writer.add_string("general.name", f"Ember {name} (step {step})")
     writer.add_u32("general.file_type", FILE_TYPE_MOSTLY_Q8_0 if quantization == "q8_0" else FILE_TYPE_ALL_F32)
 
-    writer.add_u32(f"{ARCH_GPT2}.context_length", cfg.block_size)
-    writer.add_u32(f"{ARCH_GPT2}.embedding_length", cfg.n_embd)
-    writer.add_u32(f"{ARCH_GPT2}.block_count", cfg.n_layer)
-    writer.add_u32(f"{ARCH_GPT2}.feed_forward_length", cfg.ffn)
-    writer.add_u32(f"{ARCH_GPT2}.attention.head_count", cfg.n_head)
-    writer.add_u32(f"{ARCH_GPT2}.attention.head_count_kv", cfg.n_head)
-    writer.add_f32(f"{ARCH_GPT2}.attention.layer_norm_epsilon", float(cfg.norm_eps))
+    writer.add_u32(f"{ARCH_LLAMA}.context_length", cfg.block_size)
+    writer.add_u32(f"{ARCH_LLAMA}.embedding_length", cfg.n_embd)
+    writer.add_u32(f"{ARCH_LLAMA}.block_count", cfg.n_layer)
+    writer.add_u32(f"{ARCH_LLAMA}.feed_forward_length", cfg.ffn)
+    writer.add_u32(f"{ARCH_LLAMA}.attention.head_count", cfg.n_head)
+    writer.add_u32(f"{ARCH_LLAMA}.attention.head_count_kv", cfg.n_kv_head)
+    writer.add_u32("llama.rope.dimension_count", cfg.head_dim)
+    writer.add_f32("llama.rope.freq_base", cfg.rope_theta)
+    writer.add_string("llama.rope.scaling.type", "none")
+    writer.add_f32(f"{ARCH_LLAMA}.attention.layer_norm_rms_epsilon", float(cfg.norm_eps))
 
     # Tokenizer: byte-level BPE in the GPT-2 alphabet with Ember's five specials
     # exported as CONTROL tokens.
@@ -504,7 +462,7 @@ def export_gguf(
 
     # Explicit format boundary + provenance.
     writer.add_string(EMBER_FORMAT_KEY, EMBER_MODEL_FORMAT)
-    writer.add_string("ember.source_format", "emb-v3")
+    writer.add_string("ember.source_format", "emb-v4")
     writer.add_i32("ember.source_step", int(step))
     for key, value in (extra_metadata or {}).items():
         full = key if key.startswith(("ember.", "general.")) else f"ember.{key}"
@@ -761,20 +719,23 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
         raise GgufExportError(f"{p.name} is only {size} bytes — too small to be a language model")
 
     header = read_gguf_header(p)
-    if header.arch != ARCH_GPT2:
+    if header.arch != ARCH_LLAMA:
         raise GgufExportError(
             f"{p.name}: architecture {header.arch!r} is not supported by this Ember build "
-            f"(expected {ARCH_GPT2!r})"
+            f"(expected {ARCH_LLAMA!r})"
         )
 
     md = header.metadata
     required_keys = (
-        f"{ARCH_GPT2}.context_length",
-        f"{ARCH_GPT2}.embedding_length",
-        f"{ARCH_GPT2}.block_count",
-        f"{ARCH_GPT2}.feed_forward_length",
-        f"{ARCH_GPT2}.attention.head_count",
-        f"{ARCH_GPT2}.attention.layer_norm_epsilon",
+        f"{ARCH_LLAMA}.context_length",
+        f"{ARCH_LLAMA}.embedding_length",
+        f"{ARCH_LLAMA}.block_count",
+        f"{ARCH_LLAMA}.feed_forward_length",
+        f"{ARCH_LLAMA}.attention.head_count",
+        f"{ARCH_LLAMA}.attention.layer_norm_rms_epsilon",
+        "llama.attention.head_count_kv",
+        "llama.rope.dimension_count",
+        "llama.rope.freq_base",
         "tokenizer.ggml.model",
         "tokenizer.ggml.tokens",
         "tokenizer.ggml.token_type",
@@ -784,11 +745,11 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
     if missing_keys:
         raise GgufExportError(f"{p.name}: missing GGUF metadata {missing_keys[:6]}")
 
-    n_embd = int(md[f"{ARCH_GPT2}.embedding_length"])
-    n_layer = int(md[f"{ARCH_GPT2}.block_count"])
-    n_ctx = int(md[f"{ARCH_GPT2}.context_length"])
-    n_head = int(md[f"{ARCH_GPT2}.attention.head_count"])
-    n_ff = int(md[f"{ARCH_GPT2}.feed_forward_length"])
+    n_embd = int(md[f"{ARCH_LLAMA}.embedding_length"])
+    n_layer = int(md[f"{ARCH_LLAMA}.block_count"])
+    n_ctx = int(md[f"{ARCH_LLAMA}.context_length"])
+    n_head = int(md[f"{ARCH_LLAMA}.attention.head_count"])
+    n_ff = int(md[f"{ARCH_LLAMA}.feed_forward_length"])
     tokens = list(md["tokenizer.ggml.tokens"])
     n_vocab = len(tokens)
 
@@ -797,26 +758,24 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
     if n_embd % n_head != 0:
         raise GgufExportError(f"{p.name}: embedding {n_embd} is not divisible by {n_head} heads")
 
-    expected: dict[str, tuple[int, ...]] = {
-        "token_embd.weight": (n_embd, n_vocab),
-        "position_embd.weight": (n_embd, n_ctx),
-        "output_norm.weight": (n_embd,),
-        "output_norm.bias": (n_embd,),
-    }
+    n_kv = int(md["llama.attention.head_count_kv"])
+    if n_kv < 1 or n_head % n_kv or (n_embd//n_head)%2:
+        raise GgufExportError("invalid GQA/head dimensions")
+    if int(md["llama.rope.dimension_count"]) != n_embd//n_head:
+        raise GgufExportError("RoPE dimension must equal head dimension")
+    if not np.isfinite(md["llama.rope.freq_base"]) or md["llama.rope.freq_base"] <= 0:
+        raise GgufExportError("invalid RoPE frequency base")
+    if md.get("llama.rope.scaling.type", "none") != "none":
+        raise GgufExportError("this build supports unscaled RoPE only")
+    expected = {"token_embd.weight": (n_embd,n_vocab), "output_norm.weight": (n_embd,)}
+    kv = n_kv*(n_embd//n_head)
     for i in range(n_layer):
-        pfx = f"blk.{i}."
-        expected[pfx + "attn_norm.weight"] = (n_embd,)
-        expected[pfx + "attn_norm.bias"] = (n_embd,)
-        expected[pfx + "attn_qkv.weight"] = (n_embd, 3 * n_embd)
-        expected[pfx + "attn_qkv.bias"] = (3 * n_embd,)
-        expected[pfx + "attn_output.weight"] = (n_embd, n_embd)
-        expected[pfx + "attn_output.bias"] = (n_embd,)
-        expected[pfx + "ffn_norm.weight"] = (n_embd,)
-        expected[pfx + "ffn_norm.bias"] = (n_embd,)
-        expected[pfx + "ffn_up.weight"] = (n_embd, n_ff)
-        expected[pfx + "ffn_up.bias"] = (n_ff,)
-        expected[pfx + "ffn_down.weight"] = (n_ff, n_embd)
-        expected[pfx + "ffn_down.bias"] = (n_embd,)
+        pfx=f"blk.{i}."
+        expected.update({pfx+"attn_norm.weight": (n_embd,), pfx+"ffn_norm.weight": (n_embd,),
+            pfx+"attn_q.weight": (n_embd,n_embd), pfx+"attn_k.weight": (n_embd,kv),
+            pfx+"attn_v.weight": (n_embd,kv), pfx+"attn_output.weight": (n_embd,n_embd),
+            pfx+"ffn_gate.weight": (n_embd,n_ff), pfx+"ffn_up.weight": (n_embd,n_ff),
+            pfx+"ffn_down.weight": (n_ff,n_embd)})
 
     if md["tokenizer.ggml.model"] != "gpt2" or md.get("tokenizer.ggml.pre") != "gpt-2":
         raise GgufExportError("This Ember build requires the GPT-2 byte-level BPE tokenizer.")

@@ -146,7 +146,7 @@ def _assert_model_status(payload: dict, *, ready: bool) -> None:
     ):
         assert key in payload, f"ModelStatus is missing '{key}'"
     assert isinstance(payload["sourceTokens"], dict)
-    assert payload["streamFormat"] == 3
+    assert payload["streamFormat"] == 4
     if ready:
         cfg = payload["config"]
         for key in ("nLayer", "nHead", "nEmbd", "blockSize", "vocabSize", "dropout", "ffnMult"):
@@ -494,7 +494,7 @@ def test_brain_export_import_roundtrip_including_native_emb_files(backend, tmp_p
 
     emb_export = be.dispatch("brain.export", {"name": "active.emb", "includeCorpus": False})
     assert emb_export["filename"] == "active.emb"
-    assert Path(emb_export["tempPath"]).read_bytes()[:4] == b"EMB3"
+    assert Path(emb_export["tempPath"]).read_bytes()[:4] == b"EMB4"
 
     imported = be.dispatch(
         "brain.importFile",

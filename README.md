@@ -1,7 +1,7 @@
 # Ember — local training, llama.cpp inference
 
 Ember is a native Kotlin/Jetpack Compose Android language foundry. Python/NumPy
-(embedded with Chaquopy) trains small GPT-2-style models from a persistent SQLite
+(embedded with Chaquopy) trains small Llama 3–style models from a persistent SQLite
 corpus. **Every production generation uses llama.cpp** from local GGUF weights.
 There is no cloud inference, Python generator fallback, or server process in the APK.
 
@@ -15,13 +15,13 @@ There is no cloud inference, Python generator fallback, or server process in the
 4. **Unload** releases native model memory; files remain on disk. The next Generate
    reloads the selected file. Selection survives restart.
 5. **Export GGUF** opens Android's file picker. F32 is lossless; Q8_0 quantizes the
-   four large matrices per transformer block. Checkpoints/corpus exports remain
+   seven projection matrices per transformer block. Checkpoints/corpus exports remain
    separate: a GGUF file is for inference, not a backup of your training corpus.
 
-This build accepts **GPT-2-architecture GGUF with the classic `gpt-2` BPE tokenizer**,
+This build accepts **Llama-architecture GGUF with Ember’s classic `gpt-2` byte-BPE tokenizer**,
 including models exported by Ember. A `.gguf` extension alone is not compatibility:
 metadata, dimensions, tensors and successful native loading matter. It does not
-pretend arbitrary Llama/Qwen GGUF files are Ember-trained models.
+accept arbitrary Llama 3 tokenizer files or scaled-RoPE models. Architecture and tokenizer are independent: this is a small Llama-style decoder, not Meta pretrained weights.
 
 After installation and local model setup, generation requires no internet.
 INTERNET permission remains for **optional**, explicit foraging, teachers and
@@ -57,7 +57,7 @@ ABIs: `arm64-v8a` and `x86_64`; minimum Android API 24.
 See [migration and audit](docs/llama-cpp-migration.md) for the tensor mapping,
 precision limits, tests and unverified device checks.
 
-- `.emb` + tokenizer JSON + Adam state: training checkpoints, retained on disk.
+- **EMB4** `.emb` + tokenizer JSON + Adam state: training checkpoints, retained on disk.
 - `active.gguf`: atomic export of trained weights, loaded by llama.cpp.
 - Tokenizer schema **v4**: GPT-2-compatible Unicode pre-tokenization; the old v3
   byte-class chunker cannot be silently reinterpreted. Recast/retrain old vessels.

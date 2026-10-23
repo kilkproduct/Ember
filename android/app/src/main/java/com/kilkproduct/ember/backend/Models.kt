@@ -74,6 +74,8 @@ data class ModelConfig(
     val vocabSize: Int,
     val dropout: Double,
     val ffnMult: Double,
+    val nKvHead: Int = 1,
+    val ropeTheta: Double = 500000.0,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ModelConfig? {
@@ -86,6 +88,8 @@ data class ModelConfig(
                 vocabSize = json.intOr("vocabSize"),
                 dropout = json.doubleOr("dropout"),
                 ffnMult = json.doubleOr("ffnMult", 4.0),
+                nKvHead = json.intOr("n_kv_head", 1),
+                ropeTheta = json.doubleOr("rope_theta", 500000.0),
             ).takeIf { it.nLayer > 0 && it.nEmbd > 0 }
         }
     }
@@ -98,6 +102,8 @@ data class ModelConfig(
         .put("vocabSize", vocabSize)
         .put("dropout", dropout)
         .put("ffnMult", ffnMult)
+        .put("nKvHead", nKvHead)
+        .put("ropeTheta", ropeTheta)
 }
 
 data class LastRun(

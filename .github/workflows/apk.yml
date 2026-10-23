@@ -56,7 +56,7 @@ jobs:
       - name: Fetch pinned llama.cpp source (SHA-256 verified)
         run: scripts/fetch-llama-cpp.sh
 
-      - name: Build llama.cpp + Ember JNI/C ABI wrapper and test real GGUF inference
+      - name: Build llama.cpp + Ember wrapper and test trained Llama GGUF inference
         run: |
           set -euo pipefail
           cmake -S native/llama -B native/build-llama -DCMAKE_BUILD_TYPE=Release -DEMBER_BUILD_LLAMA_TESTS=ON

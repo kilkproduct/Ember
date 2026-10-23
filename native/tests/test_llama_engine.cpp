@@ -216,7 +216,7 @@ void test_model_lifecycle_and_generation(const std::string& model_path) {
     std::vector<char> info(8192);
     assert(ember_llama_model_info(engine, info.data(), info.size()) == EMBER_LLAMA_OK);
     const std::string info_json(info.data());
-    assert(contains(info_json, "\"arch\":\"gpt2\""));
+    assert(contains(info_json, "\"arch\":\"llama\""));
     assert(contains(info_json, "\"loaded\":true"));
     // The fixture is trained with a 64-token context; asking for 128 must be
     // clamped down, because a learned-positional model would otherwise index

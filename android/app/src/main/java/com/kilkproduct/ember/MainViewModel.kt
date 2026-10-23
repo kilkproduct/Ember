@@ -202,14 +202,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val ffn = form.ffn.toDoubleOrNull() ?: 4.0
         if (layers !in 2..6 || heads !in 2..8 || embd !in 32..256) return null
         if (ctx !in 32..256 || vocab !in 500..6000) return null
-        if (embd % heads != 0) return null
+        if (embd % heads != 0 || (embd / heads) % 2 != 0 || dropout != 0.0) return null
         return ModelConfig(
             nLayer = layers,
             nHead = heads,
             nEmbd = embd,
             blockSize = ctx,
             vocabSize = vocab,
-            dropout = dropout.coerceIn(0.0, 0.4),
+            dropout = dropout,
             ffnMult = ffn,
         )
     }
@@ -269,7 +269,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             repo.addNotice(
                 NoticeLevel.ERROR,
                 "Vessel configuration is out of range",
-                "Layers 2–6 · heads 2–8 · width 32–256 · context 32–256 · vocab 500–6000 · dropout 0–0.4.",
+                "Layers 2–6 · heads 2–8 · width 32–256 · context 32–256 · vocab 500–6000 · dropout 0 (Llama).",
             )
             return
         }
@@ -456,8 +456,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val VESSEL_PRESETS: Map<String, VesselPreset> = linkedMapOf(
             "phone" to VesselPreset(2, 2, 64, 64, 1500, "0"),
             "tiny" to VesselPreset(2, 2, 64, 64, 2000, "0"),
-            "small" to VesselPreset(4, 4, 128, 128, 3000, "0.05"),
-            "medium" to VesselPreset(6, 6, 192, 192, 4000, "0.1"),
+            "small" to VesselPreset(4, 4, 128, 128, 3000, "0"),
+            "medium" to VesselPreset(6, 6, 192, 192, 4000, "0"),
         )
 
         fun activeVoicePreset(form: VoiceForm): String? =

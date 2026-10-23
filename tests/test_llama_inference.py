@@ -127,9 +127,10 @@ def test_repetition_penalty_uses_upstream_sampler_chain(fixture, tmp_path):
     # norm bias selects dimension 0, and two output rows compete at logits 2/1.8.
     # First token is A. After repeat_penalty=1.6 its score is 1.25, so B must win.
     for weight in model.params.values(): weight.fill(0)
-    model.params['ln_f.bias'][0] = 1
-    model.params['wte'][ord('A'), 0] = 2
-    model.params['wte'][ord('B'), 0] = 1.8
+    model.params['output_norm.weight'][0] = 1
+    model.params['wte'][tok.bos_id, 0] = 1
+    model.params['wte'][ord('A'), 0] = 2 / np.sqrt(model.cfg.n_embd)
+    model.params['wte'][ord('B'), 0] = 1.8 / np.sqrt(model.cfg.n_embd)
     path = tmp_path/'penalties.gguf'
     export_gguf(path, model.cfg, model.params, tok)
     engine.load_model(path, EngineConfig(n_ctx=64, n_threads=2))
@@ -150,4 +151,4 @@ def test_real_checkpoint_conversion_cli(fixture, tmp_path):
                            '--quantization', 'q8_0', '--validate-native'], capture_output=True, text=True, check=True)
     report = json.loads(proc.stdout)
     assert report['sourceStep'] == 12 and report['quantization'] == 'q8_0'
-    assert report['nativeValidation']['loaded'] and report['nativeValidation']['arch'] == 'gpt2'
+    assert report['nativeValidation']['loaded'] and report['nativeValidation']['arch'] == 'llama'

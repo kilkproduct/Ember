@@ -1,25 +1,4 @@
-"""The Ember v3 GPT model: NumPy forward pass, backward pass and serialization.
-
-Architecture (pre-LN decoder-only transformer, identical to ``native/``):
-
-    x = wte[idx] + wpe[0:T]
-    for each block:
-        h  = LayerNorm(x, ln1)
-        q,k,v = split(h @ attn.qkv.weight + attn.qkv.bias)
-        a  = softmax(q k^T / sqrt(head_dim) + mask) v        # causal (+ doc mask)
-        x  = x + (a @ attn.proj.weight + attn.proj.bias)
-        h  = LayerNorm(x, ln2)
-        m  = gelu(h @ mlp.fc.weight + mlp.fc.bias) @ mlp.proj.weight + mlp.proj.bias
-        x  = x + m
-    x = LayerNorm(x, ln_f)
-    logits = x @ wte.T            # tied embeddings
-
-All weights are little-endian float32, row-major, stored in the order returned
-by :func:`ember.spec.tensor_specs`.  This format is Ember's *training*
-checkpoint; inference runs from the GGUF export produced by
-:mod:`ember.gguf_export` (see ``docs/llama-cpp-migration.md``).
-"""
-
+"""Ember EMB4 Llama-style NumPy training and atomic checkpoint serialization."""
 from __future__ import annotations
 
 import json
@@ -63,6 +42,13 @@ class ModelConfig:
     tie_embeddings: bool = True
     norm_eps: float = NORM_EPS
 
+    n_kv_head: int = 1
+    rope_theta: float = 500000.0
+    rope_scaling: str = "none"
+    bias: bool = False
+    training_dtype: str = "float32"
+    intermediate_size: int | None = None
+
     # -- derived --------------------------------------------------------
     @property
     def head_dim(self) -> int:
@@ -72,15 +58,23 @@ class ModelConfig:
 
     @property
     def ffn(self) -> int:
-        return ffn_dim(self.n_embd, self.ffn_mult)
+        return self.intermediate_size or ffn_dim(self.n_embd, self.ffn_mult)
 
     @property
     def n_params(self) -> int:
-        return estimate_params(
-            self.n_layer, self.n_head, self.n_embd, self.block_size, self.vocab_size, self.ffn_mult
-        )
+        return sum(int(np.prod(shape)) for _,shape in tensor_specs(self))
 
     def validate(self) -> None:
+        if self.n_kv_head < 1 or self.n_head % self.n_kv_head:
+            raise ValueError("n_head must be a multiple of n_kv_head (GQA)")
+        if self.n_head < 1 or self.n_embd % self.n_head or self.head_dim % 2:
+            raise ValueError("head dimension must be a positive even divisor of n_embd")
+        if self.rope_scaling != "none" or not np.isfinite(self.rope_theta) or self.rope_theta <= 0:
+            raise ValueError("only unscaled RoPE with finite positive theta is supported")
+        if self.dropout != 0 or self.bias or self.training_dtype != "float32":
+            raise ValueError("supported training configuration: dropout=0, bias=False, dtype=float32")
+        if self.ffn < 1 or not np.isfinite(self.norm_eps) or self.norm_eps <= 0:
+            raise ValueError("intermediate size and RMSNorm epsilon must be positive")
         if self.n_layer < 1:
             raise ValueError("n_layer must be >= 1")
         if self.n_head < 1:
@@ -96,9 +90,15 @@ class ModelConfig:
 
     def to_dict(self) -> dict:
         return {
+            "n_kv_head": self.n_kv_head,
+            "rope_theta": self.rope_theta,
+            "rope_scaling": self.rope_scaling,
+            "bias": self.bias,
+            "training_dtype": self.training_dtype,
+            "intermediate_size": self.intermediate_size,
             "arch": ARCH,
             "format": FORMAT_VERSION,
-            "spec": "v3",
+            "spec": "v4",
             "n_layer": int(self.n_layer),
             "n_head": int(self.n_head),
             "n_embd": int(self.n_embd),
@@ -136,6 +136,12 @@ class ModelConfig:
         if str(data.get("positional", POSITIONAL)) != POSITIONAL:
             raise ValueError("unsupported positional encoding %r" % (data.get("positional"),))
         cfg = cls(
+            n_kv_head=int(data.get("n_kv_head", 1)),
+            rope_theta=float(data.get("rope_theta", 500000.0)),
+            rope_scaling=str(data.get("rope_scaling", "none")),
+            bias=bool(data.get("bias", False)),
+            training_dtype=str(data.get("training_dtype", "float32")),
+            intermediate_size=data.get("intermediate_size"),
             n_layer=int(data.get("n_layer") or data.get("nLayer")),
             n_head=int(data.get("n_head") or data.get("nHead")),
             n_embd=int(data.get("n_embd") or data.get("nEmbd")),
@@ -156,41 +162,10 @@ class ModelConfig:
 
 
 def init_params(cfg: ModelConfig, seed: int | None = None) -> dict[str, np.ndarray]:
-    """GPT-2 style N(0, 0.02) init, with residual projections scaled down."""
+    cfg.validate()
     rng = np.random.default_rng(seed)
-    c = cfg.n_embd
-    f = cfg.ffn
-    resid = 0.02 / np.sqrt(2.0 * cfg.n_layer)
-
-    def w(shape, std=0.02):
-        return (rng.normal(0.0, std, size=shape)).astype(np.float32)
-
-    def z(shape):
-        return np.zeros(shape, dtype=np.float32)
-
-    p: dict[str, np.ndarray] = {
-        "wte": w([cfg.vocab_size, c]),
-        "wpe": w([cfg.block_size, c], 0.02),
-    }
-    for i in range(cfg.n_layer):
-        k = f"blk.{i}."
-        p[k + "ln1.gain"] = np.ones(c, dtype=np.float32)
-        p[k + "ln1.bias"] = z([c])
-        p[k + "attn.qkv.weight"] = w([c, 3 * c])
-        p[k + "attn.qkv.bias"] = z([3 * c])
-        p[k + "attn.proj.weight"] = w([c, c], resid)
-        p[k + "attn.proj.bias"] = z([c])
-        p[k + "ln2.gain"] = np.ones(c, dtype=np.float32)
-        p[k + "ln2.bias"] = z([c])
-        p[k + "mlp.fc.weight"] = w([c, f])
-        p[k + "mlp.fc.bias"] = z([f])
-        p[k + "mlp.proj.weight"] = w([f, c], resid)
-        p[k + "mlp.proj.bias"] = z([c])
-    p["ln_f.gain"] = np.ones(c, dtype=np.float32)
-    p["ln_f.bias"] = z([c])
-    if not cfg.tie_embeddings:
-        p["lm_head.weight"] = w([cfg.vocab_size, c])
-    return p
+    return {name: (np.ones(shape, dtype=np.float32) if "norm.weight" in name else
+                   rng.normal(0,0.02,shape).astype(np.float32)) for name,shape in tensor_specs(cfg)}
 
 
 def check_params(cfg: ModelConfig, params: dict[str, np.ndarray]) -> None:
@@ -217,254 +192,79 @@ def check_params(cfg: ModelConfig, params: dict[str, np.ndarray]) -> None:
 # --------------------------------------------------------------------------
 
 
-class GPT:
-    """Decoder-only transformer with a hand-written NumPy backward pass."""
+class Llama:
+    """Configurable bias-free RMSNorm/RoPE/GQA/SwiGLU causal decoder.
 
-    def __init__(self, cfg: ModelConfig, params: dict[str, np.ndarray] | None = None, seed: int | None = None):
+    NumPy training keeps the existing embedded Android runtime supported.
+    There is deliberately no sampling method or custom production decoder.
+    """
+    def __init__(self, cfg, params=None, seed=None):
         cfg.validate()
         self.cfg = cfg
-        self.params = params if params is not None else init_params(cfg, seed)
-        check_params(cfg, self.params)
-        self.grads: dict[str, np.ndarray] | None = None
-        self._cache: dict | None = None
-
-    # -- helpers --------------------------------------------------------
-    def zero_grad(self) -> None:
+        self.params = init_params(cfg,seed) if params is None else params
+        check_params(cfg,self.params)
         self.grads = None
+        self._cache = None
 
-    def param_vector_length(self) -> int:
-        return int(sum(p.size for p in self.params.values()))
+    def zero_grad(self): self.grads = None
+    def param_vector_length(self): return sum(p.size for p in self.params.values())
 
-    def _lm_head(self) -> np.ndarray:
-        if self.cfg.tie_embeddings:
-            return self.params["wte"]
-        return self.params["lm_head.weight"]
-
-    # -- forward --------------------------------------------------------
-    def forward(
-        self,
-        idx: np.ndarray,
-        doc_ids: np.ndarray | None = None,
-        targets: np.ndarray | None = None,
-        dropout: float = 0.0,
-        rng: np.random.Generator | None = None,
-    ) -> tuple[np.ndarray, float | None]:
-        """Run the model.
-
-        ``idx``      int32 [B, T]
-        ``doc_ids``  optional int32 [B, T]; when given, attention and loss
-                     cannot cross document boundaries inside a sequence.
-        ``targets``  optional int32 [B, T]; next-token targets, -100 = ignore.
-
-        Returns ``(logits [B, T, V], mean loss or None)``.  Intermediates are
-        cached for :meth:`backward`.
-        """
-        p = self.params
-        cfg = self.cfg
-        idx = np.asarray(idx, dtype=np.int64)
-        B, T = idx.shape
-        if T > cfg.block_size:
-            raise ValueError("sequence length %d exceeds block_size %d" % (T, cfg.block_size))
-        c = cfg.n_embd
-        h = cfg.n_head
-        d = cfg.head_dim
-        eps = cfg.norm_eps
-
-        x = p["wte"][idx].astype(np.float32) + p["wpe"][:T][None, :, :]
-        cache: dict = {"blocks": [], "idx": idx, "T": T, "B": B}
-
-        # causal mask (and optional block-diagonal document mask)
-        causal = np.triu(np.ones((T, T), dtype=np.float32), 1) * MASK_NEG
+    def forward(self, idx, doc_ids=None, targets=None, dropout=0.0, rng=None):
+        from .autodiff import Tensor, embedding, rmsnorm, rope, repeat_kv, softmax, silu
+        if dropout: raise ValueError("Llama trainer currently supports dropout=0 only")
+        c = self.cfg
+        idx = np.asarray(idx)
+        if idx.ndim != 2 or idx.shape[1] > c.block_size or idx.size == 0:
+            raise ValueError("expected nonempty [batch,time] within configured context")
+        if np.any(idx<0) or np.any(idx>=c.vocab_size): raise ValueError("token ID outside vocabulary")
+        b,t = idx.shape
+        p = {k:Tensor(v) for k,v in self.params.items()}
+        x = embedding(p["wte"],idx)
+        mask = np.triu(np.ones((t,t),dtype=bool),1)[None,None,:,:]
         if doc_ids is not None:
-            doc_ids = np.asarray(doc_ids, dtype=np.int64)
-            same = (doc_ids[:, :, None] == doc_ids[:, None, :]).astype(np.float32)
-            mask = causal[None, None, :, :] + (1.0 - same[:, None, :, :]) * MASK_NEG
-        else:
-            mask = causal[None, None, :, :]
-        mask = mask.astype(np.float32)
-        cache["mask"] = mask
-
-        drop_masks: list[np.ndarray | None] = []
-        for i in range(cfg.n_layer):
+            mask = mask | (doc_ids[:,None,:,None] != doc_ids[:,None,None,:])
+        for i in range(c.n_layer):
             k = f"blk.{i}."
-            x_in = x
-            g1, b1 = p[k + "ln1.gain"], p[k + "ln1.bias"]
-            h1, mean1, rstd1 = _layernorm(x_in, g1, b1, eps)
-            qkv = h1.reshape(B * T, c) @ p[k + "attn.qkv.weight"] + p[k + "attn.qkv.bias"]
-            qkv = qkv.reshape(B, T, 3 * c)
-            q = qkv[:, :, :c].reshape(B, T, h, d).transpose(0, 2, 1, 3)
-            kk = qkv[:, :, c : 2 * c].reshape(B, T, h, d).transpose(0, 2, 1, 3)
-            vv = qkv[:, :, 2 * c :].reshape(B, T, h, d).transpose(0, 2, 1, 3)
-            scores = (q @ kk.transpose(0, 1, 3, 2)) * (1.0 / np.sqrt(d)) + mask
-            att = _softmax(scores)
-            ctx = att @ vv
-            y = ctx.transpose(0, 2, 1, 3).reshape(B, T, c)
-            a = y.reshape(B * T, c) @ p[k + "attn.proj.weight"] + p[k + "attn.proj.bias"]
-            a = a.reshape(B, T, c)
-            a, dm1 = _dropout(a, dropout, rng)
-            drop_masks.append(dm1)
-            x_mid = x_in + a
-
-            h2, mean2, rstd2 = _layernorm(x_mid, p[k + "ln2.gain"], p[k + "ln2.bias"], eps)
-            z1 = h2.reshape(B * T, c) @ p[k + "mlp.fc.weight"] + p[k + "mlp.fc.bias"]
-            f_act = gelu(z1)
-            m = f_act.reshape(B * T, cfg.ffn) @ p[k + "mlp.proj.weight"] + p[k + "mlp.proj.bias"]
-            m = m.reshape(B, T, c)
-            m, dm2 = _dropout(m, dropout, rng)
-            drop_masks.append(dm2)
-            x = x_mid + m
-
-            cache["blocks"].append(
-                dict(
-                    x_in=x_in,
-                    h1=h1, mean1=mean1, rstd1=rstd1,
-                    qkv=qkv, q=q, k=kk, v=vv, att=att, y=y, a=a,
-                    x_mid=x_mid, h2=h2, mean2=mean2, rstd2=rstd2,
-                    z1=z1, f=f_act, m=m,
-                )
-            )
-
-        x_pre_f = x
-        xf, meanf, rstdf = _layernorm(x_pre_f, p["ln_f.gain"], p["ln_f.bias"], eps)
-        w_head = self._lm_head()
-        logits = xf.reshape(B * T, c) @ w_head.T
-        logits = logits.reshape(B, T, cfg.vocab_size)
-
+            h = rmsnorm(x,p[k+"attn_norm.weight"],c.norm_eps)
+            def project(name, heads):
+                return (h @ p[k+name+".weight"]).reshape(b,t,heads,c.head_dim).transpose(0,2,1,3)
+            q = rope(project("attn_q",c.n_head),c.rope_theta)
+            key = repeat_kv(rope(project("attn_k",c.n_kv_head),c.rope_theta),c.n_head//c.n_kv_head)
+            v = repeat_kv(project("attn_v",c.n_kv_head),c.n_head//c.n_kv_head)
+            scores = (q @ key.transpose(0,1,3,2)) * (c.head_dim**-0.5)
+            attn = softmax(scores + np.where(mask,-1e9,0).astype(np.float32)) @ v
+            x = x + attn.transpose(0,2,1,3).reshape(b,t,c.n_embd) @ p[k+"attn_output.weight"]
+            h = rmsnorm(x,p[k+"ffn_norm.weight"],c.norm_eps)
+            x = x + (silu(h @ p[k+"ffn_gate.weight"]) * (h @ p[k+"ffn_up.weight"])) @ p[k+"ffn_down.weight"]
+        x = rmsnorm(x,p["output_norm.weight"],c.norm_eps)
+        head = p["wte"] if c.tie_embeddings else p["lm_head.weight"]
+        logits = x @ head.transpose(1,0)
         loss = None
+        self._cache = None
         if targets is not None:
-            targets = np.asarray(targets, dtype=np.int64)
-            loss, dlogits = _cross_entropy_backward(logits, targets)
-            cache["dlogits"] = dlogits
-        cache["x_f_in"] = x_pre_f
-        cache["xf"] = xf
-        cache["meanf"] = meanf
-        cache["rstdf"] = rstdf
-        cache["drop_masks"] = drop_masks
-        self._cache = cache
-        return logits, loss
+            targets=np.asarray(targets).copy()
+            if targets.shape != idx.shape: raise ValueError("targets must match input shape")
+            if doc_ids is not None and t>1:
+                targets[:,:-1][doc_ids[:,:-1] != doc_ids[:,1:]] = -100
+            if np.any((targets != -100) & ((targets<0)|(targets>=c.vocab_size))):
+                raise ValueError("target ID outside vocabulary")
+            loss,grad = _cross_entropy_backward(logits.data,targets)
+            self._cache = (logits,p,grad.reshape(logits.data.shape))
+        return logits.data, loss
 
-    # -- backward -------------------------------------------------------
-    def backward(self) -> dict[str, np.ndarray]:
-        """Accumulate gradients for the last :meth:`forward` call."""
-        cache = self._cache
-        if cache is None:
-            raise RuntimeError("backward() called before forward()")
-        p = self.params
-        cfg = self.cfg
-        B, T = cache["B"], cache["T"]
-        c = cfg.n_embd
-        h = cfg.n_head
-        d = cfg.head_dim
-        eps = cfg.norm_eps
-        idx = cache["idx"]
-        drop_masks = cache["drop_masks"]
-
-        grads: dict[str, np.ndarray] = {}
-        if "dlogits" in cache:
-            dlogits = cache["dlogits"].reshape(B * T, cfg.vocab_size)
-            xf2 = cache["xf"].reshape(B * T, c)
-            if cfg.tie_embeddings:
-                grads["wte"] = dlogits.T @ xf2
-            else:
-                grads["lm_head.weight"] = dlogits.T @ xf2
-            dout = (dlogits @ self._lm_head()).reshape(B, T, c)
-        else:
-            raise RuntimeError("backward() requires forward() with targets")
-
-        dxf, dgf, dbf = _layernorm_backward(
-            dout, cache["x_f_in"], cache["meanf"], cache["rstdf"], p["ln_f.gain"], eps
-        )
-        grads["ln_f.gain"] = dgf
-        grads["ln_f.bias"] = dbf
-        g = dxf
-
-        for i in reversed(range(cfg.n_layer)):
-            k = f"blk.{i}."
-            blk = cache["blocks"][i]
-            mask2 = drop_masks[2 * i + 1]
-            mask1 = drop_masks[2 * i]
-
-            # ---- MLP: m = fc2(gelu(x @ Wfc + bfc)) ----
-            dm = g if mask2 is None else g * mask2
-            dm2d = dm.reshape(B * T, c)
-            grads[k + "mlp.proj.weight"] = blk["f"].reshape(B * T, cfg.ffn).T @ dm2d
-            grads[k + "mlp.proj.bias"] = dm2d.sum(axis=0)
-            dz1_2d = gelu_back(blk["z1"], dm2d @ p[k + "mlp.proj.weight"].T)
-            grads[k + "mlp.fc.weight"] = blk["h2"].reshape(B * T, c).T @ dz1_2d
-            grads[k + "mlp.fc.bias"] = dz1_2d.sum(axis=0)
-            dh2 = (dz1_2d @ p[k + "mlp.fc.weight"].T).reshape(B, T, c)
-
-            dx_mid, dg2, db2 = _layernorm_backward(
-                dh2, blk["x_mid"], blk["mean2"], blk["rstd2"], p[k + "ln2.gain"], eps
-            )
-            grads[k + "ln2.gain"] = dg2
-            grads[k + "ln2.bias"] = db2
-            g_xmid = g + dx_mid
-
-            # ---- attention projection ----
-            da = g_xmid if mask1 is None else g_xmid * mask1
-            da2 = da.reshape(B * T, c)
-            grads[k + "attn.proj.weight"] = blk["y"].reshape(B * T, c).T @ da2
-            grads[k + "attn.proj.bias"] = da2.sum(axis=0)
-            dy = (da2 @ p[k + "attn.proj.weight"].T).reshape(B, T, c)
-
-            # ---- attention ----
-            dctx = dy.reshape(B, T, h, d).transpose(0, 2, 1, 3)
-            att = blk["att"]
-            datt = dctx @ blk["v"].transpose(0, 1, 3, 2)
-            dvv = att.transpose(0, 1, 3, 2) @ dctx
-            dscores = att * (datt - (datt * att).sum(axis=-1, keepdims=True))
-            dscores = dscores * (1.0 / np.sqrt(d))
-            dq = (dscores @ blk["k"]).transpose(0, 2, 1, 3).reshape(B, T, c)
-            dk = (dscores.transpose(0, 1, 3, 2) @ blk["q"]).transpose(0, 2, 1, 3).reshape(B, T, c)
-            dv = dvv.transpose(0, 2, 1, 3).reshape(B, T, c)
-            dqkv = np.concatenate([dq, dk, dv], axis=-1).reshape(B * T, 3 * c)
-
-            grads[k + "attn.qkv.weight"] = blk["h1"].reshape(B * T, c).T @ dqkv
-            grads[k + "attn.qkv.bias"] = dqkv.sum(axis=0)
-            dh1 = (dqkv @ p[k + "attn.qkv.weight"].T).reshape(B, T, c)
-
-            dx_in, dg1, db1 = _layernorm_backward(
-                dh1, blk["x_in"], blk["mean1"], blk["rstd1"], p[k + "ln1.gain"], eps
-            )
-            grads[k + "ln1.gain"] = dg1
-            grads[k + "ln1.bias"] = db1
-            g = g_xmid + dx_in
-
-        # ---- embeddings ----
-        gwte = np.zeros_like(p["wte"])
-        np.add.at(gwte, idx.ravel(), g.reshape(B * T, c))
-        if cfg.tie_embeddings:
-            gwte = gwte + grads.get("wte", 0)
-        grads["wte"] = gwte
-        gwpe = np.zeros_like(p["wpe"])
-        np.add.at(gwpe, np.arange(T, dtype=np.int64), g.sum(axis=0))
-        grads["wpe"] = gwpe
-
-        for name, arr in grads.items():
-            arr = np.ascontiguousarray(arr, dtype=np.float32)
-            if arr.shape != p[name].shape:
-                raise RuntimeError("gradient shape mismatch for %s: %s vs %s" % (name, arr.shape, p[name].shape))
-            grads[name] = arr
-
-        if self.grads is None:
-            self.grads = grads
-        else:
-            for name, arr in grads.items():
-                self.grads[name] = self.grads[name] + arr
+    def backward(self):
+        if self._cache is None: raise RuntimeError("forward with targets required before backward")
+        logits,p,grad = self._cache
+        logits.backward(grad)
+        self.grads = {k:v.grad for k,v in p.items()}
+        self._cache = None
         return self.grads
 
-    # -- quick inference helpers (used for training samples) -------------
-    def forward_logits(self, idx: np.ndarray) -> np.ndarray:
-        """Forward pass without caching (used by the Python sampler)."""
-        logits, _ = self.forward(idx)
-        self._cache = None
-        return logits
+    def forward_logits(self, idx): return self.forward(idx)[0]
 
 
-# --------------------------------------------------------------------------
-# numpy kernels
-# --------------------------------------------------------------------------
+# Source API alias only; checkpoints are EMB4 Llama and never accept GPT weights.
+GPT = Llama
 
 
 def _layernorm(x, gain, bias, eps):
@@ -589,10 +389,10 @@ def load_model_bytes(blob: bytes) -> tuple[ModelConfig, dict[str, np.ndarray], d
         head = blob[:4]
         if head[:1] in (b"{", b"["):
             raise ValueError(
-                "this is a JSON brain from the old JavaScript engine, not an Ember v3 model. "
+                "this is a JSON brain from the old JavaScript engine, not an Ember v4 Llama model. "
                 "Old brains cannot be loaded by the new engine — recast a vessel and fire again."
             )
-        raise ValueError("not an Ember v3 model (bad magic %r)" % (head,))
+        raise ValueError("not an Ember v4 Llama model (bad magic %r)" % (head,))
     if len(blob) < 12 + 4:
         raise ValueError("truncated model file")
     stored_crc = struct.unpack("<I", blob[-4:])[0]

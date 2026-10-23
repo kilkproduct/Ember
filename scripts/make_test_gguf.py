@@ -3,7 +3,7 @@
 
 This is not a random tensor file: it runs Ember's real pipeline — corpus →
 byte-level BPE tokenizer → model initialization → (optional) training steps →
-GGUF export — so the fixture is a real ``gpt2``-architecture language model that
+GGUF export — so the fixture is a real ``llama``-architecture language model that
 llama.cpp can load and generate from.
 
     python3 scripts/make_test_gguf.py OUT.gguf [--quantize q8_0] [--steps 0]

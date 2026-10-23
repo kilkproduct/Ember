@@ -21,8 +21,8 @@ from __future__ import annotations
 # File format
 # --------------------------------------------------------------------------
 
-FORMAT_MAGIC = b"EMB3"
-FORMAT_VERSION = 3
+FORMAT_MAGIC = b"EMB4"
+FORMAT_VERSION = 4
 DTYPE_FLOAT32 = 0
 DTYPE_NAMES = {DTYPE_FLOAT32: "float32"}
 DTYPE_ITEMSIZE = {DTYPE_FLOAT32: 4}
@@ -127,10 +127,10 @@ def pretokenize(data: bytes) -> list[bytes]:
 # Model
 # --------------------------------------------------------------------------
 
-ARCH = "ember-gpt"
+ARCH = "ember-llama"
 NORM_EPS = 1e-5
-ACTIVATION = "gelu_tanh"
-POSITIONAL = "learned"
+ACTIVATION = "swiglu"
+POSITIONAL = "rope"
 DEFAULT_FFN_MULT = 4
 MASK_NEG = -1e9  # additive attention mask value for blocked positions
 
@@ -139,10 +139,10 @@ MASK_NEG = -1e9  # additive attention mask value for blocked positions
 PRESETS = {
     "phone": {"n_layer": 2, "n_head": 2, "n_embd": 64, "block_size": 64, "vocab_size": 1500, "dropout": 0.0},
     "tiny": {"n_layer": 2, "n_head": 2, "n_embd": 64, "block_size": 64, "vocab_size": 2000, "dropout": 0.0},
-    "small": {"n_layer": 4, "n_head": 4, "n_embd": 128, "block_size": 128, "vocab_size": 3000, "dropout": 0.05},
-    "medium": {"n_layer": 6, "n_head": 6, "n_embd": 192, "block_size": 192, "vocab_size": 4000, "dropout": 0.1},
-    "tablet": {"n_layer": 6, "n_head": 6, "n_embd": 192, "block_size": 256, "vocab_size": 4096, "dropout": 0.1},
-    "desktop": {"n_layer": 8, "n_head": 8, "n_embd": 256, "block_size": 384, "vocab_size": 8192, "dropout": 0.1},
+    "small": {"n_layer": 4, "n_head": 4, "n_embd": 128, "block_size": 128, "vocab_size": 3000, "dropout": 0.0},
+    "medium": {"n_layer": 6, "n_head": 6, "n_embd": 192, "block_size": 192, "vocab_size": 4000, "dropout": 0.0},
+    "tablet": {"n_layer": 6, "n_head": 6, "n_embd": 192, "block_size": 256, "vocab_size": 4096, "dropout": 0.0},
+    "desktop": {"n_layer": 8, "n_head": 8, "n_embd": 256, "block_size": 384, "vocab_size": 8192, "dropout": 0.0},
 }
 
 
@@ -151,34 +151,17 @@ def ffn_dim(n_embd: int, ffn_mult: float) -> int:
 
 
 def tensor_specs(cfg) -> list[tuple[str, list[int]]]:
-    """Tensor name -> shape, in the exact order they are stored on disk."""
-    c = cfg.n_embd
-    f = ffn_dim(c, cfg.ffn_mult)
-    specs: list[tuple[str, list[int]]] = [
-        ("wte", [cfg.vocab_size, c]),
-        ("wpe", [cfg.block_size, c]),
-    ]
+    c, f, kv = cfg.n_embd, cfg.ffn, cfg.n_kv_head * cfg.head_dim
+    specs = [("wte", [cfg.vocab_size, c])]
     for i in range(cfg.n_layer):
         p = f"blk.{i}."
-        specs.extend(
-            [
-                (p + "ln1.gain", [c]),
-                (p + "ln1.bias", [c]),
-                (p + "attn.qkv.weight", [c, 3 * c]),
-                (p + "attn.qkv.bias", [3 * c]),
-                (p + "attn.proj.weight", [c, c]),
-                (p + "attn.proj.bias", [c]),
-                (p + "ln2.gain", [c]),
-                (p + "ln2.bias", [c]),
-                (p + "mlp.fc.weight", [c, f]),
-                (p + "mlp.fc.bias", [f]),
-                (p + "mlp.proj.weight", [f, c]),
-                (p + "mlp.proj.bias", [c]),
-            ]
-        )
-    specs.extend([("ln_f.gain", [c]), ("ln_f.bias", [c])])
-    if not cfg.tie_embeddings:
-        specs.append(("lm_head.weight", [cfg.vocab_size, c]))
+        specs += [(p+"attn_norm.weight", [c]), (p+"attn_q.weight", [c,c]),
+                  (p+"attn_k.weight", [c,kv]), (p+"attn_v.weight", [c,kv]),
+                  (p+"attn_output.weight", [c,c]), (p+"ffn_norm.weight", [c]),
+                  (p+"ffn_gate.weight", [c,f]), (p+"ffn_up.weight", [c,f]),
+                  (p+"ffn_down.weight", [f,c])]
+    specs += [("output_norm.weight", [c])]
+    if not cfg.tie_embeddings: specs += [("lm_head.weight", [cfg.vocab_size,c])]
     return specs
 
 

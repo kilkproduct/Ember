@@ -23,10 +23,10 @@ class LlamaInferenceContractTest {
     }
     @Test fun modelFactsAreNotReadinessUntilNativeLoad() {
         val model = ModelDescriptor.fromJson(JSONObject()
-            .put("loaded", false).put("arch", "gpt2").put("emberFormat", "gguf-gpt2-v1")
+            .put("loaded", false).put("arch", "llama").put("emberFormat", "gguf-llama-v2")
             .put("vocabSize", 500).put("nCtxTrain", 64))
         assertFalse(model.loaded)
-        assertEquals("gpt2", model.arch)
+        assertEquals("llama", model.arch)
         assertEquals(64, model.nCtxTrain)
         assertTrue(model.isEmberModel)
     }

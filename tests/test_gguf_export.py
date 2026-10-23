@@ -4,7 +4,7 @@ The writer is verified two ways:
 1. against the **official upstream reader** (``gguf.GGUFReader`` from llama.cpp's
    gguf-py package) — so the byte layout is not merely self-consistent, and
 2. against llama.cpp's own expectations for the ``gpt2`` architecture
-   (``src/models/gpt2.cpp`` at the pinned revision): tensor names, ggml
+   (``src/models/llama.cpp`` at the pinned revision): tensor names, ggml
    dimension order, tied output head and metadata keys.
 
 A separate test module (``test_llama_inference.py``) loads these files with the
@@ -23,7 +23,7 @@ from ember.gguf_export import (
     EMBER_MODEL_FORMAT,
     GGML_Q8_0,
     GgufExportError,
-    ember_to_gpt2_tensors,
+    ember_to_llama_tensors,
     export_gguf,
     quantize_q8_0,
     read_gguf_header,
@@ -59,21 +59,21 @@ def test_official_gguf_reader_parses_the_exported_file(trained) -> None:
 
     assert out.exists()
     assert report.bytes == out.stat().st_size
-    assert report.tensors == 4 + 12 * cfg.n_layer  # embeddings/positions/output_norm + per-layer set
+    assert report.tensors == 2 + 9 * cfg.n_layer  # embeddings/positions/output_norm + per-layer set
     assert report.quantization == "f32"
     assert report.tied_output is True
     assert report.format == EMBER_MODEL_FORMAT
 
     reader = gguf_reader.GGUFReader(str(out))
     fields = reader.fields
-    assert fields["general.architecture"].contents() == "gpt2"
-    assert fields["gpt2.context_length"].contents() == cfg.block_size
-    assert fields["gpt2.embedding_length"].contents() == cfg.n_embd
-    assert fields["gpt2.block_count"].contents() == cfg.n_layer
-    assert fields["gpt2.feed_forward_length"].contents() == cfg.ffn
-    assert fields["gpt2.attention.head_count"].contents() == cfg.n_head
-    assert fields["gpt2.attention.head_count_kv"].contents() == cfg.n_head
-    assert abs(fields["gpt2.attention.layer_norm_epsilon"].contents() - cfg.norm_eps) < 1e-9
+    assert fields["general.architecture"].contents() == "llama"
+    assert fields["llama.context_length"].contents() == cfg.block_size
+    assert fields["llama.embedding_length"].contents() == cfg.n_embd
+    assert fields["llama.block_count"].contents() == cfg.n_layer
+    assert fields["llama.feed_forward_length"].contents() == cfg.ffn
+    assert fields["llama.attention.head_count"].contents() == cfg.n_head
+    assert fields["llama.attention.head_count_kv"].contents() == cfg.n_kv_head
+    assert abs(fields["llama.attention.layer_norm_rms_epsilon"].contents() - cfg.norm_eps) < 1e-9
     assert fields["tokenizer.ggml.model"].contents() == "gpt2"
     assert fields["tokenizer.ggml.pre"].contents() == "gpt-2"
     assert fields["tokenizer.ggml.add_bos_token"].contents() is False
@@ -98,8 +98,9 @@ def test_official_gguf_reader_parses_the_exported_file(trained) -> None:
     # Tied embeddings: no separate output projection.
     assert "output.weight" not in tensors
     assert tuple(tensors["token_embd.weight"].shape) == (cfg.n_embd, cfg.vocab_size)
-    assert tuple(tensors["position_embd.weight"].shape) == (cfg.n_embd, cfg.block_size)
-    assert tuple(tensors["blk.0.attn_qkv.weight"].shape) == (cfg.n_embd, 3 * cfg.n_embd)
+    assert "position_embd.weight" not in tensors
+    assert fields["llama.rope.freq_base"].contents() == cfg.rope_theta
+    assert tuple(tensors["blk.0.attn_q.weight"].shape) == (cfg.n_embd, cfg.n_embd)
     assert tuple(tensors["blk.0.ffn_up.weight"].shape) == (cfg.n_embd, cfg.ffn)
     assert tuple(tensors["blk.0.ffn_down.weight"].shape) == (cfg.ffn, cfg.n_embd)
     assert int(tensors["token_embd.weight"].tensor_type) == 0
@@ -117,44 +118,28 @@ def test_official_gguf_reader_parses_the_exported_file(trained) -> None:
 
 def test_tensor_mapping_transposes_exactly_like_the_upstream_gpt2_converter(trained) -> None:
     tmp, cfg, params, tok = trained
-    mapped = ember_to_gpt2_tensors(cfg, params)
+    mapped = ember_to_llama_tensors(cfg, params)
 
-    # ggml stores a linear layer as {in_features, out_features} in ne order, i.e.
-    # memory is out_features rows of in_features — the transpose of Ember's
-    # `x @ W` layout (identical to HuggingFace GPT-2 Conv1D, which
-    # conversion/gpt2.py also transposes).
-    np.testing.assert_array_equal(mapped["blk.0.attn_qkv.weight"], params["blk.0.attn.qkv.weight"].T)
-    np.testing.assert_array_equal(mapped["blk.1.ffn_up.weight"], params["blk.1.mlp.fc.weight"].T)
-    np.testing.assert_array_equal(mapped["blk.1.ffn_down.weight"], params["blk.1.mlp.proj.weight"].T)
-    np.testing.assert_array_equal(mapped["blk.0.attn_output.weight"], params["blk.0.attn.proj.weight"].T)
-    # Embeddings and biases keep their layout.
-    np.testing.assert_array_equal(mapped["token_embd.weight"], params["wte"])
-    np.testing.assert_array_equal(mapped["position_embd.weight"], params["wpe"])
-    np.testing.assert_array_equal(mapped["output_norm.bias"], params["ln_f.bias"])
-    np.testing.assert_array_equal(mapped["blk.0.attn_norm.weight"], params["blk.0.ln1.gain"])
-    np.testing.assert_array_equal(mapped["blk.0.ffn_norm.bias"], params["blk.0.ln2.bias"])
-    np.testing.assert_array_equal(mapped["blk.0.attn_qkv.bias"], params["blk.0.attn.qkv.bias"])
-
-    expected_names = {
-        "token_embd.weight", "position_embd.weight", "output_norm.weight", "output_norm.bias",
-    }
+    from ember.spec import tensor_specs
+    expected = {"token_embd.weight", "output_norm.weight"}
     for i in range(cfg.n_layer):
-        expected_names.update({
-            f"blk.{i}.attn_norm.weight", f"blk.{i}.attn_norm.bias",
-            f"blk.{i}.attn_qkv.weight", f"blk.{i}.attn_qkv.bias",
-            f"blk.{i}.attn_output.weight", f"blk.{i}.attn_output.bias",
-            f"blk.{i}.ffn_norm.weight", f"blk.{i}.ffn_norm.bias",
-            f"blk.{i}.ffn_up.weight", f"blk.{i}.ffn_up.bias",
-            f"blk.{i}.ffn_down.weight", f"blk.{i}.ffn_down.bias",
-        })
-    assert set(mapped) == expected_names
+        for name in ("attn_q", "attn_k", "attn_v", "attn_output", "ffn_gate", "ffn_up", "ffn_down"):
+            key=f"blk.{i}.{name}.weight"
+            np.testing.assert_array_equal(mapped[key],params[key].T)
+            expected.add(key)
+        for name in ("attn_norm", "ffn_norm"):
+            key=f"blk.{i}.{name}.weight"
+            np.testing.assert_array_equal(mapped[key],params[key])
+            expected.add(key)
+    np.testing.assert_array_equal(mapped["token_embd.weight"],params["wte"])
+    assert set(mapped) == expected
 
     # Untied embeddings must produce an explicit output projection.
     cfg2 = ModelConfig(
         n_layer=1, n_head=2, n_embd=32, block_size=16, vocab_size=tok.vocab_size, tie_embeddings=False
     )
     gpt2 = GPT(cfg2, seed=3)
-    mapped2 = ember_to_gpt2_tensors(cfg2, gpt2.params)
+    mapped2 = ember_to_llama_tensors(cfg2, gpt2.params)
     # lm_head.weight is [vocab, n_embd] used as `x @ W.T`, i.e. the same memory
     # layout GGUF wants for {n_embd, n_vocab} — no transpose, exactly like wte.
     np.testing.assert_array_equal(mapped2["output.weight"], gpt2.params["lm_head.weight"])
@@ -164,7 +149,7 @@ def test_export_rejects_broken_checkpoints_with_actionable_messages(trained, tmp
     tmp, cfg, params, tok = trained
 
     # Missing tensor
-    incomplete = {k: v for k, v in params.items() if k != "blk.1.mlp.proj.weight"}
+    incomplete = {k: v for k, v in params.items() if k != "blk.1.ffn_down.weight"}
     with pytest.raises(GgufExportError, match="missing tensors"):
         export_gguf(tmp_path / "missing.gguf", cfg, incomplete, tok)
 
@@ -176,8 +161,8 @@ def test_export_rejects_broken_checkpoints_with_actionable_messages(trained, tmp
 
     # Non-finite weights must never reach a model file
     nans = dict(params)
-    nans["wpe"] = np.array(params["wpe"], dtype=np.float32)
-    nans["wpe"][0, 0] = np.nan
+    nans["wte"] = np.array(params["wte"], dtype=np.float32)
+    nans["wte"][0, 0] = np.nan
     with pytest.raises(GgufExportError, match="non-finite"):
         export_gguf(tmp_path / "nan.gguf", cfg, nans, tok)
 
@@ -210,7 +195,7 @@ def test_export_is_atomic_and_never_corrupts_an_existing_model(trained, tmp_path
     good_bytes = out.read_bytes()
 
     broken = dict(params)
-    broken["ln_f.gain"] = np.full_like(params["ln_f.gain"], np.inf)
+    broken["output_norm.weight"] = np.full_like(params["output_norm.weight"], np.inf)
     with pytest.raises(GgufExportError):
         export_gguf(out, cfg, broken, tok, name="second", step=2)
 
@@ -248,9 +233,9 @@ def test_q8_0_quantization_matches_the_ggml_block_layout(trained, tmp_path) -> N
     assert report.file_type == 7  # GGUF FileType.MOSTLY_Q8_0
     # Only the four large per-layer matrices are quantized; embeddings, positional
     # embeddings and every bias stay float32 (as upstream quantizers do).
-    assert len(report.quantized_tensors) == 4 * cfg.n_layer
+    assert len(report.quantized_tensors) == 7 * cfg.n_layer
     assert "token_embd.weight" in report.float_tensors
-    assert "position_embd.weight" in report.float_tensors
+    assert "output_norm.weight" in report.float_tensors
     assert all(not n.endswith(".bias") for n in report.quantized_tensors)
 
     # Same weights, float32 export: the quantized file must be materially smaller.
@@ -261,14 +246,14 @@ def test_q8_0_quantization_matches_the_ggml_block_layout(trained, tmp_path) -> N
 
     header = read_gguf_header(out)
     q8 = {t.name: t for t in header.tensors if t.dtype == GGML_Q8_0}
-    assert "blk.0.attn_qkv.weight" in q8
-    assert q8["blk.0.attn_qkv.weight"].dims == (cfg.n_embd, 3 * cfg.n_embd)
+    assert "blk.0.attn_q.weight" in q8
+    assert q8["blk.0.attn_q.weight"].dims == (cfg.n_embd, cfg.n_embd)
 
     reader = gguf_reader.GGUFReader(str(out))
     q8_type = int(gguf_reader.GGMLQuantizationType.Q8_0)
     read_types = {t.name: int(t.tensor_type) for t in reader.tensors}
     assert read_types["blk.0.ffn_up.weight"] == q8_type
-    assert read_types["blk.0.ffn_up.bias"] == int(gguf_reader.GGMLQuantizationType.F32)
+    assert read_types["blk.0.ffn_norm.weight"] == int(gguf_reader.GGMLQuantizationType.F32)
     assert read_types["token_embd.weight"] == int(gguf_reader.GGMLQuantizationType.F32)
 
 
@@ -286,7 +271,7 @@ def test_header_reader_and_validation_report_every_required_fact(trained, tmp_pa
     ):
         assert key in info, f"validation report must include {key}"
     assert info["valid"] is True and info["legacy"] is False
-    assert info["arch"] == "gpt2" and info["tokenizerPre"] == "gpt-2"
+    assert info["arch"] == "llama" and info["tokenizerPre"] == "gpt-2"
     assert info["vocabSize"] == cfg.vocab_size
     assert info["contextLength"] == cfg.block_size
     assert info["eosTokenId"] == 258
@@ -327,7 +312,7 @@ def test_incompatible_files_are_named_not_guessed(trained, tmp_path) -> None:
     def kv_u32(key: str, value: int) -> bytes:
         return struct.pack("<Q", len(key)) + key.encode() + struct.pack("<I", 4) + struct.pack("<I", value)
     body = (
-        kv_str("general.architecture", "llama")
+        kv_str("general.architecture", "gpt2")
         + kv_u32("llama.context_length", 4096)
         + kv_u32("llama.embedding_length", 4096)
     )
@@ -368,7 +353,7 @@ def test_export_from_a_real_backend_checkpoint_roundtrips(tmp_path) -> None:
         gguf_path = backend.trainer.sync_gguf(force=True)
         assert gguf_path is not None and gguf_path.exists()
         info = validate_gguf_file(gguf_path)
-        assert info["arch"] == "gpt2"
+        assert info["arch"] == "llama"
         assert info["blockCount"] == 2
         assert info["embeddingLength"] == 64
         assert info["vocabSize"] == backend.trainer.cfg.vocab_size

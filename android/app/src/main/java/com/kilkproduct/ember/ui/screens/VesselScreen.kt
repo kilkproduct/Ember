@@ -107,7 +107,7 @@ fun VesselScreen(
                     if (cfg != null) {
                         KeyValueRow(
                             "Architecture",
-                            "${cfg.nLayer} layers · ${cfg.nHead} heads · width ${cfg.nEmbd} · FFN ${cfg.ffnMult}×",
+                            "${cfg.nLayer} layers · ${cfg.nHead} heads · width ${cfg.nEmbd} · Llama GQA ${cfg.nKvHead} KV · SwiGLU ${cfg.ffnMult}×",
                         )
                         KeyValueRow(
                             "Context / vocab",
@@ -205,12 +205,12 @@ fun VesselScreen(
                         helper = "Vocabulary is clamped to tokens actually seen.",
                     )
                     NumberStepper(
-                        label = "Dropout",
+                        label = "Dropout (Llama: 0)",
                         value = form.dropout,
                         onValueChange = { value -> vm.updateVessel { it.copy(dropout = value, preset = "custom") } },
                         step = 0.05,
                         min = 0.0,
-                        max = 0.4,
+                        max = 0.0,
                         decimals = 2,
                         modifier = Modifier.weight(1f),
                         enabled = !casting,
