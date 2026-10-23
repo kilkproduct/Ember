@@ -245,7 +245,7 @@ class InferenceEngine:
 # llama.cpp implementation (ctypes → native/llama)
 # ---------------------------------------------------------------------------
 
-_TOKEN_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32)
+_TOKEN_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32, ctypes.c_int32)
 _PROGRESS_CB = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_float)
 
 
@@ -526,7 +526,7 @@ class LlamaCppEngine(InferenceEngine):
         if on_token is not None:
             def _thunk(_user, piece, piece_len, token_id, n_generated):
                 try:
-                    text = piece[:piece_len].decode("utf-8", "replace") if piece_len > 0 else ""
+                    text = ctypes.string_at(piece, piece_len).decode("utf-8", "replace") if piece_len > 0 else ""
                     keep_going = bool(on_token(text, int(token_id), int(n_generated)))
                 except Exception:
                     keep_going = False

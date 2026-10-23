@@ -295,7 +295,8 @@ class EmberEngine private constructor(private val app: Application) {
                     nGpuLayers = params.optInt("nGpuLayers", 0).coerceIn(0, 999),
                 )
                 val requestId = params.optString("requestId", java.util.UUID.randomUUID().toString())
-                withContext(Dispatchers.IO) { inference.loadModel(modelPath, settings) }
+                val descriptor = withContext(Dispatchers.IO) { inference.loadModel(modelPath, settings) }
+                _events.tryEmit(EngineEvent("inference.loaded", descriptor.toJson()))
                 val outcome = inference.generate(
                     prompt = formattedPrompt,
                     settings = GenerationSettings(
@@ -320,6 +321,7 @@ class EmberEngine private constructor(private val app: Application) {
             }
         }
 
+        if (method == "model.unload") withContext(Dispatchers.IO) { inference.unload() }
         val result = try {
             withTimeout(timeoutMs) {
                 withContext(Dispatchers.IO) {
@@ -330,7 +332,7 @@ class EmberEngine private constructor(private val app: Application) {
             throw EmberBackendException("Operation '$method' timed out after ${timeoutMs / 1000}s.")
         }
 
-        if (method == "brain.export" || method == "ckpt.export") {
+        if (method == "brain.export" || method == "ckpt.export" || method == "model.exportGguf") {
             val tempPath = result.optString("tempPath", "")
             val filename = result.optString("filename", "ember-brain.json")
             val bytes = result.optLong("bytes", 0L)

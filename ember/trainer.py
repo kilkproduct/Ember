@@ -951,7 +951,13 @@ class Trainer:
         src = Path(source)
         if not src.exists():
             raise InferenceError(f"Model file not found: {src}", code=-4, name="model-not-found")
-        info = validate_gguf_file(src)  # raises with a precise reason when invalid
+        info = validate_gguf_file(src)  # structural validation is not readiness
+        engine = get_engine()
+        if not engine.available():
+            raise InferenceError(engine.load_error or "llama.cpp unavailable", code=-2, name="backend-not-initialized")
+        # Native validation is mandatory: tensor bytes, tokenizer support, and
+        # context allocation are checked by llama.cpp, not inferred from a header.
+        engine.load_model(src, EngineConfig())
         target_name = (name or src.stem or "imported-model")
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
         dest = self.library_dir / f"{safe}.gguf"

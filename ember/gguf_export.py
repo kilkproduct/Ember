@@ -698,7 +698,11 @@ def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> 
         nbytes = _dtype_nbytes(dtype, dims)
         tensors.append(GgufTensorMeta(name=name, dims=tuple(dims), dtype=dtype, offset=toffset, nbytes=nbytes))
 
+    if len({t.name for t in tensors}) != len(tensors):
+        raise GgufExportError("duplicate GGUF tensors")
     alignment = int(metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT))
+    if alignment < 1 or alignment > 4096 or alignment & (alignment-1):
+        raise GgufExportError("invalid GGUF alignment")
     data_start = _ggml_pad(off, alignment)
     last_end = max((t.offset + t.nbytes for t in tensors), default=0)
     if data_start + last_end > size:
@@ -814,7 +818,18 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
         expected[pfx + "ffn_down.weight"] = (n_ff, n_embd)
         expected[pfx + "ffn_down.bias"] = (n_embd,)
 
+    if md["tokenizer.ggml.model"] != "gpt2" or md.get("tokenizer.ggml.pre") != "gpt-2":
+        raise GgufExportError("This Ember build requires the GPT-2 byte-level BPE tokenizer.")
+    if len(md["tokenizer.ggml.token_type"]) != n_vocab:
+        raise GgufExportError("tokenizer tokens/types length mismatch")
+    for key in ("bos_token_id", "eos_token_id", "padding_token_id", "unknown_token_id"):
+        value = md.get("tokenizer.ggml."+key)
+        if value is not None and not (0 <= int(value) < n_vocab):
+            raise GgufExportError(f"invalid tokenizer {key}")
     found = {t.name: t for t in header.tensors}
+    if "output.weight" in found: expected["output.weight"] = (n_embd, n_vocab)
+    extra = set(found) - set(expected)
+    if extra: raise GgufExportError(f"unexpected GGUF tensors: {sorted(extra)}")
     missing = [n for n in expected if n not in found]
     if missing:
         raise GgufExportError(f"{p.name}: missing required tensors {missing[:6]}")

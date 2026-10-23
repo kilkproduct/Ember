@@ -434,6 +434,10 @@ class EmberBackend:
                 if gguf_path is None:
                     raise InferenceError("No GGUF model available. Cast a vessel or import GGUF.", code=-3, name="model-not-loaded")
                 validate_gguf_file(gguf_path)
+                # Android owns its JNI engine; release any training-sample model
+                # before loading the same weights there, avoiding duplicate RAM.
+                get_engine().unload()
+                self.trainer._engine_model_path = ""
                 model_path = str(gguf_path)
                 model_error = None
             except InferenceError as exc:

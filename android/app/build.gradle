@@ -16,13 +16,14 @@ tasks.register("syncPythonBackend", Sync) {
 android {
     namespace "com.kilkproduct.ember"
     compileSdk 34
+    ndkVersion "26.1.10909125"
 
     defaultConfig {
         applicationId "com.kilkproduct.ember"
         minSdk 24
         targetSdk 34
-        versionCode 3
-        versionName "0.4.0"
+        versionCode 4
+        versionName "0.5.0"
 
         vectorDrawables.useSupportLibrary = true
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"

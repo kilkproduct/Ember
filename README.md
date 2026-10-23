@@ -1,35 +1,70 @@
-# Ember — On-Device Small Language Foundry (v3)
+# Ember — local training, llama.cpp inference
 
-A **small language model you train and run directly on your own Android device**.
+Ember is a native Kotlin/Jetpack Compose Android language foundry. Python/NumPy
+(embedded with Chaquopy) trains small GPT-2-style models from a persistent SQLite
+corpus. **Every production generation uses llama.cpp** from local GGUF weights.
+There is no cloud inference, Python generator fallback, or server process in the APK.
 
-- **Frontend**: Native Kotlin + Jetpack Compose (`android/`), plus an optional desktop web companion (`web/`).
-- **Training & Data Backend (`ember/`)**: Written completely in **Python** (packaged into the Android APK via **Chaquopy 17.0** with CPython 3.13, `numpy`, and `zstandard`) — SQLite WAL corpus, multi-format dataset ingestion (Parquet plain/snappy/gzip/zstd, JSONL/NDJSON, CSV/TSV, HTML, XML/RSS, Markdown, UTF-8/UTF-16, ZIP/TAR/GZ/BZ2/XZ/ZST with bomb & traversal guards), byte-level BPE training, document-masked GPT forward/backward passes, AdamW optimizer, held-out validation, atomic `.emb` checkpointing, foraging, cloud teachers, and GitHub sync.
-- **Native Inference Engine (`native/`)**: Written completely in **C++17** (`libember_infer.so`), compiled for `arm64-v8a` and `x86_64` via the Android NDK + CMake, and invoked directly from Kotlin over **JNI** (`NativeInference.kt`) with pre-allocated KV caching, ARM NEON SIMD dot products, context-window sliding, and lock-free atomic cancellation.
+## On Android
 
-See [`docs/v3-architecture.md`](docs/v3-architecture.md) for the complete `.emb` binary format, tensor layout, tokenizer contract, and memory budgets.
+1. Install the `Ember-debug.apk` from **Actions → Build APK → Ember-debug**.
+2. Either add fuel in Fuel, **Cast** in Vessel, and **Fire** to train; or use
+   **Voice → Import GGUF model** to copy a compatible model into app-private storage.
+3. In Voice select the model, choose the context/sampling settings, and Generate.
+   Output streams as tokens arrive. **Stop** retains partial output.
+4. **Unload** releases native model memory; files remain on disk. The next Generate
+   reloads the selected file. Selection survives restart.
+5. **Export GGUF** opens Android's file picker. F32 is lossless; Q8_0 quantizes the
+   four large matrices per transformer block. Checkpoints/corpus exports remain
+   separate: a GGUF file is for inference, not a backup of your training corpus.
 
----
+This build accepts **GPT-2-architecture GGUF with the classic `gpt-2` BPE tokenizer**,
+including models exported by Ember. A `.gguf` extension alone is not compatibility:
+metadata, dimensions, tensors and successful native loading matter. It does not
+pretend arbitrary Llama/Qwen GGUF files are Ember-trained models.
 
-## Build & Install Android APK (GitHub Actions)
+After installation and local model setup, generation requires no internet.
+INTERNET permission remains for **optional**, explicit foraging, teachers and
+GitHub sync; these are not used as a fallback for local inference.
 
-1. Open **Actions → Build APK → Run workflow** on GitHub (or push to `main` / working branch).
-2. Download the **Ember-debug** artifact containing the self-contained `Ember-debug.apk` (includes compiled `libember_infer.so`, embedded Python 3.13 runtime, `numpy`, `zstandard`, and the `ember` backend — no PC, external server, Termux, or API required).
-3. Install on your Android 7.0+ (`minSdk 24`) device.
+## Reproducible native dependency
 
----
+Upstream: <https://github.com/ggml-org/llama.cpp>, MIT.
+Pinned release **b11836**, commit `f5027fb21307eb264aed483242603d68c87b0fe3`.
+[`third_party/llama.cpp.version`](third_party/llama.cpp.version) records the source
+URL, SHA-256 and selection rationale. No prebuilt native binaries are downloaded.
 
-## Run Desktop Companion & Automated Tests Locally
-
-```bash
-# 1. Build native C++ inference library & standalone native tests
-cmake -S native -B native/build
-cmake --build native/build -j
-./native/build/test_native
-
-# 2. Install Python dependencies and run full test suite (backend + 35 fixtures + C++ logit/greedy interop)
-pip install -r requirements.txt
+```sh
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt cmake
+scripts/build-native.sh                 # fetch/checksum/build pinned source
+export EMBER_LLAMA_LIB="$PWD/native/build-llama/libember_llama.so"
 pytest -v tests/
-
-# 3. Start local desktop HTTP + RPC server on port 8000
-./run.sh
+python scripts/make_test_gguf.py /tmp/ember-test.gguf --steps 4
+native/build-llama/test_llama_engine /tmp/ember-test.gguf
+./run.sh                               # optional desktop/web companion, port 8000
 ```
+
+The fetch step needs internet **at build time**, not during inference. Source and
+build products are ignored by Git. Android needs Java 17, Gradle 8.7, NDK
+26.1.10909125, CMake 3.22.1, SDK 34; CI installs the tools and fetches the pinned
+source before `gradle testDebugUnitTest assembleDebug` in `android/`.
+ABIs: `arm64-v8a` and `x86_64`; minimum Android API 24.
+
+## Architecture and format boundary
+
+See [migration and audit](docs/llama-cpp-migration.md) for the tensor mapping,
+precision limits, tests and unverified device checks.
+
+- `.emb` + tokenizer JSON + Adam state: training checkpoints, retained on disk.
+- `active.gguf`: atomic export of trained weights, loaded by llama.cpp.
+- Tokenizer schema **v4**: GPT-2-compatible Unicode pre-tokenization; the old v3
+  byte-class chunker cannot be silently reinterpreted. Recast/retrain old vessels.
+- Existing source corpora, lessons and datasets are **not reset or deleted**.
+- Legacy JavaScript weights and old custom-engine weights are not production
+  inference files. Import/export diagnostics identify the mismatch explicitly.
+
+The removed `libember_infer` forward pass, tokenizer and sampler are not compiled
+or packaged. NumPy's training forward/backward implementation remains, plus a
+reference sampler **only for verification**, never ordinary chat.

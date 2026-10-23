@@ -71,6 +71,7 @@ class LlamaInference {
     private var loadedPath: String = ""
     private var loadedMtime: Long = -1L
     private var loadedSize: Long = -1L
+    private var loadedSettings: EngineSettings? = null
 
     private external fun nativeCreate(): Long
     private external fun nativeDestroy(handle: Long)
@@ -135,7 +136,7 @@ class LlamaInference {
         val size = file.length()
         lock.withLock {
             val h = ensureHandleLocked()
-            if (nativeIsLoaded(h) && modelPath == loadedPath && mtime == loadedMtime && size == loadedSize) {
+            if (nativeIsLoaded(h) && modelPath == loadedPath && mtime == loadedMtime && size == loadedSize && settings == loadedSettings) {
                 return parse(nativeModelInfo(h))
             }
             val raw = nativeLoad(
@@ -158,6 +159,7 @@ class LlamaInference {
             loadedPath = modelPath
             loadedMtime = mtime
             loadedSize = size
+            loadedSettings = settings
             return response.optJSONObject("model") ?: response
         }
     }

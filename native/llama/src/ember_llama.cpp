@@ -19,6 +19,7 @@
 #include <cstring>
 #include <deque>
 #include <mutex>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -231,13 +232,18 @@ llama_sampler* build_sampler_chain(
 
     // Control tokens (pad/bos/doc/unk, exported as GGUF CONTROL type) must never
     // be emitted as text; end-of-generation stays sampleable.
-    if (!e->suppress.empty()) {
+    auto suppressed = e->suppress;
+    if (!p.stop_on_eos) {
+        for (int id = 0; id < llama_vocab_n_tokens(e->vocab); ++id)
+            if (llama_vocab_is_eog(e->vocab, id)) suppressed.push_back({id, -INFINITY});
+    }
+    if (!suppressed.empty()) {
         llama_sampler_chain_add(
             chain,
             llama_sampler_init_logit_bias(
                 llama_vocab_n_tokens(e->vocab),
-                static_cast<int32_t>(e->suppress.size()),
-                e->suppress.data()));
+                static_cast<int32_t>(suppressed.size()),
+                suppressed.data()));
     }
 
     if (p.repeat_penalty != 1.0f && p.repeat_last_n > 0) {
@@ -258,7 +264,7 @@ llama_sampler* build_sampler_chain(
         llama_sampler_chain_add(chain, llama_sampler_init_top_p(p.top_p, 1));
     }
 
-    if (p.temperature <= 0.0f) {
+    if (p.temperature <= 0.0f || p.top_k == 1) {
         // Deterministic greedy decoding.
         llama_sampler_chain_add(chain, llama_sampler_init_greedy());
     } else {
@@ -296,7 +302,7 @@ EMBER_API int ember_llama_load(
     const ember_llama_config_t* config,
     ember_llama_progress_cb progress_cb,
     void* progress_user_data
-) {
+) try {
     if (!engine || !model_path) return EMBER_LLAMA_ERR_ARGS;
     if (!ensure_backend()) {
         engine->set_error(EMBER_LLAMA_ERR_NOT_INITIALIZED, "llama.cpp backend failed to initialize.");
@@ -353,7 +359,9 @@ EMBER_API int ember_llama_load(
         mp.progress_callback_user_data = &tramp;
     }
 
-    llama_model* model = llama_model_load_from_file(model_path, mp);
+    std::unique_ptr<llama_model, decltype(&llama_model_free)> model_owner(
+        llama_model_load_from_file(model_path, mp), llama_model_free);
+    llama_model* model = model_owner.get();
     if (!model) {
         if (engine->cancel.load(std::memory_order_relaxed)) {
             engine->set_error(EMBER_LLAMA_ERR_CANCELLED, "Model loading was cancelled.");
@@ -384,9 +392,10 @@ EMBER_API int ember_llama_load(
     cp.n_threads = cfg.n_threads;
     cp.n_threads_batch = cfg.n_threads;
 
-    llama_context* ctx = llama_init_from_model(model, cp);
+    std::unique_ptr<llama_context, decltype(&llama_free)> ctx_owner(
+        llama_init_from_model(model, cp), llama_free);
+    llama_context* ctx = ctx_owner.get();
     if (!ctx) {
-        llama_model_free(model);
         engine->set_error(EMBER_LLAMA_ERR_CONTEXT,
                           "Could not allocate a generation context for n_ctx=" + std::to_string(cfg.n_ctx) +
                           ". Try a shorter context length — the model plus KV cache does not fit in memory.");
@@ -406,8 +415,8 @@ EMBER_API int ember_llama_load(
         suppress.push_back(llama_logit_bias{id, -INFINITY});
     }
 
-    engine->model = model;
-    engine->ctx = ctx;
+    engine->model = model_owner.release();
+    engine->ctx = ctx_owner.release();
     engine->vocab = vocab;
     engine->cfg = cfg;
     // llama_n_ctx() can be rounded up past the trained context. For a learned
@@ -419,6 +428,11 @@ EMBER_API int ember_llama_load(
     engine->suppress = std::move(suppress);
     engine->model_path = model_path;
     return EMBER_LLAMA_OK;
+} catch (const std::exception& exc) {
+    if (engine) engine->set_error(EMBER_LLAMA_ERR_INTERNAL, exc.what());
+    return EMBER_LLAMA_ERR_INTERNAL;
+} catch (...) {
+    return EMBER_LLAMA_ERR_INTERNAL;
 }
 
 EMBER_API int ember_llama_is_loaded(const ember_llama_t* engine) {
@@ -591,7 +605,7 @@ EMBER_API int ember_llama_generate(
     void* token_user_data,
     char* json_out,
     size_t max_json
-) {
+) try {
     if (!engine || !json_out || max_json == 0) return EMBER_LLAMA_ERR_ARGS;
     std::lock_guard<std::mutex> lock(engine->mu);
     if (!engine->loaded()) {
@@ -712,6 +726,9 @@ EMBER_API int ember_llama_generate(
 
     if (result_code == EMBER_LLAMA_OK && !prompt_ids.empty() && p.max_tokens > 0) {
         chain = build_sampler_chain(engine, p);
+        // Repetition history includes the prompt once, then sample() accepts each
+        // generated token once. Never double-accept the sampled token.
+        for (auto token : prompt_ids) llama_sampler_accept(chain, token);
         int32_t n_past = static_cast<int32_t>(prompt_ids.size());
 
         for (int32_t i = 0; i < p.max_tokens; ++i) {
@@ -742,7 +759,7 @@ EMBER_API int ember_llama_generate(
             }
 
             const llama_token next = llama_sampler_sample(chain, engine->ctx, -1);
-            llama_sampler_accept(chain, next);
+            // llama_sampler_sample already accepts the token in this pinned API.
 
             if (p.stop_on_eos && llama_vocab_is_eog(engine->vocab, next)) {
                 stopped_by = "eos";
@@ -861,8 +878,13 @@ EMBER_API int ember_llama_generate(
         json_out[std::min(tiny.size(), max_json - 1)] = '\0';
         return EMBER_LLAMA_ERR_BUFFER;
     }
-
     return result_code;
+} catch (const std::exception& exc) {
+    if (engine) engine->set_error(EMBER_LLAMA_ERR_INTERNAL, exc.what());
+    write_error_json(json_out, max_json, EMBER_LLAMA_ERR_INTERNAL, "Native inference failed; see diagnostics.");
+    return EMBER_LLAMA_ERR_INTERNAL;
+} catch (...) {
+    return EMBER_LLAMA_ERR_INTERNAL;
 }
 
 EMBER_API void ember_llama_cancel(ember_llama_t* engine) {

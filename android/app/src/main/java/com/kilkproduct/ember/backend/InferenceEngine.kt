@@ -217,7 +217,7 @@ class LlamaCppInferenceEngine(
     override fun isModelLoaded(): Boolean = native.isLoaded()
 
     override fun modelDescriptor(): ModelDescriptor? =
-        if (!isAvailable()) null else runCatching { ModelDescriptor.fromJson(native.modelInfo()) }.getOrNull()
+        if (!isAvailable()) null else runCatching { ModelDescriptor.fromJson(native.modelInfo().optJSONObject("model")) }.getOrNull()
 
     override suspend fun generate(
         prompt: String,

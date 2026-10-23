@@ -180,7 +180,7 @@ private fun EmberApp(vm: MainViewModel) {
     }
 
     val exportLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/json")
+        ActivityResultContracts.CreateDocument("application/octet-stream")
     ) { uri ->
         if (uri != null) {
             vm.repo.finishExport(uri)

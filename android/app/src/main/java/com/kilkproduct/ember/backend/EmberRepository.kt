@@ -446,6 +446,9 @@ class EmberRepository private constructor(
     private fun handleEvent(event: EngineEvent) {
         val data = event.data
         when (event.name) {
+            "inference.loaded" -> if (data != null) {
+                _state.update { it.copy(loadedModel = ModelDescriptor.fromJson(data), inferenceError = null) }
+            }
             "ready" -> {
                 // The engine's `ready` event only carries `{backend: …}`. Parsing
                 // that as a status snapshot used to blank the model, corpus and
@@ -1592,7 +1595,7 @@ class EmberRepository private constructor(
                 _state.update {
                     it.copy(
                         loadedModel = ModelDescriptor(
-                            loaded = true,
+                            loaded = false,
                             path = result.stringOr("path"),
                             arch = result.stringOr("arch"),
                             name = result.stringOr("libraryName", result.stringOr("name")),
@@ -1767,6 +1770,12 @@ class EmberRepository private constructor(
     private fun applyCheckpoints(array: JSONArray) {
         val rows = array.objects().map(CheckpointInfo::fromJson)
         _state.update { it.copy(status = it.status.copy(checkpoints = rows)) }
+    }
+
+    fun exportGguf() {
+        beginExport("GGUF model", "model.exportGguf", JSONObject()
+            .put("name", "ember-step-${_state.value.status.model.step}")
+            .put("quantization", _state.value.quantization))
     }
 
     fun exportBrain(name: String, includeCorpus: Boolean) {

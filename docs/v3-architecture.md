@@ -172,3 +172,6 @@ payloads, duplicate tensors, and non-finite (NaN/Inf) weights *before* the model
 is marked ready, so corrupt files can never produce NaN logits on device.
 Decoding sanitizes UTF-8 with maximal-subpart U+FFFD replacement to match Python
 `bytes.decode("utf-8", errors="replace")`, including embedded NUL bytes.
+
+
+> **Superseded inference specification:** production generation now uses llama.cpp and GGUF. See [llama-cpp-migration.md](llama-cpp-migration.md). The .emb specification below describes training checkpoints/history, not an executable inference model.

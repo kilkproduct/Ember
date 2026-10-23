@@ -473,7 +473,8 @@ fun VoiceScreen(
                 }
                 Spacer(Modifier.height(10.dp))
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onImportModel, enabled = !ui.modelBusy) { Text("Import GGUF model") }
+                    Button(onClick = onImportModel, enabled = !ui.modelBusy && !generating) { Text("Import GGUF model") }
+                    TextButton(onClick = { vm.repo.exportGguf() }, enabled = ui.modelReady && !ui.exportBusy) { Text("Export GGUF") }
                     TextButton(onClick = { vm.validateModel() }, enabled = !ui.modelBusy) { Text("Validate") }
                     TextButton(onClick = { vm.refreshModels() }, enabled = !ui.modelBusy) { Text("Refresh") }
                     TextButton(

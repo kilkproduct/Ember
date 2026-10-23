@@ -33,9 +33,7 @@ from ember.gguf_export import (
 from ember.model import GPT, ModelConfig, save_model
 from ember.tokenizer import train_bpe
 
-gguf_reader = pytest.importorskip(
-    "gguf", reason="the upstream gguf package is used as an independent verifier"
-)
+import gguf as gguf_reader
 
 CORPUS = [
     "The tide rises and the tide falls. The tide rises again at dusk.",
