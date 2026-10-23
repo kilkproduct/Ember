@@ -74,10 +74,51 @@ jobs:
 
       - name: Run Python backend & Python-to-C++ interoperability tests
         run: |
+          set -o pipefail
           # Covers ember/* unit + integration tests, Python↔C++ tokenizer/logit/
           # decoding parity, the Android (Kotlin) JSON wire contract, and the
           # browser client contract (module exports, element ids, RPC methods).
-          pytest -v tests/
+          pytest -v tests/ 2>&1 | tee /tmp/pytest.log
+
+      - name: Report Python test failures
+        if: failure()
+        run: |
+          # pytest output is only in the (log-download-gated) job log, so mirror
+          # the failure region into annotations where it can actually be read.
+          python3 - <<'PY'
+          import os, pathlib
+
+          log = pathlib.Path("/tmp/pytest.log")
+          if not log.exists():
+              print("::notice::No pytest log was produced; the step failed before pytest ran.")
+              raise SystemExit(0)
+
+          lines = log.read_text(encoding="utf-8", errors="replace").splitlines()
+          start = next((i for i, l in enumerate(lines) if l.startswith("=== FAILURES") or l.startswith("==== FAILURES")), 0)
+          region = lines[start:] if start else lines[-80:]
+          # Keep the assertion lines and the short summary; drop pytest's code echo.
+          keep = [l for l in region if l.startswith(("E ", "FAILED", "ERROR", "___", "===")) or "assert" in l]
+          keep = keep or region[-60:]
+
+          chunk, chunks = [], []
+          for line in keep:
+              if sum(len(x) + 1 for x in chunk) + len(line) > 800:
+                  chunks.append("\n".join(chunk))
+                  chunk = []
+              chunk.append(line.strip()[:300])
+          if chunk:
+              chunks.append("\n".join(chunk))
+
+          for part in chunks[:12]:
+              safe = part.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error::PYTEST {safe}")
+
+          summary = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary:
+              with open(summary, "a", encoding="utf-8") as fh:
+                  fh.write("## Python test failures\n\n```\n" + "\n".join(keep[:200]) + "\n```\n")
+          print(f"reported {len(chunks[:12])} annotation chunk(s) from {len(keep)} failure line(s)")
+          PY
 
       - name: End-to-end runtime smoke test through run.sh (HTTP → Python → native C++)
         run: |
