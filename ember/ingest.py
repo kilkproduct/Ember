@@ -30,6 +30,7 @@ from typing import Any, Callable, Iterator
 
 from ._parquet import decompress_zstd, iter_parquet_rows
 from .corpus import Corpus, clean_document_text
+from .dataset import normalize_split
 from .model import BRAIN_KIND, BRAIN_VERSION, FORMAT_MAGIC
 
 MAX_DECOMPRESSED_BYTES = 512 * 1024 * 1024
@@ -221,7 +222,14 @@ def _extract_record_doc(obj: dict[str, Any], default_title: str, default_source:
             url_val = v.strip()
             break
 
+    meta=dict(low_map.get("meta") or {}) if isinstance(low_map.get("meta"),dict) else {}
+    split=low_map.get("split",low_map.get("partition",meta.get("split")))
+    if split:
+        normalized=normalize_split(split)
+        if not normalized:raise ValueError(f"Unsupported dataset split {split!r}; use train, validation/dev or test")
+        meta["split"]=normalized
     return {
+        "meta":meta,
         "title": (title_val or default_title)[:240],
         "source": str(low_map.get("source") or default_source)[:80],
         "url": url_val,

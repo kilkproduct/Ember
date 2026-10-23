@@ -24,6 +24,14 @@ def _doc_hash_score(doc_id: str) -> int:
     return int.from_bytes(h, "big")
 
 
+def normalize_split(value):
+    value=str(value or "").strip().lower()
+    if value in ("train","training"):return "train"
+    if value in ("val","valid","validation","dev","development","eval","evaluation"):return "validation"
+    if value in ("test","testing","heldout","holdout"):return "test"
+    return ""
+
+
 @dataclass
 class Document:
     id: str
@@ -32,9 +40,12 @@ class Document:
     kind: str = "page"
     weight: float = 1.0
     title: str = ""
+    split: str = ""
 
     def holdout(self, frac: float = 0.05) -> bool:
         """Deterministic per-document holdout predicate."""
+        if self.split in ("validation","test"):return True
+        if self.split=="train":return False
         if frac <= 0:
             return False
         return (_doc_hash_score(self.id) % 10000) < int(round(frac * 10000))
@@ -208,7 +219,8 @@ def build_stream(
         if should_cancel is not None and seen % 32 == 0 and should_cancel():
             break
 
-        is_val = (doc.id in holdout_ids) if holdout_ids is not None else doc.holdout(holdout_frac)
+        if doc.split=="test":continue # final test data is never training or model-selection validation
+        is_val = doc.split=="validation" or (doc.split!="train" and ((doc.id in holdout_ids) if holdout_ids is not None else doc.holdout(holdout_frac)))
         if train and is_val:
             continue
         if (not train) and (not is_val):
@@ -330,7 +342,8 @@ def build_train_val_streams(
         if should_cancel is not None and seen % 32 == 0 and should_cancel():
             break
 
-        is_val = (doc.id in holdout_ids) if holdout_ids is not None else doc.holdout(holdout_frac)
+        if doc.split=="test":continue # final test data is never training or model-selection validation
+        is_val = doc.split=="validation" or (doc.split!="train" and ((doc.id in holdout_ids) if holdout_ids is not None else doc.holdout(holdout_frac)))
         if is_val:
             if v_total >= max_val_tokens:
                 continue
@@ -530,5 +543,7 @@ def split_documents(documents: Sequence[Document], holdout_frac: float = 0.05) -
     holdout = compute_holdout_ids([(d.id, d.kind) for d in documents], holdout_frac)
     train, val = [], []
     for doc in documents:
-        (val if doc.id in holdout else train).append(doc)
+        if doc.split=="test":continue
+        is_val=doc.split=="validation" or (doc.split!="train" and doc.id in holdout)
+        (val if is_val else train).append(doc)
     return train, val

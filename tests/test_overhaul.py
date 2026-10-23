@@ -238,3 +238,48 @@ def test_backend_presets_match_all_android_phone_shapes_and_explicit_ffn():
         cfg.validate();estimate=estimate_vessel({'preset':name})
         assert estimate['params']==cfg.n_params
     assert not estimate_vessel({'preset':'long-context'})['blocked']
+
+
+def test_explicit_splits_survive_streaming_dedup_and_never_enter_training(tmp_path):
+    from ember.backend import EmberBackend
+    from ember.dataset import build_train_val_streams
+    records=[{'text':'Train example only. '*30,'split':'train'},
+        {'text':'Other training example. '*30,'split':'train'},
+        {'text':'VALIDATION_SENTINEL new words. '*30,'split':'dev'},
+        {'text':'TEST_SENTINEL final holdout. '*30,'split':'test'}]
+    path=tmp_path/'splits.jsonl';path.write_text('\n'.join(json.dumps(r) for r in records))
+    c=Corpus(tmp_path/'db');mgr=ImportManager(c);mgr.stage_path('splits',path);mgr.commit('splits')
+    docs=list(c.iter_documents());assert [d.split for d in docs]==['train','train','validation','test']
+    tok=train_bpe([d.text for d in docs if d.split=='train'],500)
+    train,val=build_train_val_streams(c.iter_documents(),tok,holdout_ids=c.training_holdout_ids())
+    assert {s.doc_id for s in train.spans}=={d.id for d in docs if d.split=='train'}
+    assert {s.doc_id for s in val.spans}=={d.id for d in docs if d.split=='validation'}
+    # A later test copy of a training document must protect the existing row,
+    # not silently discard its split because the content hash is a duplicate.
+    c.add_many([{'text':records[0]['text'],'meta':{'split':'test'}}])
+    protected=list(c.iter_documents())[0];assert protected.split=='test'
+    c.add(text=records[0]['text'],meta={'split':'train'})
+    assert list(c.iter_documents())[0].split=='test'
+    c.add(text='URL held-out document. '*30,url='https://fixture/validation',meta={'split':'validation'})
+    c.add(text='Updated held-out document. '*30,url='https://fixture/validation',meta={'split':'train'})
+    assert next(d for d in c.iter_documents() if 'Updated held-out' in d.text).split=='validation'
+
+
+def test_model_import_never_overwrites_and_internal_stage_avoids_second_copy(tmp_path):
+    import hashlib,os
+    from ember.backend import EmberBackend
+    tok=train_bpe(['Real import fixture content. '*10],300)
+    cfg=ModelConfig(n_layer=1,n_head=2,n_embd=32,vocab_size=tok.vocab_size)
+    path=tmp_path/'original.gguf';export_gguf(path,cfg,Llama(cfg,seed=9).params,tok)
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    b=EmberBackend(tmp_path/'app'/'ember_v3')
+    try:
+        first=b.dispatch('model.importGguf',{'path':str(path),'name':'same.gguf'})
+        second=b.dispatch('model.importGguf',{'path':str(path),'name':'same.gguf'})
+        assert first['path']!=second['path'] and first['path'].endswith('same.gguf')
+        assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
+        staged=tmp_path/'app'/'imports';staged.mkdir();file=staged/'testtoken.gguf';file.write_bytes(path.read_bytes())
+        result=b.dispatch('model.importGguf',{'path':str(file),'token':'testtoken','name':'staged'})
+        assert os.stat(file).st_ino==os.stat(result['path']).st_ino
+        assert not __import__('ember.inference',fromlist=['get_engine']).get_engine().is_loaded()
+    finally:b.close()

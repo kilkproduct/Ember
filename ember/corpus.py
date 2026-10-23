@@ -21,7 +21,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator
 
-from .dataset import Document
+from .dataset import Document, normalize_split, compute_holdout_ids
 
 MAX_DOC_CHARS = 120_000
 
@@ -182,6 +182,26 @@ class Corpus:
             self._conn.commit()
 
     # -- CRUD & batch insertion -----------------------------------------
+    @staticmethod
+    def _merge_split_metadata(old,new):
+        old=old if isinstance(old,dict) else {};new=new if isinstance(new,dict) else {}
+        result={**old,**new};rank={"":0,"train":1,"validation":2,"test":3}
+        protected=max((normalize_split(old.get("split")),normalize_split(new.get("split"))),key=lambda s:rank[s])
+        if protected:result["split"]=protected
+        return result
+
+    def _protect_content_split(self,cursor,chash,meta):
+        rows=cursor.execute("SELECT id,meta_json FROM documents WHERE chash=?",(chash,)).fetchall()
+        protected=meta
+        for r in rows:protected=self._merge_split_metadata(json.loads(r["meta_json"]),protected)
+        split=normalize_split(protected.get("split"))
+        if split:
+            for r in rows:
+                old=json.loads(r["meta_json"])
+                if normalize_split(old.get("split"))!=split:
+                    cursor.execute("UPDATE documents SET meta_json=? WHERE id=?",(json.dumps({**old,"split":split}),r["id"]))
+        return protected
+
     def add(
         self,
         text: str,
@@ -212,9 +232,11 @@ class Corpus:
         with self._lock:
             if safe_url:
                 row = self._conn.execute(
-                    "SELECT id FROM documents WHERE url = ? LIMIT 1", (safe_url,)
+                    "SELECT id,meta_json FROM documents WHERE url = ? LIMIT 1", (safe_url,)
                 ).fetchone()
                 if row is not None:
+                    merged_meta=self._merge_split_metadata(json.loads(row["meta_json"]),meta or {})
+                    meta_str=json.dumps(self._protect_content_split(self._conn,chash,merged_meta))
                     self._conn.execute(
                         "UPDATE documents SET title=?, text=?, chars=?, chash=?, weight=?, meta_json=? WHERE id=?",
                         (safe_title, cleaned, len(cleaned), chash, safe_weight, meta_str, row["id"]),
@@ -223,6 +245,7 @@ class Corpus:
                     self._revision += 1
                     return self.get_document(row["id"]) or {}
 
+            meta_str=json.dumps(self._protect_content_split(self._conn,chash,meta or {}))
             if dedupe:
                 row = self._conn.execute(
                     "SELECT id, weight FROM documents WHERE chash = ? LIMIT 1", (chash,)
@@ -295,8 +318,10 @@ class Corpus:
                     meta_str = json.dumps(raw.get("meta") or {}, ensure_ascii=False)
 
                     if url:
-                        row = cur.execute("SELECT id FROM documents WHERE url = ? LIMIT 1", (url,)).fetchone()
+                        row = cur.execute("SELECT id,meta_json FROM documents WHERE url = ? LIMIT 1", (url,)).fetchone()
                         if row is not None:
+                            merged_meta=self._merge_split_metadata(json.loads(row["meta_json"]),raw.get("meta") or {})
+                            meta_str=json.dumps(self._protect_content_split(cur,chash,merged_meta))
                             cur.execute(
                                 "UPDATE documents SET title=?, text=?, chars=?, chash=?, weight=?, meta_json=? WHERE id=?",
                                 (title, cleaned, len(cleaned), chash, weight, meta_str, row["id"]),
@@ -304,6 +329,7 @@ class Corpus:
                             merged += 1
                             continue
 
+                    meta_str=json.dumps(self._protect_content_split(cur,chash,raw.get("meta") or {}))
                     if dedupe:
                         row = cur.execute("SELECT id FROM documents WHERE chash = ? LIMIT 1", (chash,)).fetchone()
                         if row is not None:
@@ -379,6 +405,20 @@ class Corpus:
             rows = self._conn.execute("SELECT id, kind FROM documents ORDER BY seq ASC").fetchall()
             return [(str(r["id"]), str(r["kind"])) for r in rows]
 
+    def training_holdout_ids(self,frac=.05):
+        # Only lightweight metadata, never document bodies. Content groups share
+        # the most protected explicit split, or one deterministic auto split.
+        with self._lock:
+            rows=self._conn.execute("SELECT id,kind,chash,meta_json FROM documents ORDER BY seq").fetchall()
+        explicit={}
+        rank={"":0,"train":1,"validation":2,"test":3}
+        for r in rows:
+            split=normalize_split(json.loads(r["meta_json"]).get("split"))
+            if rank[split]>rank.get(explicit.get(r["chash"],""),0):explicit[r["chash"]]=split
+        auto=compute_holdout_ids([(r["id"],r["kind"]) for r in rows if r["chash"] not in explicit],frac)
+        val_hashes={r["chash"] for r in rows if r["id"] in auto}
+        return {r["id"] for r in rows if explicit.get(r["chash"]) in ("validation","test") or (r["chash"] not in explicit and r["chash"] in val_hashes)}
+
     def iter_documents(self, batch_size: int = 64) -> Iterator[Document]:
         """Stream :class:`Document` objects in bounded SQL pages without holding all in RAM."""
         last_seq = 0
@@ -386,7 +426,7 @@ class Corpus:
             with self._lock:
                 rows = self._conn.execute(
                     """
-                    SELECT seq, id, title, source, kind, weight, text
+                    SELECT seq, id, title, source, kind, weight, text, meta_json
                     FROM documents
                     WHERE seq > ?
                     ORDER BY seq ASC
@@ -405,6 +445,7 @@ class Corpus:
                     kind=str(r["kind"]),
                     weight=float(r["weight"]),
                     text=str(r["text"]),
+                    split=normalize_split(json.loads(r["meta_json"]).get("split")),
                 )
 
     def iter_texts(self, batch_size: int = 64) -> Iterator[str]:

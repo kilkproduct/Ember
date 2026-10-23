@@ -165,6 +165,7 @@ class Trainer:
         self._engine_model_path: str = ""
         self._engine_model_mtime: float = -1.0
         self.quantization: str = "f32"
+        self._model_import_cancel=threading.Event()
         prep = self.corpus.get_kv("training:preparation") or {}
         self.max_train_tokens = int(prep.get("maxTrainTokens", 3_000_000))
         self.max_val_tokens = int(prep.get("maxValTokens", 250_000))
@@ -391,7 +392,7 @@ class Trainer:
                 self.val_stream = None
                 self._stream_corpus_revision = rev
                 return
-            holdout = compute_holdout_ids(meta_rows, holdout_frac=0.05)
+            holdout = self.corpus.training_holdout_ids(.05)
             t_stream, v_stream = build_train_val_streams(
                 self.corpus.iter_documents(batch_size=64),
                 self.tokenizer,
@@ -463,8 +464,8 @@ class Trainer:
             _stage("tokenizer-scan")
             # Tokenizer fitting excludes validation documents and uses an explicit
             # bounded sample; source documents are never modified or deleted.
-            holdout = compute_holdout_ids(self.corpus.id_kind_pairs(), holdout_frac=0.05)
-            self.corpus.set_kv("training:split", {"version":1,"algorithm":"blake2b-doc-id-v1",
+            holdout = self.corpus.training_holdout_ids(.05)
+            self.corpus.set_kv("training:split", {"version":1,"algorithm":"explicit-split-then-blake2b-content-group-v2",
                 "holdoutFraction":0.05,"validationIds":sorted(holdout),"corpusRevision":self.corpus.revision})
             def tokenizer_sample():
                 remaining = self.tokenizer_chars
@@ -1117,7 +1118,7 @@ class Trainer:
             out.append({**entry,"selected":self._imported_gguf==Path(entry["path"]),"valid":Path(entry["path"]).exists()})
         return out
 
-    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True) -> dict[str, Any]:
+    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True, staged: bool = False) -> dict[str, Any]:
         """Copy a user-selected GGUF into the model library and validate it."""
         src = Path(source)
         if not src.exists():
@@ -1132,24 +1133,48 @@ class Trainer:
         # Invalidate the path cache even if copying later fails or select=False.
         self._engine_model_path = ""
         self._engine_model_mtime = -1.0
-        engine.load_model(src, EngineConfig())
-        target_name = (name or src.stem or "imported-model")
-        safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
-        dest = self.library_dir / f"{safe}.gguf"
-        tmp = dest.with_suffix(".gguf.tmp")
-        with open(src, "rb") as fh_in, open(tmp, "wb") as fh_out:
-            while True:
-                chunk = fh_in.read(1024 * 1024)
-                if not chunk:
-                    break
-                fh_out.write(chunk)
-            fh_out.flush()
-            os.fsync(fh_out.fileno())
-        os.replace(tmp, dest)
-        # Re-validate the copy: the file must be complete on this device, not just
-        # at the source location.
-        info = validate_gguf_file(dest)
-        engine.unload()  # Android JNI must not coexist with a Python validation context.
+        import shutil,tempfile
+        self._model_import_cancel.clear()
+        tmp=None
+        try:
+            engine.load_model(src, EngineConfig())
+            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            target_name = (name or src.stem or "imported-model")
+            if target_name.lower().endswith(".gguf"):target_name=target_name[:-5]
+            safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
+            # Never replace an existing user's model with a same-named import.
+            with self._lock:
+                index=0
+                while True:
+                    dest=self.library_dir/(safe+(f"-{index}" if index else "")+".gguf")
+                    if not dest.exists():break
+                    index+=1
+                if staged:
+                    try:os.link(src,dest) # same internal volume: no second multi-GB copy
+                    except OSError:staged=False
+                if not staged:
+                    if shutil.disk_usage(self.library_dir).free<src.stat().st_size+16*1024*1024:
+                        raise OSError("Insufficient free storage for the copied model and safety reserve")
+                    fd,temporary=tempfile.mkstemp(dir=self.library_dir,suffix=".partial")
+                    tmp=Path(temporary)
+                    total=0;reported=0
+                    with open(src,"rb") as incoming,os.fdopen(fd,"wb") as outgoing:
+                        while True:
+                            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+                            chunk=incoming.read(1024*1024)
+                            if not chunk:break
+                            outgoing.write(chunk);total+=len(chunk)
+                            if total-reported>=4*1024*1024:
+                                self._emit("model.importProgress",{"bytesCopied":total,"totalBytes":src.stat().st_size})
+                                reported=total
+                        outgoing.flush();os.fsync(outgoing.fileno())
+                    validate_gguf_file(tmp)
+                    # The trainer lock serializes model-library publication.
+                    os.replace(tmp,dest);tmp=None
+            info=validate_gguf_file(dest)
+        finally:
+            if tmp is not None:tmp.unlink(missing_ok=True)
+            engine.unload() # never leave Python + JNI contexts resident together
         if select:
             self.corpus.set_kv("inference:selected_external",None)
             self.corpus.set_kv("inference:selected_model", str(dest))

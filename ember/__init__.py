@@ -10,7 +10,7 @@ from .inference import EngineConfig, GenParams, Generation, InferenceEngine, Inf
 from .tokenizer import BPETokenizer, train_bpe
 from .trainer import Trainer, estimate_vessel
 
-__version__ = "0.4.0"
+__version__ = "0.7.0"
 
 __all__ = [
     "AdamW",

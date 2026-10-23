@@ -557,6 +557,11 @@ class EmberBackend:
             raw = p.get("path")
             return self.trainer.select_model(None if raw in (None, "") else str(raw))
 
+        if method == "model.cancelImport":
+            self.trainer._model_import_cancel.set()
+            get_engine().cancel()
+            return {"cancelRequested":True}
+
         if method == "model.unregisterExternal":
             return self.trainer.unregister_external_model(str(p["uri"]))
 
@@ -567,7 +572,9 @@ class EmberBackend:
             src = str(p.get("path") or "")
             if not src:
                 raise ValueError("Missing staged model path for import.")
-            return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False)
+            source=Path(src)
+            staged=bool(p.get("token")) and source.parent.resolve()==(self.data_dir.parent/"imports").resolve() and source.name.startswith(str(p["token"])+".")
+            return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False,staged=staged)
 
         if method == "model.exportGguf":
             if not self.trainer.ready:

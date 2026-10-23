@@ -462,6 +462,9 @@ class EmberRepository private constructor(
     private fun handleEvent(event: EngineEvent) {
         val data = event.data
         when (event.name) {
+            "model.importProgress" -> if(data!=null) {
+                _state.update {it.copy(modelImportDetail="Library copy ${Formats.bytes(data.longOr("bytesCopied"))} / ${Formats.bytes(data.longOr("totalBytes"))}")}
+            }
             "inference.loaded" -> if (data != null) {
                 _state.update { it.copy(loadedModel = ModelDescriptor.fromJson(data), inferenceError = null) }
             }
@@ -1650,7 +1653,10 @@ class EmberRepository private constructor(
         }
     }
 
-    fun cancelModelImport() { modelImportJob?.cancel() }
+    fun cancelModelImport() {
+        modelImportJob?.cancel()
+        scope.launch {runCatching {engine.call("model.cancelImport",timeoutMs=30_000)}}
+    }
 
     fun importModel(uri: Uri) {
         if (!gate.tryStart(Ops.MODEL_IMPORT)) return

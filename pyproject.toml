@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ember-foundry"
-version = "0.6.0"
+version = "0.7.0"
 description = "On-device Llama-style language foundry with NumPy training and llama.cpp inference"
 requires-python = ">=3.10"
 dependencies = [

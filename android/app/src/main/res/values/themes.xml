@@ -2,7 +2,7 @@
 <resources>
     <!-- Compose owns the real visual theme. The platform theme only supplies
          a dark window background and no action bar before Compose draws. -->
-    <style name="Theme.Ember.Base" parent="@android:style/Theme.Material.NoActionBar">
+    <style name="BaseThemeEmber" parent="@android:style/Theme.Material.NoActionBar">
         <item name="android:windowBackground">@color/ember_background</item>
         <item name="android:statusBarColor">@color/ember_background</item>
         <item name="android:navigationBarColor">@color/ember_background</item>
@@ -11,5 +11,5 @@
         <item name="android:colorAccent">#D9682F</item>
     </style>
 
-    <style name="Theme.Ember" parent="@style/Theme.Ember.Base" />
+    <style name="Theme.Ember" parent="@style/BaseThemeEmber" />
 </resources>
