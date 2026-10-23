@@ -85,8 +85,8 @@ host. Responses have an 8 MiB cap, finite timeouts, bounded retries, interruptib
 backoff and HTTP 429/5xx handling. Writes/budget checks serialize; corpus summaries
 are throttled. Real public APIs supply Wikipedia, HN, Gutenberg, OpenLibrary,
 Stack Exchange and explicit Reddit archive sources. A source's unavailability is
-logged; no source content or success counts are synthesized. DNS/socket waits may
-last until the request timeout after cancellation. Live public-web operation
+logged; no source content or success counts are synthesized. Cancellation does not forcibly interrupt an in-flight blocking request; DNS
+resolution or provider/OS I/O may outlast the configured socket timeout. Live public-web operation
 cannot be tested here because outbound hosts are restricted.
 
 ## Packaging and measurement
@@ -412,6 +412,37 @@ shrinking but needs the owner's signing key before distribution.
    are the real cancellation paths. See [device verification](device-verification.md)
    for restart, corruption/revocation, offline and lifecycle checks.
 
-The final APK source/CI link, package byte counts and PR are recorded alongside
-this report after the build completes. This document's unverified-device limits
-still apply even when compilation and package verification pass.
+## Final verified build and delivery
+
+Application source: `3f72d50e5197b002498443f5e26e69e358e3a8d7`.
+[PR #7](https://github.com/kilkproduct/Ember/pull/7) includes the implementation
+and subsequent documentation-only evidence updates.
+[Final CI run 40014471211](https://github.com/kilkproduct/Ember/actions/runs/40014471211)
+**passed**, finishing 2026-10-24 04:01 Singapore time (20:01 UTC on October 23).
+It passed Python/native interoperability tests, HTTP runtime smoke, Android JVM
+tests, debug/release assembly, instrumentation APK assembly, baseline rebuild and
+package verification. Instrumentation was **not executed**.
+
+[Download Ember-debug artifact](https://github.com/kilkproduct/Ember/actions/runs/40014471211/artifacts/12527679351)
+(artifact ID `12527679351`, compressed bundle 155,110,633 bytes). GitHub login may
+be required; Actions artifacts have retention limits. The larger bundle contains
+three installable APKs, not one APK of that size.
+
+| Package | APK bytes | Top-level native library bytes |
+|---|---:|---:|
+| Same-run rebuilt baseline universal | 95,463,165 | 53,450,984 |
+| Final universal | 87,811,553 | 45,737,192 |
+| Final arm64-v8a | 66,446,051 | 24,467,960 |
+| Final x86_64 | 66,609,861 | 24,654,544 |
+
+Universal package reduction: **7,651,612 bytes / 8.02%** against that same-run
+baseline. Native counts exclude Python extension modules inside asset containers.
+The earlier successful build remains in `benchmarks/apk-build-ededf5e.json`;
+final evidence is `benchmarks/apk-build-final.json`. Small baseline/package byte
+differences between runs are recorded rather than hidden.
+
+No device/emulator, official pretrained Qwen model, interactive SAF, offline,
+low-memory/thermal, accessibility or frame-timing result is claimed. The repeatable
+[device procedure](device-verification.md) remains unexecuted. Remaining bounded
+format/record limitations, blocking I/O cancellation and the external-registration
+race described above remain real limitations, not completed verification.

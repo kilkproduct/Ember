@@ -1,0 +1,23 @@
+{
+  "baselineCommit": "412f8c1c6a26440d1d1043e429a534d7e1fc5751",
+  "sourceCommit": "ededf5e46d345bbc4c40a1eead31d7254b95e1f2",
+  "run": "https://github.com/kilkproduct/Ember/actions/runs/40012442092",
+  "artifactId": 12527137913,
+  "note": "First successful overhaul APK build, before subsequent Android progress-label fixes. NativeBytes sums top-level .so entries, excludes Python extensions in asset containers. Not device execution.",
+  "baseline": {
+    "apkBytes": 95462713,
+    "nativeBytes": 53450984
+  },
+  "universal": {
+    "apkBytes": 87795017,
+    "nativeBytes": 45737192
+  },
+  "arm64-v8a": {
+    "apkBytes": 66429515,
+    "nativeBytes": 24467960
+  },
+  "x86_64": {
+    "apkBytes": 66593325,
+    "nativeBytes": 24654544
+  }
+}
