@@ -101,6 +101,33 @@ class AdamW:
                 self.m[name] = m.astype(np.float32)
                 self.v[name] = v.astype(np.float32)
 
+    def save_npz(self, path) -> None:
+        import os
+
+        arrays: dict[str, np.ndarray] = {"__t__": np.asarray([int(self.t)], dtype=np.int64)}
+        for name in self.m:
+            arrays[f"m::{name}"] = np.asarray(self.m[name], dtype=np.float32)
+            arrays[f"v::{name}"] = np.asarray(self.v[name], dtype=np.float32)
+        tmp = str(path) + ".tmp.npz"
+        np.savez(tmp, **arrays)
+        os.replace(tmp, path)
+
+    def load_npz(self, path) -> None:
+        with np.load(path, allow_pickle=False) as archive:
+            keys = set(archive.files)
+            if "__t__" in keys:
+                self.t = max(0, int(archive["__t__"].reshape(-1)[0]))
+            self.m.clear()
+            self.v.clear()
+            for name, p in self.params.items():
+                mk, vk = f"m::{name}", f"v::{name}"
+                if mk in keys and vk in keys:
+                    m = np.asarray(archive[mk], dtype=np.float32)
+                    v = np.asarray(archive[vk], dtype=np.float32)
+                    if m.shape == p.shape and v.shape == p.shape and np.all(np.isfinite(m)) and np.all(np.isfinite(v)):
+                        self.m[name] = m.copy()
+                        self.v[name] = v.copy()
+
 
 class LRSchedule:
     """Linear warmup then cosine decay to ``min_frac`` of the base rate."""

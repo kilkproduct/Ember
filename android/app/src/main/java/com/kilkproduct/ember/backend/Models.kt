@@ -640,7 +640,7 @@ data class FilePreview(
     }
 }
 
-/** One progress tick from the importer (see `web/ingest/pipeline.js`). */
+/** One progress tick from the Python importer (`ember/ingest.py`). */
 data class ImportProgress(
     val token: String,
     val processed: Int = 0,
@@ -669,6 +669,34 @@ data class ImportProgress(
             "completed" -> "Complete"
             else -> stage.replaceFirstChar { it.uppercase() }
         }
+
+    companion object {
+        /**
+         * Single parser for `import.progress` events, so the shape the Python
+         * importer emits is checked in `EmberV3ContractTest` instead of being
+         * re-derived inline in the repository.
+         */
+        fun fromJson(json: JSONObject): ImportProgress {
+            val documents = json.intOr("documents")
+            val records = json.intOr("records")
+            return ImportProgress(
+                token = json.stringOr("token"),
+                processed = documents,
+                total = records.coerceAtLeast(documents),
+                percent = json.intOr("percent"),
+                stage = json.stringOr("stage", "reading"),
+                records = records,
+                merged = json.intOr("merged"),
+                skipped = json.intOr("skipped"),
+                failed = json.intOr("failed"),
+                bytesRead = json.longOr("bytesRead"),
+                sourceBytes = json.longOr("sourceBytes"),
+                entries = json.intOr("entries"),
+                message = json.stringOr("message"),
+                elapsedMs = json.longOr("elapsedMs"),
+            )
+        }
+    }
 }
 
 /**
@@ -890,8 +918,9 @@ data class GenerationResult(
     val tokensPerSec: Double,
     val ms: Double,
     val promptTokens: Int,
-    val seed: Int?,
-    val warning: String?,
+    val seed: Long?,
+    val stoppedBy: String = "length",
+    val warning: String? = null,
 ) {
     companion object {
         fun fromJson(json: JSONObject) = GenerationResult(
@@ -901,7 +930,8 @@ data class GenerationResult(
             tokensPerSec = json.doubleOr("tokensPerSec"),
             ms = json.doubleOr("ms"),
             promptTokens = json.intOr("promptTokens"),
-            seed = json.longOrNull("seed")?.toInt(),
+            seed = json.longOrNull("seed"),
+            stoppedBy = json.stringOr("stoppedBy", "length"),
             warning = json.stringOrNull("warning"),
         )
     }

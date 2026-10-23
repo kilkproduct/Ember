@@ -344,6 +344,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         repo.generate(options)
     }
 
+    fun cancelGeneration() {
+        repo.cancelGeneration()
+    }
+
     fun teach() {
         val f = teachForm
         val prompt = f.prompt.trim()

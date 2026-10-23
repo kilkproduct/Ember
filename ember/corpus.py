@@ -18,7 +18,6 @@ import re
 import sqlite3
 import threading
 import time
-import uuid
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -61,6 +60,7 @@ class Corpus:
     def __init__(self, path: str | Path) -> None:
         raw_path = Path(path)
         self._lock = threading.RLock()
+        self._revision = 0
         if raw_path.suffix == ".jsonl":
             self.jsonl_path: Path | None = raw_path
             self.db_path = raw_path.with_suffix(".sqlite3")
@@ -78,6 +78,11 @@ class Corpus:
         self._init_schema()
         if self.jsonl_path is not None and self.jsonl_path.exists():
             self._import_legacy_jsonl(self.jsonl_path)
+
+    @property
+    def revision(self) -> int:
+        with self._lock:
+            return self._revision
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -215,6 +220,7 @@ class Corpus:
                         (safe_title, cleaned, len(cleaned), chash, safe_weight, meta_str, row["id"]),
                     )
                     self._conn.commit()
+                    self._revision += 1
                     return self.get_document(row["id"]) or {}
 
             if dedupe:
@@ -228,11 +234,16 @@ class Corpus:
                         (new_w, row["id"]),
                     )
                     self._conn.commit()
+                    self._revision += 1
                     doc = self.get_document(row["id"]) or {}
                     doc["merged"] = True
                     return doc
 
-            doc_id = uuid.uuid4().hex[:12]
+            # Derive the id from the content hash instead of a random UUID: the
+            # train/validation holdout is a hash of the document id, so random ids
+            # reshuffled the split on every import and made runs irreproducible
+            # even with identical corpus text and a fixed model seed.
+            doc_id = chash[:12]
             self._conn.execute(
                 """
                 INSERT INTO documents(id, title, source, url, kind, weight, chars, chash, added_at, meta_json, text)
@@ -253,6 +264,7 @@ class Corpus:
                 ),
             )
             self._conn.commit()
+            self._revision += 1
             doc = self.get_document(doc_id) or {}
             doc["merged"] = False
             return doc
@@ -298,7 +310,7 @@ class Corpus:
                             merged += 1
                             continue
 
-                    doc_id = str(raw.get("id") or uuid.uuid4().hex[:12])
+                    doc_id = str(raw.get("id") or chash[:12])
                     cur.execute(
                         """
                         INSERT OR REPLACE INTO documents(id, title, source, url, kind, weight, chars, chash, added_at, meta_json, text)
@@ -308,6 +320,8 @@ class Corpus:
                     )
                     accepted += 1
                 self._conn.commit()
+                if accepted or merged:
+                    self._revision += 1
             except Exception:
                 self._conn.rollback()
                 raise
@@ -317,13 +331,18 @@ class Corpus:
         with self._lock:
             cur = self._conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
             self._conn.commit()
-            return cur.rowcount > 0
+            if cur.rowcount > 0:
+                self._revision += 1
+                return True
+            return False
 
     def clear(self) -> int:
         with self._lock:
             n = self.count()
             self._conn.execute("DELETE FROM documents")
             self._conn.commit()
+            if n > 0:
+                self._revision += 1
             return n
 
     def dedupe(self) -> int:
@@ -343,7 +362,10 @@ class Corpus:
                 """
             )
             self._conn.commit()
-            return before - self.count()
+            removed = before - self.count()
+            if removed > 0:
+                self._revision += 1
+            return removed
 
     # -- Queries & streaming iteration ----------------------------------
     def count(self) -> int:

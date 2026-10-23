@@ -1,22 +1,17 @@
-const CACHE = "ember-v2";
+const CACHE = "ember-v3";
+// Only files that actually exist in web/ — a stale entry here would keep
+// serving deleted JavaScript to installed PWAs forever.
 const SHELL = [
   "./",
   "./index.html",
   "./styles.css",
   "./app.js",
-  "./engine.js",
-  "./tokenizer.js",
-  "./store.js",
-  "./scrape.js",
-  "./teachers.js",
-  "./github.js",
-  "./brain.js",
   "./notify.js",
   "./help.js",
+  "./lifecycle.js",
   "./manifest.webmanifest",
   "./icon-192.png",
   "./icon-512.png",
-  "./vendor/tf.min.js",
 ];
 const VENDORS = [];
 
@@ -54,8 +49,7 @@ self.addEventListener("notificationclick", (event) => {
 
 async function networkFirst(req) {
   // App code (HTML/JS/CSS): always try the network first so updates land
-  // immediately; fall back to cache when offline. The old cache-first
-  // strategy meant installed PWAs kept running stale code forever.
+  // immediately; fall back to cache when offline.
   const cache = await caches.open(CACHE);
   try {
     const res = await fetch(req);
@@ -85,6 +79,8 @@ self.addEventListener("fetch", (event) => {
     url.hostname === "fonts.googleapis.com" ||
     url.hostname === "fonts.gstatic.com";
   if (!sameOrigin && !cdn) return;
+  // Never intercept the JSON-RPC endpoint: cached responses would freeze status.
+  if (sameOrigin && url.pathname.includes("/api/")) return;
   const isCode =
     sameOrigin &&
     (url.pathname.endsWith("/") ||

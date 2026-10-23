@@ -119,6 +119,19 @@ def test_forward_logits_greedy_and_sliding_context_parity_after_training() -> No
                 )
                 assert py_g.token_ids == cpp_g.token_ids, f"Greedy decode diverged for prompt={prompt!r}"
                 assert py_g.text == cpp_g.text
+                assert py_g.stopped_by == cpp_g.stopped_by == "length"
+
+                # An over-length prompt must be reported identically on both sides:
+                # the C ABI summary is what carries the warning back to Python.
+                if len(py_g.token_ids) or len(prompt) > 60:
+                    pass
+                if len(be.trainer.tokenizer.encode(prompt)) + 1 > 24:
+                    assert cpp_g.warning is not None, "C++ must report context-window truncation"
+                    assert "context window" in cpp_g.warning
+                    assert py_g.warning is not None and "context window" in py_g.warning
+                    assert cpp_g.prompt_tokens == len(be.trainer.tokenizer.encode(prompt))
+                else:
+                    assert cpp_g.warning is None
 
             # 3. Seeded stochastic sampling parity (SplitMix64 + temperature + top-k + top-p + repetition penalty)
             py_s = reference_generate(

@@ -207,6 +207,8 @@ def check_params(cfg: ModelConfig, params: dict[str, np.ndarray]) -> None:
             )
         if got.dtype != np.float32:
             raise ValueError("tensor %s is %s, expected float32" % (name, got.dtype))
+        if not np.all(np.isfinite(got)):
+            raise ValueError("tensor %s contains non-finite values (NaN or Inf)" % name)
 
 
 # --------------------------------------------------------------------------

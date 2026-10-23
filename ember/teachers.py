@@ -79,6 +79,14 @@ class TeacherDesk:
         self.running = False
         saved = corpus.get_kv("teachers:state")
         self.state: dict[str, dict[str, Any]] = saved if isinstance(saved, dict) else {}
+        self.logs: list[dict[str, Any]] = []
+
+    def _log(self, line: str) -> None:
+        entry = {"at": int(time.time() * 1000), "line": line}
+        self.logs.append(entry)
+        if len(self.logs) > 200:
+            self.logs = self.logs[-200:]
+        self._emit("teachers.log", entry)
 
     def _window_ms(self, win_id: str) -> int:
         for w in WINDOWS:
@@ -132,6 +140,9 @@ class TeacherDesk:
     def enabled_ids(self) -> list[str]:
         return [d["id"] for d in self.descriptors() if d["state"]["on"]]
 
+    def _emit_state(self) -> None:
+        self._emit("teachers.state", {"teachers": self.descriptors(), "running": self.running})
+
     def update(self, teacher_id: str, fields: dict[str, Any]) -> list[dict[str, Any]]:
         tdef = next((t for t in TEACHER_DEFS if t["id"] == teacher_id), None)
         if tdef is None:
@@ -141,6 +152,8 @@ class TeacherDesk:
             for k in ("on", "window", "max", "accountId", "token"):
                 if k in fields:
                     s[k] = fields[k]
+            if fields.get("on") is True and int(s["used"]) < int(s["max"]):
+                s["exhausted"] = False
             if "window" in fields:
                 ms = self._window_ms(str(fields["window"]))
                 s["resetAt"] = int(time.time() * 1000) + ms if ms > 0 else 0
@@ -218,6 +231,11 @@ class TeacherDesk:
         s = self._entry_state(tdef)
         if int(s["used"]) >= int(s["max"]):
             s["exhausted"] = True
+            s["on"] = False
+            self.corpus.set_kv("teachers:state", self.state)
+            why = f"Quota cap reached ({s['used']}/{s['max']})."
+            self._emit("teachers.exhausted", {"id": teacher_id, "name": tdef["name"], "why": why})
+            self._emit_state()
             raise ValueError(f"{tdef['name']} quota reached ({s['used']}/{s['max']}).")
         try:
             text = self._call_provider(tdef, s, topic_clean)
@@ -225,6 +243,13 @@ class TeacherDesk:
                 raise ValueError("Teacher returned an empty response.")
             s["used"] = int(s["used"]) + 1
             s["lastError"] = ""
+            if int(s["used"]) >= int(s["max"]):
+                s["exhausted"] = True
+                s["on"] = False
+                self._emit(
+                    "teachers.exhausted",
+                    {"id": teacher_id, "name": tdef["name"], "why": f"Reached window cap ({s['max']})."},
+                )
             self.corpus.set_kv("teachers:state", self.state)
             return {
                 "id": teacher_id,
@@ -234,6 +259,20 @@ class TeacherDesk:
                 "text": text,
                 "chars": len(text),
             }
+        except urllib.error.HTTPError as exc:
+            s["lastError"] = f"HTTP {exc.code}: {exc.reason}"
+            if exc.code in (401, 402, 403, 429):
+                s["exhausted"] = True
+                s["on"] = False
+                self.corpus.set_kv("teachers:state", self.state)
+                self._emit(
+                    "teachers.exhausted",
+                    {"id": teacher_id, "name": tdef["name"], "why": f"Provider returned HTTP {exc.code}."},
+                )
+                self._emit_state()
+            else:
+                self.corpus.set_kv("teachers:state", self.state)
+            raise
         except Exception as exc:
             s["lastError"] = str(exc)
             self.corpus.set_kv("teachers:state", self.state)
@@ -261,6 +300,7 @@ class TeacherDesk:
             topics = ["astronomy", "world history", "biology", "physics"]
         self._stop.clear()
         self.running = True
+        self._emit_state()
 
         def _worker() -> None:
             accepted = 0
@@ -273,17 +313,12 @@ class TeacherDesk:
                         draft = self.ask(tdesc["id"], topic)
                         self.accept_draft(tdesc["id"], topic, draft["text"])
                         accepted += 1
-                        self._emit(
-                            "teachers.log",
-                            {"at": int(time.time() * 1000), "line": f"+ [{tdesc['name']}] {topic} ({draft['chars']} chars)"},
-                        )
+                        self._log(f"+ [{tdesc['name']}] {topic} ({draft['chars']} chars)")
                     except Exception as exc:
-                        self._emit(
-                            "teachers.log",
-                            {"at": int(time.time() * 1000), "line": f"! [{tdesc['name']}] {topic}: {exc}"},
-                        )
+                        self._log(f"! [{tdesc['name']}] {topic}: {exc}")
             finally:
                 self.running = False
+                self._emit_state()
                 self._emit("teachers.done", {"accepted": accepted})
 
         threading.Thread(target=_worker, name="ember-teachers", daemon=True).start()

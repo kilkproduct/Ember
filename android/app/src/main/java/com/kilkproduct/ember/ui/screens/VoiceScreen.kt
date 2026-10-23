@@ -80,7 +80,7 @@ fun VoiceScreen(
         item(key = "prompt") {
             EmberCard(
                 title = "Speak",
-                subtitle = "Generation runs in the JavaScript engine with your current weights.",
+                subtitle = "Generation runs in compiled native C++ on your current float32 weights.",
             ) {
                 EmberTextField(
                     label = "Prompt",
@@ -234,8 +234,14 @@ fun VoiceScreen(
                         }
                     }
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { vm.resetVoiceDefaults() }, enabled = !generating) {
-                        Text("Reset")
+                    if (generating) {
+                        TextButton(onClick = { vm.cancelGeneration() }) {
+                            Text("Stop")
+                        }
+                    } else {
+                        TextButton(onClick = { vm.resetVoiceDefaults() }) {
+                            Text("Reset")
+                        }
                     }
                     Spacer(Modifier.weight(1f))
                     Text(

@@ -155,10 +155,28 @@ class NativeInference {
         json
     }
 
-    /** Atomic lock-free cancellation safe to invoke from UI/main thread while `generate()` runs. */
+    /**
+     * Request cancellation from the UI thread without blocking it.
+     *
+     * The native handle must never be signalled after `close()` destroyed it, so
+     * this takes the lock when it is free. When the lock is *not* free a
+     * generation is in flight — and because `close()` also needs that lock, the
+     * handle is guaranteed to stay alive for the duration, making the lock-free
+     * signal safe in exactly the case where it must not wait.
+     */
     fun cancel() {
+        if (!libraryLoaded) return
+        if (lock.tryLock()) {
+            try {
+                val h = handle
+                if (h != 0L) nativeCancel(h)
+            } finally {
+                lock.unlock()
+            }
+            return
+        }
         val h = handle
-        if (h != 0L && libraryLoaded) {
+        if (h != 0L) {
             nativeCancel(h)
         }
     }

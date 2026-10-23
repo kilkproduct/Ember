@@ -12,6 +12,7 @@ data/tokenizer.json
 *.pt
 *.bin
 *.emb
+*.npz
 .DS_Store
 .arena/
 native/build/

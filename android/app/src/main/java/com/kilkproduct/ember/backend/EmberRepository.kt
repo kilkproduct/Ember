@@ -337,10 +337,23 @@ class EmberRepository private constructor(
         val data = event.data
         when (event.name) {
             "ready" -> {
-                if (data != null) applyStatus(EmberStatus.fromJson(data))
+                // The engine's `ready` event only carries `{backend: …}`. Parsing
+                // that as a status snapshot used to blank the model, corpus and
+                // checkpoint lists (and stop the foreground service). Accept a
+                // real snapshot when one is sent, otherwise refresh properly.
+                if (data != null && data.has("model")) {
+                    applyStatus(EmberStatus.fromJson(data))
+                } else {
+                    refreshStatus()
+                }
+            }
+            "fatal" -> {
+                val message = data?.stringOr("message") ?: "The local runtime failed to start."
+                _state.update { it.copy(backendError = message, initializing = false) }
+                addNotice(NoticeLevel.ERROR, "Engine failure", message)
             }
             "backend.error" -> {
-                val message = data?.stringOr("message", "The JavaScript engine reported an error.") ?: "The JavaScript engine reported an error."
+                val message = data?.stringOr("message", "The local runtime reported an error.") ?: "The local runtime reported an error."
                 _state.update { it.copy(backendError = message, initializing = false) }
             }
             "train.log" -> data?.let { appendLog(it, train = true) }
@@ -434,26 +447,7 @@ class EmberRepository private constructor(
             "import.progress" -> if (data != null) {
                 val token = data.stringOr("token")
                 if (token == currentImportToken) {
-                    _state.update {
-                        it.copy(
-                            importProgress = ImportProgress(
-                                token = token,
-                                processed = data.intOr("documents"),
-                                total = data.intOr("records").coerceAtLeast(data.intOr("documents")),
-                                percent = data.intOr("percent"),
-                                stage = data.stringOr("stage", "reading"),
-                                records = data.intOr("records"),
-                                merged = data.intOr("merged"),
-                                skipped = data.intOr("skipped"),
-                                failed = data.intOr("failed"),
-                                bytesRead = data.longOr("bytesRead"),
-                                sourceBytes = data.longOr("sourceBytes"),
-                                entries = data.intOr("entries"),
-                                message = data.stringOr("message"),
-                                elapsedMs = data.longOr("elapsedMs"),
-                            )
-                        )
-                    }
+                    _state.update { it.copy(importProgress = ImportProgress.fromJson(data)) }
                 }
             }
             "import.finished" -> if (data != null) {
@@ -1405,6 +1399,10 @@ class EmberRepository private constructor(
         }
     }
 
+    fun cancelGeneration() {
+        engine.cancelGeneration()
+    }
+
     // ---------------------------------------------------------------------
     // Checkpoints, brain export, safe save
     // ---------------------------------------------------------------------
@@ -1540,8 +1538,7 @@ class EmberRepository private constructor(
                 addNotice(
                     NoticeLevel.SUCCESS,
                     "File saved and verified",
-                    "${pending.filename} · ${Formats.bytes(pending.bytes)} written. " +
-                        "The same JSON imports again on any device (tested in tests/native-backend.test.mjs).",
+                    "${pending.filename} · ${Formats.bytes(pending.bytes)} written and verified on disk.",
                 )
             } catch (e: CancellationException) {
                 throw e
@@ -1820,7 +1817,12 @@ class EmberRepository private constructor(
 
     fun clearFileCaches() {
         engine.clearCaches()
-        addNotice(NoticeLevel.INFO, "Temporary files cleared", "Any unfinished import or export was discarded.")
+        addNotice(
+            NoticeLevel.INFO,
+            "Temporary files cleared",
+            "Prepared exports were discarded. Staged imports stay on this device, so a paused import can still resume.",
+        )
+        refreshPendingImports()
     }
 
     fun dismissBackendError() {

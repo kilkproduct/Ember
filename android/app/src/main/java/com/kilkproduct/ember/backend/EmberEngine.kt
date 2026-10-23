@@ -17,6 +17,8 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import org.json.JSONObject
@@ -93,6 +95,9 @@ class EmberEngine private constructor(private val app: Application) {
     private val started = AtomicBoolean(false)
     private var ready = CompletableDeferred<Unit>()
 
+    /** Serializes interpreter start/restart so they can never overlap. */
+    private val lifecycle = Mutex()
+
     private val _events = MutableSharedFlow<EngineEvent>(extraBufferCapacity = 1024)
     val events: SharedFlow<EngineEvent> = _events.asSharedFlow()
 
@@ -132,8 +137,21 @@ class EmberEngine private constructor(private val app: Application) {
     private val callbackBridge = PythonCallbackBridge()
 
     fun start() {
-        if (!started.compareAndSet(false, true)) return
         ioScope.launch {
+            lifecycle.withLock { startLocked() }
+        }
+    }
+
+    /**
+     * Bring up Chaquopy + `ember.backend` and the native library.
+     *
+     * Callers must hold [lifecycle]: start and restart share this body, and
+     * without the lock a restart can tear down the interpreter while the first
+     * start is still initializing it.
+     */
+    private suspend fun startLocked() {
+        if (!started.compareAndSet(false, true)) return
+        withContext(Dispatchers.IO) {
             cleanupCaches()
             try {
                 NativeInference.ensureLibraryLoaded()
@@ -167,19 +185,33 @@ class EmberEngine private constructor(private val app: Application) {
         }
     }
 
-    fun restart() {
-        ioScope.launch {
-            try {
-                pyModule?.callAttr("shutdown_android")
-            } catch (_: Throwable) {
+    /**
+     * Tear the embedded runtime down and bring it back up, waiting until it is
+     * actually ready.
+     *
+     * This suspends: the previous implementation only *launched* the restart, so
+     * `awaitReady()` right after it observed the old, already-completed readiness
+     * and the next RPC hit an interpreter that was being shut down — surfacing as
+     * "Python backend has not been initialized yet" and a dead engine screen.
+     */
+    suspend fun restart(timeoutMs: Long = 90_000) {
+        withContext(Dispatchers.IO) {
+            lifecycle.withLock {
+                val previous = pyModule
+                pyModule = null
+                nativeInference.close()
+                try {
+                    previous?.callAttr("shutdown_android")
+                } catch (_: Throwable) {
+                    // A dead interpreter is exactly what restart is cleaning up.
+                }
+                started.set(false)
+                startupError = null
+                ready = CompletableDeferred()
+                startLocked()
             }
-            nativeInference.close()
-            pyModule = null
-            startupError = null
-            ready = CompletableDeferred()
-            started.set(false)
-            start()
         }
+        awaitReady(timeoutMs)
     }
 
     fun cancelGeneration() {
@@ -223,7 +255,9 @@ class EmberEngine private constructor(private val app: Application) {
         // Route actual text generation directly through compiled native C++ inference
         if (method == "gen.run") {
             return withTimeout(timeoutMs) {
-                val prep = invokePythonRpc("gen.prepare", params)
+                // gen.prepare runs Python (corpus retrieval + an atomic active.emb
+                // rewrite), so it must never execute on the caller's UI thread.
+                val prep = withContext(Dispatchers.IO) { invokePythonRpc("gen.prepare", params) }
                 val formattedPrompt = prep.optString("formattedPrompt", params.optString("prompt", ""))
                 val modelPath = prep.optString("modelPath", activeModelPath)
                 val tokPath = prep.optString("tokenizerPath", activeTokPath)

@@ -71,6 +71,23 @@ EMBER_API int ember_engine_generate(
     size_t max_bytes
 );
 
+/*
+ * JSON summary of the most recent ember_engine_generate() call on this handle:
+ *   {"warning": "...", "stoppedBy": "eos|length|cancelled",
+ *    "promptTokens": N, "newTokens": N}
+ *
+ * `ember_engine_generate` returns only the generated-token count, so without
+ * this accessor callers cannot tell the user that an over-long prompt was
+ * truncated to the context window or that generation stopped on <eos>.
+ * Returns the JSON byte length (excluding the NUL), or -1 on error / when the
+ * buffer is too small.
+ */
+EMBER_API int ember_engine_last_generate_summary(
+    ember_engine_t* engine,
+    char* out_json,
+    size_t max_bytes
+);
+
 #ifdef __cplusplus
 }
 #endif

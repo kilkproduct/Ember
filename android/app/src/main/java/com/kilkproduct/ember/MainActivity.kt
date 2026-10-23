@@ -324,7 +324,7 @@ private fun EmberApp(vm: MainViewModel) {
                                         Tab.VESSEL -> VesselScreen(
                                             ui = ui,
                                             vm = vm,
-                                            onPickBrain = { importLauncher.launch(arrayOf("application/json")) },
+                                            onPickBrain = { importLauncher.launch(arrayOf("*/*")) },
                                             onOpenExport = { sheetName = SheetId.EXPORT.name },
                                             onOpenStatus = { sheetName = SheetId.STATUS.name },
                                             onOpenGithub = { sheetName = SheetId.GITHUB.name },
@@ -505,7 +505,7 @@ private fun EngineBootPane(onRetry: () -> Unit) {
         )
         Spacer(Modifier.height(6.dp))
         Text(
-            text = "TensorFlow.js and your saved corpus load from this device. " +
+            text = "Embedded Python, native C++ inference, and your saved corpus load on this device. " +
                 "The first start after an update can take a few seconds.",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,

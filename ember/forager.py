@@ -28,9 +28,11 @@ class Forager:
         self,
         corpus: Corpus,
         emit_event: Callable[[str, dict[str, Any]], None],
+        auto_fire_cb: Callable[[], None] | None = None,
     ) -> None:
         self.corpus = corpus
         self._emit = emit_event
+        self._auto_fire_cb = auto_fire_cb
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
@@ -41,6 +43,7 @@ class Forager:
         self.started_at = 0
         self.error: str | None = None
         self.saved_state: dict[str, Any] | None = corpus.get_kv("forager:autosave")
+        self.logs: list[dict[str, Any]] = []
 
     def status(self) -> dict[str, Any]:
         return {
@@ -79,7 +82,11 @@ class Forager:
         return {"stopping": True}
 
     def _log(self, line: str) -> None:
-        self._emit("forage.log", {"at": int(time.time() * 1000), "line": line})
+        entry = {"at": int(time.time() * 1000), "line": line}
+        self.logs.append(entry)
+        if len(self.logs) > 200:
+            self.logs = self.logs[-200:]
+        self._emit("forage.log", entry)
 
     def _accept(self, title: str, text: str, source: str, url: str = "", meta: dict | None = None) -> bool:
         cleaned = clean_document_text(text, strip_html=True)
@@ -98,6 +105,16 @@ class Forager:
             self.documents_accepted += 1
             self.last_document = doc.get("title", title)
             self._log(f"+ [{source}] {self.last_document} ({len(cleaned)} chars)")
+            self._emit(
+                "forage.doc",
+                {
+                    "title": self.last_document,
+                    "source": source,
+                    "url": url,
+                    "chars": len(cleaned),
+                    "documentsAccepted": self.documents_accepted,
+                },
+            )
             self._emit("corpus.changed", self.corpus.summary())
             return True
         return False
@@ -156,10 +173,20 @@ class Forager:
                 self.saved_state["running"] = False
                 self.corpus.set_kv("forager:autosave", self.saved_state)
             self._log(f"Foraging finished ({self.documents_accepted} new documents).")
-            self._emit(
-                "forage.done",
-                {"accepted": self.documents_accepted, "stopped": self._stop.is_set()},
-            )
+            payload = {
+                "documentsAccepted": self.documents_accepted,
+                "accepted": self.documents_accepted,
+                "stopped": self._stop.is_set(),
+                "error": self.error,
+                "corpus": self.corpus.summary(),
+            }
+            self._emit("forage.finished", payload)
+            self._emit("forage.done", payload)
+            if opts.get("autoFire") and self.documents_accepted > 0 and not self._stop.is_set() and self._auto_fire_cb:
+                try:
+                    self._auto_fire_cb()
+                except Exception:
+                    pass
 
     def _fetch_wikipedia(self, topic: str, wander_queue: list[str] | None) -> None:
         langs = ["simple", "en"]

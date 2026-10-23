@@ -61,9 +61,95 @@ jobs:
           ASAN_OPTIONS=detect_leaks=1 ./native/build/test_native_asan
           rm -f native/build/test_native_asan
 
+      - name: Run native C++ tests under ThreadSanitizer (concurrency regression gate)
+        run: |
+          # The BPE encode cache is shared by the JNI generation thread and the
+          # Python ctypes bridge; an unguarded insert races and corrupts the hash
+          # table mid-generation. TSan must stay silent.
+          cmake -S native -B native/build-tsan -DCMAKE_BUILD_TYPE=Debug \
+            -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1 -Wall -Wextra -Werror"
+          cmake --build native/build-tsan -j
+          TSAN_OPTIONS="halt_on_error=1" ./native/build-tsan/test_native
+          rm -rf native/build-tsan
+
       - name: Run Python backend & Python-to-C++ interoperability tests
         run: |
+          # Covers ember/* unit + integration tests, Python↔C++ tokenizer/logit/
+          # decoding parity, the Android (Kotlin) JSON wire contract, and the
+          # browser client contract (module exports, element ids, RPC methods).
           pytest -v tests/
+
+      - name: End-to-end runtime smoke test through run.sh (HTTP → Python → native C++)
+        run: |
+          set -o pipefail
+          rm -rf /tmp/ember-e2e && mkdir -p /tmp/ember-e2e
+          python3 -m ember.server --host 127.0.0.1 --port 8123 --data-dir /tmp/ember-e2e > /tmp/ember-server.log 2>&1 &
+          SERVER_PID=$!
+          trap 'kill $SERVER_PID 2>/dev/null || true' EXIT
+          python3 - <<'PY'
+          import json, time, urllib.request
+
+          BASE = "http://127.0.0.1:8123/api/rpc"
+
+          def call(method, params=None, timeout=300):
+              req = urllib.request.Request(
+                  BASE,
+                  data=json.dumps({"method": method, "params": params or {}}).encode("utf-8"),
+                  headers={"Content-Type": "application/json"},
+                  method="POST",
+              )
+              with urllib.request.urlopen(req, timeout=timeout) as resp:
+                  body = json.loads(resp.read().decode("utf-8"))
+              assert body.get("ok"), f"{method} failed: {body.get('error')}"
+              return body["result"]
+
+          deadline = time.time() + 90
+          while time.time() < deadline:
+              try:
+                  call("ping", timeout=5)
+                  break
+              except Exception:
+                  time.sleep(0.5)
+          else:
+              raise SystemExit("server never answered ping")
+
+          info = call("runtime.info")
+          print("runtime:", info["runtime"], "native:", info["nativeAvailable"])
+
+          added = call("corpus.addPack", {"pack": "starter"})
+          assert added["added"] >= 5, added
+
+          cast = call("vessel.cast", {
+              "config": {"nLayer": 2, "nHead": 2, "nEmbd": 48, "blockSize": 32, "vocabSize": 500},
+              "lr": 2e-3,
+          })
+          assert cast["model"]["ready"] is True
+          assert cast["model"]["config"]["nEmbd"] == 48, "nested Android config shape must be honoured"
+
+          run = call("train.sync", {"steps": 6, "batch": 2, "lr": 2e-3, "every": 0, "validateEvery": 3})
+          assert run["completedSteps"] == 6, run
+
+          gen = call("gen.run", {
+              "prompt": "Stars appear to move",
+              "maxNew": 16,
+              "temperature": 0.0,
+              "topK": 1,
+              "seed": "4242",
+              "stopOnBoundary": False,
+          })
+          assert gen["newTokens"] == 16, gen
+          assert isinstance(gen["text"], str)
+          print("generated:", repr(gen["text"][:60]), "| meta:", gen["meta"])
+
+          status = call("status")
+          assert status["model"]["step"] == 6
+          assert status["checkpoints"], "autosave checkpoint must exist after training"
+          print("SMOKE TEST OK")
+          PY
+          kill $SERVER_PID 2>/dev/null || true
+          trap - EXIT
+          echo "--- server log tail ---"
+          tail -5 /tmp/ember-server.log || true
 
       - name: Test Android unit suite and assemble debug APK (NDK CMake + Chaquopy Python 3.13)
         working-directory: android

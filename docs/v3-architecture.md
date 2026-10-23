@@ -105,3 +105,70 @@ Configurations exceeding 512 MB estimated training footprint are blocked prior t
 Legacy `ember-brain` v1–v3 JSON exports from the removed TensorFlow.js engine are detected explicitly during file inspection and import:
 - Weights from legacy JS brains are rejected with a clear message identifying the legacy format version rather than failing silently.
 - Any `corpusDocs` embedded inside a legacy brain export are automatically recovered into the SQLite corpus so the user can cast and train a v3 model immediately without losing training material.
+
+---
+
+## 6. Cross-Boundary Invariants Added by the Debugging Pass
+
+These invariants are enforced by tests, not conventions. Each one existed as a
+silent failure mode before it was pinned down.
+
+### 6.1 Event and payload contract (Python → Kotlin)
+
+`EmberRepository.handleEvent` only reacts to these names, so the Python backend
+must emit exactly them:
+
+| Event | Payload contract | Consumer |
+| --- | --- | --- |
+| `train.progress` | `TrainingProgress` keys incl. `until`, `startStep` | header/Fire progress bar |
+| `train.validation` | `step, loss, bestLoss, ppl, windows` | Heat chart markers |
+| `train.sample` | `step, text, tokensPerSec` | Live samples |
+| `train.autosave` | `name, step, bytes, mtime` | "Autosave written" notice |
+| `train.finished` | `outcome, error, model, corpus` | completion/douse/failure notices |
+| `model.castProgress` | full `ModelStatus` (incl. `castProgress`, `castStage`) | Vessel progress bar |
+| `model.cast` | full `ModelStatus` | clears `casting` |
+| `model.imported` | full `ModelStatus` | brain import |
+| `corpus.changed` | `CorpusSummary` | Fuel counters |
+| `forage.doc` / `forage.finished` | `title, documentsAccepted` / `+ error, corpus` | Fuel forage panel |
+| `teachers.state` / `teachers.exhausted` | `teachers[], running` / `name, why` | Teachers tab |
+| `import.progress` / `import.finished` | `ImportProgress` keys / `token, outcome` | Import sheet |
+
+`train.done` is still emitted as an alias for non-Android consumers.
+`tests/test_android_contract.py` asserts every payload key; the Kotlin mirror is
+`android/app/src/test/.../EmberV3ContractTest.kt`.
+
+### 6.2 Generation summary over the C ABI
+
+`ember_engine_generate` returns only a token count, so the context-truncation
+warning and the stop reason travel through
+`ember_engine_last_generate_summary()` (JSON: `warning`, `stoppedBy`,
+`promptTokens`, `newTokens`, `seed`, `elapsedMs`, `tokensPerSec`). The Python
+ctypes bridge reads it, which is why `gen.run` can report "prompt exceeded the
+context window" when generation ran in C++ instead of NumPy.
+
+### 6.3 Deterministic identity and reproducibility
+
+* Document ids are `blake2b(normalized text)[:12]`, not random UUIDs. The
+  train/validation holdout is a hash of the document id, so random ids used to
+  reshuffle the split on every import.
+* `vessel.cast` accepts an optional `seed`; with a fixed seed and identical
+  corpus text, casting and training are bit-reproducible
+  (`test_cast_is_reproducible_with_an_explicit_seed`).
+* Nested Android cast payloads (`{"config": {...}, "lr": ...}`) and flat
+  desktop payloads are both accepted by `vessel.cast` / `vessel.estimate`.
+
+### 6.4 Native memory and concurrency gates
+
+`native/tests/test_native.cpp` runs clean under three toolchains in CI:
+
+* `-O3` release,
+* `-fsanitize=address,undefined -Wall -Wextra -Werror` with LeakSanitizer,
+* `-fsanitize=thread` (the BPE encode cache is shared by the JNI thread and the
+  Python bridge; it is mutex-guarded, and the concurrency test deliberately
+  exercises the uncached write path).
+
+Model loading additionally rejects integer-overflow tensor shapes, truncated
+payloads, duplicate tensors, and non-finite (NaN/Inf) weights *before* the model
+is marked ready, so corrupt files can never produce NaN logits on device.
+Decoding sanitizes UTF-8 with maximal-subpart U+FFFD replacement to match Python
+`bytes.decode("utf-8", errors="replace")`, including embedded NUL bytes.

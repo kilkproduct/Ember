@@ -35,6 +35,17 @@ std::vector<std::string> pretokenize_bytes(const uint8_t* data, size_t len);
 
 class BPETokenizer {
 public:
+    BPETokenizer() = default;
+    // The encode cache is guarded by a mutex, which is neither copyable nor
+    // movable, so the transfer operations are written explicitly: they move the
+    // vocabulary/merge tables and the cache contents, and leave a fresh mutex
+    // behind. `Engine::load` relies on move-assignment to swap in a validated
+    // tokenizer without ever exposing a half-loaded one to readers.
+    BPETokenizer(const BPETokenizer&) = delete;
+    BPETokenizer& operator=(const BPETokenizer&) = delete;
+    BPETokenizer(BPETokenizer&& other) noexcept;
+    BPETokenizer& operator=(BPETokenizer&& other) noexcept;
+
     bool load_from_json(const std::string& json_text, std::string& error);
     bool load_from_file(const std::string& path, std::string& error);
 
@@ -53,6 +64,7 @@ private:
     std::vector<std::string> vocab_;  // raw byte sequences
     std::unordered_map<std::string, int32_t> token_to_id_;
     std::unordered_map<std::string, int32_t> pair_ranks_;
+    mutable std::mutex cache_mu_;
     mutable std::unordered_map<std::string, std::vector<int32_t>> cache_;
 };
 

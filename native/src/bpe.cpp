@@ -3,6 +3,7 @@
 #include <fstream>
 #include <limits>
 #include <sstream>
+#include <utility>
 
 #include "json_min.hpp"
 
@@ -41,10 +42,73 @@ inline std::string make_pair_key(const std::string& a, const std::string& b) {
     return key;
 }
 
+// RFC-3629 + Unicode Standard Table 3-7 UTF-8 validation with maximal-subpart
+// U+FFFD replacement so C++ decoding matches Python `bytes.decode("utf-8", errors="replace")`
+// identically across valid Unicode, embedded NULs, lone continuations, surrogates, and truncated sequences.
+std::string sanitize_utf8(const std::string& raw) {
+    static constexpr const char* kReplacement = "\xEF\xBF\xBD";
+    std::string out;
+    out.reserve(raw.size());
+    const auto* s = reinterpret_cast<const uint8_t*>(raw.data());
+    const size_t n = raw.size();
+    size_t i = 0;
+    while (i < n) {
+        const uint8_t b0 = s[i];
+        if (b0 <= 0x7F) {
+            out.push_back(static_cast<char>(b0));
+            i += 1;
+        } else if (b0 >= 0xC2 && b0 <= 0xDF) {
+            if (i + 1 < n && (s[i + 1] & 0xC0) == 0x80) {
+                out.append(reinterpret_cast<const char*>(s + i), 2);
+                i += 2;
+            } else {
+                out.append(kReplacement, 3);
+                i += 1;
+            }
+        } else if (b0 >= 0xE0 && b0 <= 0xEF) {
+            const uint8_t lo1 = (b0 == 0xE0) ? 0xA0 : 0x80;
+            const uint8_t hi1 = (b0 == 0xED) ? 0x9F : 0xBF;
+            if (i + 1 >= n || s[i + 1] < lo1 || s[i + 1] > hi1) {
+                out.append(kReplacement, 3);
+                i += 1;
+            } else if (i + 2 >= n || (s[i + 2] & 0xC0) != 0x80) {
+                out.append(kReplacement, 3);
+                i += 2;
+            } else {
+                out.append(reinterpret_cast<const char*>(s + i), 3);
+                i += 3;
+            }
+        } else if (b0 >= 0xF0 && b0 <= 0xF4) {
+            const uint8_t lo1 = (b0 == 0xF0) ? 0x90 : 0x80;
+            const uint8_t hi1 = (b0 == 0xF4) ? 0x8F : 0xBF;
+            if (i + 1 >= n || s[i + 1] < lo1 || s[i + 1] > hi1) {
+                out.append(kReplacement, 3);
+                i += 1;
+            } else if (i + 2 >= n || (s[i + 2] & 0xC0) != 0x80) {
+                out.append(kReplacement, 3);
+                i += 2;
+            } else if (i + 3 >= n || (s[i + 3] & 0xC0) != 0x80) {
+                out.append(kReplacement, 3);
+                i += 3;
+            } else {
+                out.append(reinterpret_cast<const char*>(s + i), 4);
+                i += 4;
+            }
+        } else {
+            out.append(kReplacement, 3);
+            i += 1;
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 std::vector<std::string> pretokenize_bytes(const uint8_t* data, size_t len) {
     std::vector<std::string> out;
+    if (!data || len == 0) {
+        return out;
+    }
     size_t i = 0;
     while (i < len) {
         int cls = byte_class(data[i]);
@@ -83,6 +147,34 @@ std::vector<std::string> pretokenize_bytes(const uint8_t* data, size_t len) {
     return out;
 }
 
+BPETokenizer::BPETokenizer(BPETokenizer&& other) noexcept {
+    std::lock_guard<std::mutex> lock(other.cache_mu_);
+    vocab_ = std::move(other.vocab_);
+    token_to_id_ = std::move(other.token_to_id_);
+    pair_ranks_ = std::move(other.pair_ranks_);
+    cache_ = std::move(other.cache_);
+}
+
+BPETokenizer& BPETokenizer::operator=(BPETokenizer&& other) noexcept {
+    if (this == &other) {
+        return *this;
+    }
+    // Lock both caches in a fixed address order so two concurrent moves can
+    // never deadlock (Engine::load serializes moves in practice).
+    std::mutex* first = &cache_mu_;
+    std::mutex* second = &other.cache_mu_;
+    if (first > second) {
+        std::swap(first, second);
+    }
+    std::lock_guard<std::mutex> lock_a(*first);
+    std::lock_guard<std::mutex> lock_b(*second);
+    vocab_ = std::move(other.vocab_);
+    token_to_id_ = std::move(other.token_to_id_);
+    pair_ranks_ = std::move(other.pair_ranks_);
+    cache_ = std::move(other.cache_);
+    return *this;
+}
+
 bool BPETokenizer::load_from_file(const std::string& path, std::string& error) {
     std::ifstream in(path, std::ios::binary);
     if (!in) {
@@ -116,18 +208,27 @@ bool BPETokenizer::load_from_json(const std::string& json_text, std::string& err
             return false;
         }
         const auto& v_arr = root.at("vocab");
-        if (v_arr.type != json::Type::Array || static_cast<int32_t>(v_arr.arr.size()) < kFirstMergeId) {
-            error = "Tokenizer vocabulary is incomplete (< 261 entries).";
+        if (v_arr.type != json::Type::Array ||
+            static_cast<int64_t>(v_arr.arr.size()) < kFirstMergeId ||
+            v_arr.arr.size() > 262144) {
+            error = "Tokenizer vocabulary size is invalid (expected 261..262144 entries).";
             return false;
         }
 
         vocab_.clear();
         token_to_id_.clear();
         pair_ranks_.clear();
-        cache_.clear();
+        {
+            std::lock_guard<std::mutex> lock(cache_mu_);
+            cache_.clear();
+        }
 
         vocab_.reserve(v_arr.arr.size());
         for (size_t i = 0; i < v_arr.arr.size(); ++i) {
+            if (v_arr.arr[i].type != json::Type::String) {
+                error = "Tokenizer vocab entry " + std::to_string(i) + " is not a string.";
+                return false;
+            }
             const std::string& raw = v_arr.arr[i].latin1;
             vocab_.push_back(raw);
             token_to_id_[raw] = static_cast<int32_t>(i);
@@ -151,9 +252,12 @@ bool BPETokenizer::load_from_json(const std::string& json_text, std::string& err
 }
 
 std::vector<int32_t> BPETokenizer::encode_chunk(const std::string& chunk) const {
-    auto it_cache = cache_.find(chunk);
-    if (it_cache != cache_.end()) {
-        return it_cache->second;
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        auto it_cache = cache_.find(chunk);
+        if (it_cache != cache_.end()) {
+            return it_cache->second;
+        }
     }
 
     std::vector<std::string> word;
@@ -203,7 +307,11 @@ std::vector<int32_t> BPETokenizer::encode_chunk(const std::string& chunk) const 
         ids.push_back(it != token_to_id_.end() ? it->second : kSpecialUnk);
     }
 
-    if (cache_.size() < 65536) {
+    {
+        std::lock_guard<std::mutex> lock(cache_mu_);
+        if (cache_.size() >= 16384) {
+            cache_.clear();
+        }
         cache_.emplace(chunk, ids);
     }
     return ids;
@@ -211,7 +319,7 @@ std::vector<int32_t> BPETokenizer::encode_chunk(const std::string& chunk) const 
 
 std::vector<int32_t> BPETokenizer::encode(const uint8_t* data, size_t len) const {
     std::vector<int32_t> out;
-    if (len == 0 || !ready()) {
+    if (!data || len == 0 || !ready()) {
         return out;
     }
     auto chunks = pretokenize_bytes(data, len);
@@ -223,7 +331,10 @@ std::vector<int32_t> BPETokenizer::encode(const uint8_t* data, size_t len) const
 }
 
 std::string BPETokenizer::decode(const int32_t* ids, size_t n, bool skip_special) const {
-    std::string out;
+    if (!ids || n == 0 || !ready()) {
+        return {};
+    }
+    std::string raw;
     for (size_t i = 0; i < n; ++i) {
         int32_t id = ids[i];
         if (id < 0 || id >= static_cast<int32_t>(vocab_.size())) {
@@ -232,9 +343,9 @@ std::string BPETokenizer::decode(const int32_t* ids, size_t n, bool skip_special
         if (skip_special && id >= kBaseVocab && id < kFirstMergeId) {
             continue;
         }
-        out.append(vocab_[id]);
+        raw.append(vocab_[id]);
     }
-    return out;
+    return sanitize_utf8(raw);
 }
 
 }  // namespace ember

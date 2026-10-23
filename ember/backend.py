@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import os
 import platform
-import sys
 import threading
 import time
 import uuid
@@ -17,9 +16,18 @@ import numpy as np
 from .corpus import Corpus
 from .forager import Forager
 from .ingest import ImportManager
+from .model import FORMAT_MAGIC
 from .packs import get_pack
 from .teachers import WINDOWS, TeacherDesk, github_head, github_pull_brain, github_push_brain
 from .trainer import Trainer, estimate_vessel
+
+PACK_TITLES = {
+    "starter": "Public-domain starter",
+    "topic": "Topic-training pack",
+    "translation": "Translation lessons",
+    "research": "Research / QA lessons",
+    "skills": "General-skills lessons",
+}
 
 
 def format_task_prompt(
@@ -34,7 +42,7 @@ def format_task_prompt(
     p = (prompt or "").strip()
     t = (task or "continue").strip().lower()
     if t == "translate":
-        lang = (language or "Spanish").strip()
+        lang = (language or "Spanish").strip() or "Spanish"
         return f"### Task: Translate to {lang}\n### Input:\n{p}\n\n### Response:\n"
     if t == "summarize":
         return f"### Task: Summarize\n### Input:\n{p}\n\n### Response:\n"
@@ -75,11 +83,15 @@ class EmberBackend:
             emit_event=self.emit,
             on_model_synced=self._handle_model_synced,
         )
-        self.forager = Forager(self.corpus, emit_event=self.emit)
+        self.forager = Forager(
+            self.corpus,
+            emit_event=self.emit,
+            auto_fire_cb=self._maybe_auto_fire_after_forage,
+        )
         self.teachers = TeacherDesk(self.corpus, emit_event=self.emit)
         self.autosave = self.trainer.probe_autosave()
 
-        # Automatically restore active.emb if saved from a previous app session
+        # Automatically restore active.emb + active.tok.json (+ active.opt.npz) across app restarts
         if self.trainer.active_model_path.exists() and self.trainer.active_tokenizer_path.exists():
             try:
                 from .model import GPT, load_model
@@ -92,11 +104,25 @@ class EmberBackend:
                 self.trainer.tokenizer = tok
                 self.trainer.model = GPT(cfg, params=params)
                 self.trainer.optimizer = AdamW(self.trainer.model.params, lr=3e-4)
+                if self.trainer.active_optimizer_path.exists():
+                    try:
+                        self.trainer.optimizer.load_npz(self.trainer.active_optimizer_path)
+                    except Exception:
+                        pass
                 self.trainer.step = int(meta.get("step", 0))
                 self.trainer.rebuild_streams_if_needed()
+                if self.trainer._native.available:
+                    try:
+                        self.trainer._native.load(self.trainer.active_model_path, self.trainer.active_tokenizer_path)
+                    except Exception:
+                        pass
                 self._handle_model_synced(self.trainer.active_model_path, self.trainer.active_tokenizer_path)
             except Exception:
                 pass
+
+    def _maybe_auto_fire_after_forage(self) -> None:
+        if self.trainer.ready and not self.trainer.running and not self.trainer.starting:
+            self.trainer.start_background({"steps": 40, "batch": 2, "lr": 3e-4})
 
     def _handle_model_synced(self, model_path: Path, tok_path: Path) -> None:
         if self._model_sync_cb is not None:
@@ -116,6 +142,7 @@ class EmberBackend:
         self.trainer.stop()
         self.forager.stop()
         self.teachers.stop_auto()
+        self.trainer._native.close()
         self.corpus.close()
 
     # ------------------------------------------------------------------
@@ -159,6 +186,8 @@ class EmberBackend:
             "validations": self.trainer.validations[-120:],
             "samples": self.trainer.samples[:8],
             "trainLog": self.trainer.train_log[-120:],
+            "forageLog": self.forager.logs[-120:],
+            "teacherLog": self.teachers.logs[-120:],
         }
 
     # ------------------------------------------------------------------
@@ -168,7 +197,7 @@ class EmberBackend:
         transfer_id = uuid.uuid4().hex[:12]
         safe_name = "".join(c if c.isalnum() or c in "._-" else "_" for c in filename)[:120] or "ember-brain.json"
         out_path = self.exports_dir / f"{transfer_id}-{safe_name}"
-        raw = json.dumps(payload_obj, ensure_ascii=True).encode("utf-8")
+        raw = payload_obj if isinstance(payload_obj, (bytes, bytearray)) else json.dumps(payload_obj, ensure_ascii=True).encode("utf-8")
         tmp = str(out_path) + ".tmp"
         with open(tmp, "wb") as fh:
             fh.write(raw)
@@ -232,29 +261,47 @@ class EmberBackend:
                 weight=int(p.get("weight") or 1),
                 kind=str(p.get("kind") or "page"),
             )
-            self.emit("corpus.changed", self.corpus.summary())
-            return {"doc": doc, "merged": bool(doc.get("merged", False))}
+            summary = self.corpus.summary()
+            self.emit("corpus.changed", summary)
+            return {
+                "doc": doc,
+                "document": doc,
+                "corpus": summary,
+                "merged": bool(doc.get("merged", False)),
+            }
 
         if method == "corpus.addPack":
-            docs = get_pack(str(p.get("pack") or p.get("id") or "starter"))
+            pack_id = str(p.get("pack") or p.get("id") or "starter")
+            docs = get_pack(pack_id)
             counts = self.corpus.add_many(docs)
-            self.emit("corpus.changed", self.corpus.summary())
-            return {"added": counts["accepted"], "merged": counts["merged"], "total": len(docs)}
+            summary = self.corpus.summary()
+            self.emit("corpus.changed", summary)
+            return {
+                "pack": pack_id,
+                "title": PACK_TITLES.get(pack_id, f"{pack_id.capitalize()} pack"),
+                "added": counts["accepted"],
+                "merged": counts["merged"],
+                "total": len(docs),
+                "corpus": summary,
+            }
 
         if method == "corpus.remove":
             removed = self.corpus.remove(str(p.get("id") or ""))
-            self.emit("corpus.changed", self.corpus.summary())
-            return {"removed": removed}
+            summary = self.corpus.summary()
+            self.emit("corpus.changed", summary)
+            return {"removed": removed, "corpus": summary}
 
         if method == "corpus.clear":
             removed = self.corpus.clear()
-            self.emit("corpus.changed", self.corpus.summary())
-            return {"cleared": True, "removed": removed}
+            summary = self.corpus.summary()
+            self.emit("corpus.changed", summary)
+            return {"cleared": True, "removed": removed, "corpus": summary}
 
         if method == "corpus.dedupe":
             removed = self.corpus.dedupe()
-            self.emit("corpus.changed", self.corpus.summary())
-            return {"removed": removed}
+            summary = self.corpus.summary()
+            self.emit("corpus.changed", summary)
+            return {"removed": removed, "corpus": summary}
 
         if method == "lesson.add":
             prompt_txt = str(p.get("prompt") or "").strip()
@@ -270,8 +317,9 @@ class EmberBackend:
                 kind="lesson",
                 weight=weight,
             )
-            self.emit("corpus.changed", self.corpus.summary())
-            return {"doc": doc}
+            summary = self.corpus.summary()
+            self.emit("corpus.changed", summary)
+            return {"doc": doc, "document": doc, "corpus": summary}
 
         # -- Dataset & Brain File Ingestion -----------------------------
         if method == "file.inspectText":
@@ -303,6 +351,7 @@ class EmberBackend:
                 path=p.get("path"),
                 on_progress=lambda prog: self.emit("import.progress", prog),
             )
+            self.emit("import.finished", {"token": tok, "outcome": res.get("outcome", "completed")})
             self.emit("corpus.changed", self.corpus.summary())
             return res
 
@@ -348,15 +397,18 @@ class EmberBackend:
                 "losses": self.trainer.losses[-400:],
                 "validations": self.trainer.validations[-120:],
                 "samples": self.trainer.samples[:8],
+                "forageLog": self.forager.logs[-120:],
+                "teacherLog": self.teachers.logs[-120:],
             }
 
         # -- Prompt preparation & generation ----------------------------
         if method == "gen.prepare":
+            lang = str(p.get("language") or p.get("lang") or "Spanish")
             formatted = format_task_prompt(
                 self.corpus,
                 str(p.get("prompt") or ""),
                 task=str(p.get("task") or "continue"),
-                language=str(p.get("language") or "Spanish"),
+                language=lang,
                 subreddit=str(p.get("subreddit") or ""),
             )
             mpath, tpath = self.trainer._sync_active_files()
@@ -367,18 +419,22 @@ class EmberBackend:
             }
 
         if method == "gen.run":
+            lang = str(p.get("language") or p.get("lang") or "Spanish")
             formatted = format_task_prompt(
                 self.corpus,
                 str(p.get("prompt") or ""),
                 task=str(p.get("task") or "continue"),
-                language=str(p.get("language") or "Spanish"),
+                language=lang,
                 subreddit=str(p.get("subreddit") or ""),
             )
             seed_str = str(p.get("seed") or "").strip()
             seed_val = int(seed_str) if seed_str.lstrip("-").isdigit() else None
+            # Explicit zeros must be honoured: `p.get("maxNew") or 80` would turn a
+            # deliberate "generate nothing" request into 80 tokens.
+            max_new = p.get("maxNew")
             res = self.trainer.generate_sample(
                 prompt=formatted,
-                max_new_tokens=int(p.get("maxNew") or 80),
+                max_new_tokens=max(0, int(max_new if max_new is not None else 80)),
                 temperature=float(p.get("temperature") if p.get("temperature") is not None else 0.9),
                 top_k=int(p.get("topK") if p.get("topK") is not None else 40),
                 top_p=float(p.get("topP") if p.get("topP") is not None else 0.95),
@@ -394,23 +450,35 @@ class EmberBackend:
                 "ms": res.ms,
                 "promptTokens": res.prompt_tokens,
                 "seed": res.seed,
+                "stoppedBy": res.stopped_by,
                 "warning": res.warning,
             }
 
+        if method == "gen.cancel":
+            self.trainer._native.cancel()
+            return {"cancelled": True}
+
         # -- Brain export/import & Checkpoints --------------------------
         if method == "brain.exportJson":
-            name = str(p.get("name") or f"ember-step-{self.trainer.step}")
+            name = str(p.get("name") or f"ember-step-{self.trainer.step}").strip()
+            if name.lower().endswith(".json"):
+                name = name[:-5]
             include_corpus = p.get("includeCorpus") is not False
             return self.trainer.serialize_brain(name=name, include_corpus=include_corpus)
 
         if method == "brain.export":
-            name = str(p.get("name") or f"ember-step-{self.trainer.step}")
+            raw_name = str(p.get("name") or f"ember-step-{self.trainer.step}").strip() or f"ember-step-{self.trainer.step}"
+            if raw_name.lower().endswith(".emb"):
+                mpath, _ = self.trainer._sync_active_files()
+                return self._write_export_file(raw_name, mpath.read_bytes(), kind="brain")
+            stem = raw_name[:-5] if raw_name.lower().endswith(".json") else raw_name
             include_corpus = p.get("includeCorpus") is not False
-            brain = self.trainer.serialize_brain(name=name, include_corpus=include_corpus)
-            return self._write_export_file(f"{name}.json", brain, kind="brain")
+            brain = self.trainer.serialize_brain(name=stem, include_corpus=include_corpus)
+            return self._write_export_file(f"{stem}.json", brain, kind="brain")
 
         if method == "brain.importText":
-            data = json.loads(str(p.get("text") or ""))
+            raw_txt = str(p.get("text") or "")
+            data = json.loads(raw_txt)
             return self.trainer.import_brain(
                 data,
                 name=str(p.get("name") or "imported"),
@@ -421,10 +489,22 @@ class EmberBackend:
             fpath = Path(str(p.get("path") or ""))
             if not fpath.exists():
                 raise ValueError("Staged brain file does not exist.")
-            data = json.loads(fpath.read_text(encoding="utf-8", errors="replace"))
+            raw_bytes = fpath.read_bytes()
+            stem_name = str(p.get("name") or fpath.stem)
+            if stem_name.lower().endswith(".emb") or stem_name.lower().endswith(".json"):
+                stem_name = Path(stem_name).stem
+            if raw_bytes[:4] == FORMAT_MAGIC:
+                companion = fpath.with_suffix(".tok.json")
+                return self.trainer.import_brain_emb(
+                    raw_bytes,
+                    name=stem_name,
+                    companion_tok_path=companion if companion.exists() else None,
+                    save_checkpoint=p.get("saveCheckpoint") is not False,
+                )
+            data = json.loads(raw_bytes.decode("utf-8", errors="replace"))
             return self.trainer.import_brain(
                 data,
-                name=str(p.get("name") or fpath.stem),
+                name=stem_name,
                 save_checkpoint=p.get("saveCheckpoint") is not False,
             )
 
@@ -432,18 +512,19 @@ class EmberBackend:
             return {"checkpoints": self.trainer.list_checkpoints()}
 
         if method == "ckpt.save":
-            return self.trainer.save_checkpoint(str(p.get("name") or f"step-{self.trainer.step}"))
+            info = self.trainer.save_checkpoint(str(p.get("name") or f"step-{self.trainer.step}"))
+            return {**info, "checkpoints": self.trainer.list_checkpoints()}
 
         if method == "ckpt.load":
             return self.trainer.load_checkpoint(str(p.get("name") or "autosave"))
 
         if method == "ckpt.delete":
-            return {"deleted": self.trainer.delete_checkpoint(str(p.get("name") or ""))}
+            removed = self.trainer.delete_checkpoint(str(p.get("name") or ""))
+            return {"deleted": removed, "checkpoints": self.trainer.list_checkpoints()}
 
         if method == "ckpt.export":
             name = str(p.get("name") or "autosave")
-            self.trainer.load_checkpoint(name)
-            brain = self.trainer.serialize_brain(name=name, include_corpus=False)
+            brain = self.trainer.export_checkpoint_dict(name, include_corpus=False)
             return self._write_export_file(f"checkpoint-{name}.json", brain, kind="checkpoint")
 
         # -- Forager & Teachers -----------------------------------------

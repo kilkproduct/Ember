@@ -79,7 +79,7 @@ fun VesselScreen(
             EmberCard(
                 title = "Active brain",
                 subtitle = if (model.ready) {
-                    "Weights live in the JavaScript engine. Kotlin never touches the tensors."
+                    "Weights train in Python (NumPy) and generate in native C++. Kotlin never touches raw tensors."
                 } else {
                     "No brain cast yet. Choose a shape and cast from the corpus."
                 },

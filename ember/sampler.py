@@ -1,6 +1,6 @@
 """Sampling, reference generation, and ctypes binding to native C++ inference.
 
-Both ``native/src/generate.cpp`` and this module implement the exact same
+Both ``native/src/engine.cpp`` and this module implement the exact same
 token selection rules and SplitMix64 PRNG so deterministic greedy decoding
 (``temperature == 0`` or ``top_k == 1``) and seeded sampling agree across
 Python and C++.
@@ -10,6 +10,10 @@ from __future__ import annotations
 
 import ctypes
 import os
+import shutil
+import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +32,8 @@ from .spec import (
     SPECIAL_UNK,
 )
 from .tokenizer import BPETokenizer
+
+_NATIVE_BUILD_LOCK = threading.Lock()
 
 
 class SplitMix64:
@@ -79,6 +85,7 @@ def select_next_token(
     ``<unk>``.
     """
     logits = np.array(logits_1d, dtype=np.float64, copy=True)
+    logits[~np.isfinite(logits)] = -1e30
     V = logits.shape[0]
 
     # Mask non-text specials
@@ -210,16 +217,80 @@ def reference_generate(
     )
 
 
+def _auto_build_host_library(root: Path) -> Path | None:
+    """Compile host `native/build/libember_infer.{so,dylib}` automatically when source exists."""
+    native_dir = root / "native"
+    src_files = [
+        native_dir / "src" / "bpe.cpp",
+        native_dir / "src" / "model.cpp",
+        native_dir / "src" / "engine.cpp",
+        native_dir / "src" / "jni_bridge.cpp",
+    ]
+    if not all(p.exists() for p in src_files):
+        return None
+
+    ext = ".dylib" if sys.platform == "darwin" else (".dll" if os.name == "nt" else ".so")
+    out_dir = native_dir / "build"
+    target = out_dir / (f"ember_infer{ext}" if os.name == "nt" else f"libember_infer{ext}")
+
+    with _NATIVE_BUILD_LOCK:
+        all_sources = list(native_dir.rglob("*.cpp")) + list(native_dir.rglob("*.hpp")) + list(native_dir.rglob("*.h"))
+        newest_src = max((p.stat().st_mtime for p in all_sources), default=0.0)
+        if target.exists() and target.stat().st_mtime >= newest_src:
+            return target
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmake_bin = shutil.which("cmake")
+        if cmake_bin and (out_dir / "CMakeCache.txt").exists():
+            res = subprocess.run([cmake_bin, "--build", str(out_dir), "-j"], capture_output=True)
+            if res.returncode == 0 and target.exists():
+                return target
+
+        if cmake_bin:
+            cfg = subprocess.run(
+                [cmake_bin, "-S", str(native_dir), "-B", str(out_dir), "-DCMAKE_BUILD_TYPE=Release"],
+                capture_output=True,
+            )
+            if cfg.returncode == 0:
+                bld = subprocess.run([cmake_bin, "--build", str(out_dir), "-j"], capture_output=True)
+                if bld.returncode == 0 and target.exists():
+                    return target
+
+        # Zero-CMake host compiler fallback (works on minimal Linux/macOS installs with g++/clang++)
+        cxx = shutil.which("c++") or shutil.which("g++") or shutil.which("clang++")
+        if cxx and os.name != "nt":
+            tmp_so = out_dir / f".libember_infer.{os.getpid()}{ext}"
+            cmd = [
+                cxx,
+                "-std=c++17",
+                "-O3",
+                "-fno-fast-math",
+                "-fPIC",
+                "-shared",
+                f"-I{native_dir / 'include'}",
+                f"-I{native_dir / 'src'}",
+                *[str(s) for s in src_files],
+                "-pthread",
+                "-o",
+                str(tmp_so),
+            ]
+            res = subprocess.run(cmd, capture_output=True)
+            if res.returncode == 0 and tmp_so.exists():
+                os.replace(tmp_so, target)
+                return target
+    return target if target.exists() else None
+
+
 # --------------------------------------------------------------------------
-# Optional direct C-API binding to libember_infer (compiled C++ engine)
+# Direct C-API binding to libember_infer (compiled C++ engine)
 # --------------------------------------------------------------------------
 
 class NativeInferenceBridge:
     """Thin ctypes wrapper around ``libember_infer``'s C API.
 
-    Used by Python tests (for exact logit/token parity verification) and by
-    ``Trainer`` when generating periodic training samples through the compiled
-    C++ engine.
+    Used by Python tests (for exact logit/token parity verification), desktop HTTP
+    generation, and ``Trainer`` when generating periodic training samples through
+    the compiled C++ engine.
     """
 
     def __init__(self, lib_path: str | Path | None = None) -> None:
@@ -241,6 +312,9 @@ class NativeInferenceBridge:
         if env:
             cands.append(Path(env))
         root = Path(__file__).resolve().parent.parent
+        built = _auto_build_host_library(root)
+        if built is not None:
+            cands.append(built)
         for rel in (
             "native/build/libember_infer.so",
             "native/build/libember_infer.dylib",
@@ -331,7 +405,29 @@ class NativeInferenceBridge:
         lib.ember_engine_vocab_size.argtypes = [ctypes.c_void_p]
         lib.ember_engine_vocab_size.restype = ctypes.c_int
 
+        # Optional: reports the context-truncation warning and the stop reason,
+        # which `ember_engine_generate` itself cannot return (it yields a count).
+        self._has_summary = hasattr(lib, "ember_engine_last_generate_summary")
+        if self._has_summary:
+            lib.ember_engine_last_generate_summary.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_size_t]
+            lib.ember_engine_last_generate_summary.restype = ctypes.c_int
+
         self._handle = lib.ember_engine_create()
+
+    def _last_summary(self) -> dict:
+        if not self._has_summary or self._handle is None:
+            return {}
+        buf = ctypes.create_string_buffer(1024)
+        n = self._lib.ember_engine_last_generate_summary(self._handle, buf, 1024)
+        if n is None or n < 0:
+            return {}
+        try:
+            import json
+
+            parsed = json.loads(buf.raw[:n].decode("utf-8", errors="replace"))
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
 
     def close(self) -> None:
         if self._lib is not None and self._handle is not None:
@@ -374,6 +470,12 @@ class NativeInferenceBridge:
         n = self._lib.ember_engine_encode(self._handle, raw, len(raw), buf, cap)
         if n < 0:
             raise ValueError(self._err())
+        if n > cap:
+            cap = n + 8
+            buf = (ctypes.c_int32 * cap)()
+            n = self._lib.ember_engine_encode(self._handle, raw, len(raw), buf, cap)
+            if n < 0:
+                raise ValueError(self._err())
         return [int(buf[i]) for i in range(n)]
 
     def decode(self, ids: list[int]) -> str:
@@ -383,6 +485,12 @@ class NativeInferenceBridge:
         n = self._lib.ember_engine_decode(self._handle, arr, len(ids), out, cap)
         if n < 0:
             raise ValueError(self._err())
+        if n >= cap:
+            cap = n + 8
+            out = ctypes.create_string_buffer(cap)
+            n = self._lib.ember_engine_decode(self._handle, arr, len(ids), out, cap)
+            if n < 0:
+                raise ValueError(self._err())
         return out.raw[:n].decode("utf-8", errors="replace")
 
     def forward_logits(self, token_ids: list[int]) -> np.ndarray:
@@ -416,8 +524,9 @@ class NativeInferenceBridge:
         t0 = time.perf_counter()
         actual_seed = int(seed) if seed is not None else (int(time.time_ns()) & 0x7FFFFFFF)
         raw_prompt = prompt.encode("utf-8")
-        max_new = max(0, int(max_new_tokens))
-        id_buf = (ctypes.c_int32 * max(1, max_new))()
+        max_new = max(0, min(8192, int(max_new_tokens)))
+        id_cap = max(1, max_new + 16)
+        id_buf = (ctypes.c_int32 * id_cap)()
         txt_cap = max(512, max_new * 16 + 64)
         txt_buf = ctypes.create_string_buffer(txt_cap)
         n_gen = self._lib.ember_engine_generate(
@@ -432,7 +541,7 @@ class NativeInferenceBridge:
             ctypes.c_uint64(actual_seed & 0xFFFFFFFFFFFFFFFF),
             1 if stop_on_eos else 0,
             id_buf,
-            max(1, max_new),
+            id_cap,
             txt_buf,
             txt_cap,
         )
@@ -440,9 +549,17 @@ class NativeInferenceBridge:
             raise ValueError(self._err())
         elapsed_ms = max(0.001, (time.perf_counter() - t0) * 1000.0)
         ids = [int(id_buf[i]) for i in range(n_gen)]
-        text = txt_buf.value.decode("utf-8", errors="replace")
+        # Decode full token sequence directly via length-safe C++ decoder so embedded NULs
+        # or long multi-byte tokens are never truncated at a C string terminator.
+        text = self.decode(ids)
         tps = (n_gen / (elapsed_ms / 1000.0)) if n_gen else 0.0
-        prompt_len = len(self.encode(prompt)) if prompt else 0
+
+        summary = self._last_summary()
+        warning = str(summary.get("warning") or "") or None
+        stopped_by = str(summary.get("stoppedBy") or "length")
+        prompt_len = int(summary.get("promptTokens") or 0)
+        if not prompt_len and prompt:
+            prompt_len = len(self.encode(prompt))
         return GenerationResult(
             text=text,
             token_ids=ids,
@@ -451,4 +568,6 @@ class NativeInferenceBridge:
             ms=elapsed_ms,
             tokens_per_sec=tps,
             seed=actual_seed,
+            stopped_by=stopped_by,
+            warning=warning,
         )

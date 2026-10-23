@@ -28,6 +28,7 @@ from .model import (
     ModelConfig,
     check_params,
     load_model,
+    load_model_bytes,
     model_from_dict,
     model_to_dict,
     save_model,
@@ -51,16 +52,30 @@ WARN_PHONE_BYTES = 160 * 1024 * 1024   # 160 MB: warn on mid-range phones
 BLOCK_PHONE_BYTES = 512 * 1024 * 1024  # 512 MB: refuse cast to prevent Android LMK crash
 
 
+def _unwrap_vessel_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Accept both Android nested ``{"config": {...}}`` and flat ``{"nLayer": ...}`` calls."""
+    outer = dict(params or {})
+    nested = outer.get("config")
+    if isinstance(nested, dict):
+        merged = dict(nested)
+        for k, v in outer.items():
+            if k != "config" and v is not None:
+                merged[k] = v
+        return merged
+    return outer
+
+
 def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
     """Validate candidate architecture and estimate RAM requirements before casting."""
-    preset = str(params.get("preset") or "").lower()
+    cfg_in = _unwrap_vessel_params(params)
+    preset = str(cfg_in.get("preset") or "").lower()
     base = PRESETS.get(preset, PRESETS["phone"])
-    n_layer = int(params.get("nLayer") or params.get("n_layer") or base["n_layer"])
-    n_head = int(params.get("nHead") or params.get("n_head") or base["n_head"])
-    n_embd = int(params.get("nEmbd") or params.get("n_embd") or base["n_embd"])
-    block_size = int(params.get("blockSize") or params.get("block_size") or base["block_size"])
-    vocab_size = int(params.get("vocabSize") or params.get("vocab_size") or base["vocab_size"])
-    ffn_mult = float(params.get("ffnMult") or params.get("ffn_mult") or 4.0)
+    n_layer = int(cfg_in.get("nLayer") or cfg_in.get("n_layer") or base["n_layer"])
+    n_head = int(cfg_in.get("nHead") or cfg_in.get("n_head") or base["n_head"])
+    n_embd = int(cfg_in.get("nEmbd") or cfg_in.get("n_embd") or base["n_embd"])
+    block_size = int(cfg_in.get("blockSize") or cfg_in.get("block_size") or base["block_size"])
+    vocab_size = int(cfg_in.get("vocabSize") or cfg_in.get("vocab_size") or base["vocab_size"])
+    ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or 4.0)
 
     if n_layer < 1 or n_head < 1 or n_embd < 1 or block_size < 4:
         raise ValueError("Model dimensions must all be positive integers (context >= 4).")
@@ -125,6 +140,7 @@ class Trainer:
         self.optimizer: AdamW | None = None
         self.train_stream: TokenStream | None = None
         self.val_stream: TokenStream | None = None
+        self._stream_corpus_revision: int = -1
 
         # Native C++ engine bridge for sample generation during training
         self._native = NativeInferenceBridge()
@@ -177,6 +193,10 @@ class Trainer:
     def active_tokenizer_path(self) -> Path:
         return self.models_dir / "active.tok.json"
 
+    @property
+    def active_optimizer_path(self) -> Path:
+        return self.models_dir / "active.opt.npz"
+
     def _log(self, line: str) -> None:
         entry = {"at": int(time.time() * 1000), "line": str(line)}
         self.train_log.append(entry)
@@ -185,19 +205,29 @@ class Trainer:
         self._emit("train.log", entry)
 
     def _sync_active_files(self) -> tuple[Path, Path]:
-        """Atomically persist active `.emb` + `.tok.json` for native C++ inference."""
+        """Atomically persist active `.emb` + `.tok.json` (+ `.opt.npz`) for C++ inference & crash recovery."""
         with self._lock:
             if not self.ready or self.cfg is None or self.model is None or self.tokenizer is None:
                 raise RuntimeError("No cast vessel is active.")
             mpath = self.active_model_path
             tpath = self.active_tokenizer_path
-            save_model(mpath, self.cfg, self.model.params, meta={"step": self.step})
+            save_model(
+                mpath,
+                self.cfg,
+                self.model.params,
+                meta={"step": self.step, "tokenizer": self.tokenizer.to_dict()},
+            )
             tmp_tok = str(tpath) + ".tmp"
             with open(tmp_tok, "w", encoding="utf-8") as fh:
                 fh.write(self.tokenizer.to_json())
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_tok, tpath)
+            if self.optimizer is not None and self.optimizer.t > 0:
+                try:
+                    self.optimizer.save_npz(self.active_optimizer_path)
+                except Exception:
+                    pass
             if self._native.available:
                 try:
                     self._native.load(mpath, tpath)
@@ -216,14 +246,18 @@ class Trainer:
         mask_lesson_prompts: bool | None = None,
         balance: str | None = None,
     ) -> None:
-        """Rebuild token streams from SQLite corpus (e.g., after new fuel or checkpoint load)."""
+        """Rebuild token streams from SQLite corpus whenever corpus or stream settings change."""
         with self._lock:
             if self.tokenizer is None:
                 return
             mask_lp = (self.lesson_loss_mode == "response") if mask_lesson_prompts is None else mask_lesson_prompts
             bal = self.balance_mode if balance is None else balance
+            rev = self.corpus.revision
             meta_rows = self.corpus.id_kind_pairs()
             if not meta_rows:
+                self.train_stream = None
+                self.val_stream = None
+                self._stream_corpus_revision = rev
                 return
             holdout = compute_holdout_ids(meta_rows, holdout_frac=0.05)
             t_stream, v_stream = build_train_val_streams(
@@ -235,6 +269,7 @@ class Trainer:
             )
             self.train_stream = t_stream
             self.val_stream = v_stream
+            self._stream_corpus_revision = rev
 
     # ------------------------------------------------------------------
     # Cast vessel
@@ -248,16 +283,27 @@ class Trainer:
         if self.corpus.count() == 0:
             raise ValueError("Add at least one document to Fuel before casting a vessel.")
 
-        preset = str(params.get("preset") or "").lower()
+        cfg_in = _unwrap_vessel_params(params)
+        preset = str(cfg_in.get("preset") or "").lower()
         base = PRESETS.get(preset, PRESETS["phone"])
-        n_layer = int(params.get("nLayer") or params.get("n_layer") or base["n_layer"])
-        n_head = int(params.get("nHead") or params.get("n_head") or base["n_head"])
-        n_embd = int(params.get("nEmbd") or params.get("n_embd") or base["n_embd"])
-        block_size = int(params.get("blockSize") or params.get("block_size") or base["block_size"])
-        target_vocab = int(params.get("vocabSize") or params.get("vocab_size") or base["vocab_size"])
-        ffn_mult = float(params.get("ffnMult") or params.get("ffn_mult") or 4.0)
-        dropout = float(params.get("dropout", base.get("dropout", 0.0)))
-        base_lr = float(params.get("lr", 3e-4))
+        n_layer = int(cfg_in.get("nLayer") or cfg_in.get("n_layer") or base["n_layer"])
+        n_head = int(cfg_in.get("nHead") or cfg_in.get("n_head") or base["n_head"])
+        n_embd = int(cfg_in.get("nEmbd") or cfg_in.get("n_embd") or base["n_embd"])
+        block_size = int(cfg_in.get("blockSize") or cfg_in.get("block_size") or base["block_size"])
+        target_vocab = int(cfg_in.get("vocabSize") or cfg_in.get("vocab_size") or base["vocab_size"])
+        ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or 4.0)
+        dropout = float(cfg_in.get("dropout", base.get("dropout", 0.0)))
+        base_lr = float(params.get("lr", cfg_in.get("lr", 3e-4)))
+
+        # Optional deterministic initialization. Without it every cast draws fresh
+        # random weights, which is fine for the app but makes a run impossible to
+        # reproduce; tests and debugging pass an explicit seed.
+        seed_param = params.get("seed", cfg_in.get("seed"))
+        if seed_param is not None:
+            try:
+                seed = int(seed_param)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"seed must be an integer, got {seed_param!r}") from exc
 
         # Preserve prior trained model automatically before recasting
         if self.ready and self.step > 0:
@@ -272,9 +318,11 @@ class Trainer:
                 self.cast_stage = stage
                 self.cast_progress = ratio
                 self._emit("cast.progress", {"stage": stage, "ratio": ratio})
+                self._emit("model.castProgress", self.status())
 
-            _stage("tokenizer", 0.15)
+            _stage("corpus", 0.08)
             n_docs = self.corpus.count()
+            _stage("tokenizer", 0.25)
             tok = train_bpe(
                 self.corpus.iter_texts(batch_size=64),
                 vocab_size=target_vocab,
@@ -282,7 +330,8 @@ class Trainer:
                 total_hint=n_docs,
             )
 
-            _stage("encoding", 0.55)
+            _stage("stream", 0.60)
+            rev = self.corpus.revision
             meta_rows = self.corpus.id_kind_pairs()
             holdout = compute_holdout_ids(meta_rows, holdout_frac=0.05)
             t_stream, v_stream = build_train_val_streams(
@@ -293,7 +342,7 @@ class Trainer:
                 balance=self.balance_mode,
             )
 
-            _stage("initializing", 0.85)
+            _stage("model", 0.88)
             cfg = ModelConfig(
                 n_layer=n_layer,
                 n_head=n_head,
@@ -313,6 +362,7 @@ class Trainer:
                 self.optimizer = opt
                 self.train_stream = t_stream
                 self.val_stream = v_stream
+                self._stream_corpus_revision = rev
                 self.step = 0
                 self.best_loss = None
                 self.val_loss = None
@@ -326,19 +376,26 @@ class Trainer:
                 self.losses.clear()
                 self.validations.clear()
                 self.samples.clear()
+                if self.active_optimizer_path.exists():
+                    try:
+                        self.active_optimizer_path.unlink()
+                    except OSError:
+                        pass
                 self._sync_active_files()
 
-            _stage("ready", 1.0)
             self._log(
                 f"Cast v3 vessel: {cfg.n_layer}L/{cfg.n_head}H/{cfg.n_embd}D ctx={cfg.block_size} "
                 f"vocab={cfg.vocab_size} ({cfg.n_params:,} params, {t_stream.n_tokens:,} train tokens, "
                 f"{v_stream.n_tokens:,} val tokens)."
             )
-            return self.status()
         finally:
             self.casting = False
             self.cast_progress = None
             self.cast_stage = ""
+
+        st = self.status()
+        self._emit("model.cast", st)
+        return {**st, "model": st, "corpus": self.corpus.summary()}
 
     # ------------------------------------------------------------------
     # Validation (strictly non-mutating)
@@ -387,6 +444,21 @@ class Trainer:
     # ------------------------------------------------------------------
     # Training loop (synchronous step runner + background thread launcher)
     # ------------------------------------------------------------------
+    def _write_autosave(self) -> dict[str, Any] | None:
+        """Persist the autosave checkpoint and tell the UI about it.
+
+        Returning ``None`` (instead of raising) keeps a failed autosave from
+        killing an otherwise healthy training run, while the emit lets the
+        Compose "Autosave written" notice fire after every periodic save and
+        at the end of each run.
+        """
+        try:
+            info = self.save_checkpoint("autosave")
+        except Exception:
+            return None
+        self._emit("train.autosave", info)
+        return info
+
     def train_sync(self, options: dict[str, Any] | None = None) -> dict[str, Any]:
         """Run ``steps`` synchronously (used inside the worker thread and direct tests)."""
         opts = options or {}
@@ -408,6 +480,7 @@ class Trainer:
         need_rebuild = (
             self.train_stream is None
             or self.train_stream.n_tokens < 2
+            or self.corpus.revision != self._stream_corpus_revision
             or balance != self.balance_mode
             or lesson_loss != self.lesson_loss_mode
         )
@@ -454,6 +527,7 @@ class Trainer:
         ema: float | None = None
         completed = 0
         outcome = "completed"
+        error_msg: str | None = None
 
         self._log(
             f"Fire started at step {start_step} -> {target_step} "
@@ -463,7 +537,7 @@ class Trainer:
         try:
             for local_i in range(steps):
                 if self._stop_event.is_set():
-                    outcome = "stopped"
+                    outcome = "doused"
                     break
 
                 step_t0 = time.perf_counter()
@@ -557,14 +631,12 @@ class Trainer:
                     self.samples = self.samples[:12]
                     self._emit("train.sample", entry)
 
-                if completed % 100 == 0:
-                    try:
-                        self.save_checkpoint("autosave")
-                    except Exception:
-                        pass
+                if completed % 50 == 0:
+                    self._write_autosave()
 
         except Exception as exc:
             outcome = "failed"
+            error_msg = str(exc)
             self._log(f"! Training error: {exc}")
             raise
         finally:
@@ -591,20 +663,22 @@ class Trainer:
             if self.ready and completed > 0:
                 try:
                     self._sync_active_files()
-                    self.save_checkpoint("autosave")
                 except Exception:
                     pass
+                self._write_autosave()
             self._log(f"Fire {outcome} at step {self.step} (best loss {self.best_loss or 0.0:.4f}).")
-            self._emit(
-                "train.done",
-                {
-                    "outcome": outcome,
-                    "step": self.step,
-                    "completedSteps": completed,
-                    "bestLoss": self.best_loss,
-                    "bestValLoss": self.best_val_loss,
-                },
-            )
+            done_payload = {
+                "outcome": outcome,
+                "error": error_msg,
+                "step": self.step,
+                "completedSteps": completed,
+                "bestLoss": self.best_loss,
+                "bestValLoss": self.best_val_loss,
+                "model": self.status(),
+                "corpus": self.corpus.summary(),
+            }
+            self._emit("train.finished", done_payload)
+            self._emit("train.done", done_payload)
 
         return self.last_run
 
@@ -614,20 +688,37 @@ class Trainer:
                 raise ValueError("Training is already running.")
             if not self.ready:
                 raise ValueError("Cast a vessel before starting training.")
-            self.starting = True
-            self._stop_event.clear()
+            if self.corpus.count() == 0:
+                raise ValueError("Add text or a starter pack to Fuel before firing.")
             opts = dict(options or {})
+            steps = max(1, int(opts.get("steps", 150)))
+            self.starting = True
+            self.until_step = self.step + steps
+            self._stop_event.clear()
 
             def _run() -> None:
                 try:
                     self.train_sync(opts)
                 except Exception as exc:
+                    self.running = False
+                    self.starting = False
+                    self._emit(
+                        "train.finished",
+                        {
+                            "outcome": "failed",
+                            "error": str(exc),
+                            "step": self.step,
+                            "completedSteps": 0,
+                            "model": self.status(),
+                            "corpus": self.corpus.summary(),
+                        },
+                    )
                     self._emit("train.error", {"message": str(exc)})
 
             t = threading.Thread(target=_run, name="ember-trainer", daemon=True)
             self._train_thread = t
             t.start()
-        return {"started": True, "step": self.step}
+        return {"started": True, "step": self.step, "until": self.until_step}
 
     def stop(self) -> dict[str, Any]:
         self.stop_requested = True
@@ -653,7 +744,7 @@ class Trainer:
         with self._lock:
             if not self.ready or self.model is None or self.tokenizer is None:
                 raise ValueError("Cast or load a vessel before generating text.")
-            mpath, tpath = self._sync_active_files()
+            self._sync_active_files()
 
         if self._native.available:
             res = self._native.generate(
@@ -686,28 +777,40 @@ class Trainer:
             return res
 
     # ------------------------------------------------------------------
-    # Checkpoints (atomic .emb + .tok.json + .state.json)
+    # Checkpoints (atomic .emb + .tok.json + .state.json + .opt.npz)
     # ------------------------------------------------------------------
-    def _ckpt_paths(self, name: str) -> tuple[Path, Path, Path]:
+    def _ckpt_paths(self, name: str) -> tuple[Path, Path, Path, Path]:
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in (name or "checkpoint"))[:80] or "checkpoint"
         return (
             self.ckpts_dir / f"{safe}.emb",
             self.ckpts_dir / f"{safe}.tok.json",
             self.ckpts_dir / f"{safe}.state.json",
+            self.ckpts_dir / f"{safe}.opt.npz",
         )
 
     def save_checkpoint(self, name: str = "checkpoint") -> dict[str, Any]:
         with self._lock:
             if not self.ready or self.cfg is None or self.model is None or self.tokenizer is None:
                 raise ValueError("No active vessel to checkpoint.")
-            emb_p, tok_p, st_p = self._ckpt_paths(name)
-            save_model(emb_p, self.cfg, self.model.params, meta={"step": self.step, "name": name})
+            emb_p, tok_p, st_p, opt_p = self._ckpt_paths(name)
+            save_model(
+                emb_p,
+                self.cfg,
+                self.model.params,
+                meta={"step": self.step, "name": name, "tokenizer": self.tokenizer.to_dict()},
+            )
             tmp_tok = str(tok_p) + ".tmp"
             with open(tmp_tok, "w", encoding="utf-8") as fh:
                 fh.write(self.tokenizer.to_json())
                 fh.flush()
                 os.fsync(fh.fileno())
             os.replace(tmp_tok, tok_p)
+
+            if self.optimizer is not None and self.optimizer.t > 0:
+                try:
+                    self.optimizer.save_npz(opt_p)
+                except Exception:
+                    pass
 
             state_obj = {
                 "name": name,
@@ -740,10 +843,47 @@ class Trainer:
                 "mtime": int(emb_p.stat().st_mtime * 1000),
             }
 
+    def export_checkpoint_dict(self, name: str, include_corpus: bool = False) -> dict[str, Any]:
+        """Read a named checkpoint into a portable v4 JSON dict WITHOUT mutating live model state."""
+        emb_p, tok_p, st_p, _ = self._ckpt_paths(name)
+        if not emb_p.exists() or not tok_p.exists():
+            raise ValueError(f"Checkpoint '{name}' was not found.")
+        cfg, params, meta = load_model(emb_p)
+        tok = BPETokenizer.load(tok_p)
+        st = json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {}
+        step_val = int(st.get("step", meta.get("step", 0)))
+        brain: dict[str, Any] = {
+            "kind": BRAIN_KIND,
+            "format": "ember-brain",
+            "version": BRAIN_VERSION,
+            "spec": "v3",
+            "name": emb_p.stem,
+            "exportedAt": datetime.now(timezone.utc).isoformat(),
+            "step": step_val,
+            "config": cfg.to_dict(),
+            "tokenizer": tok.to_dict(),
+            "weights": model_to_dict(cfg, params),
+            "training_state": {
+                "step": step_val,
+                "best_loss": st.get("best_loss"),
+                "val_loss": st.get("val_loss"),
+                "best_val_loss": st.get("best_val_loss"),
+                "tokens_processed": int(st.get("tokens_processed", 0)),
+                "loss_tokens_processed": int(st.get("loss_tokens_processed", 0)),
+                "sequences_sampled": int(st.get("sequences_sampled", 0)),
+                "train_seconds": float(st.get("train_seconds", 0.0)),
+                "losses": list(st.get("losses", []))[-400:],
+                "validations": list(st.get("validations", []))[-120:],
+            },
+        }
+        if include_corpus:
+            brain["corpusDocs"] = self.corpus.export_docs()
+        return brain
+
     def load_checkpoint(self, name: str) -> dict[str, Any]:
         if self.running or self.starting:
             raise ValueError("Stop training before loading a checkpoint.")
-        emb_p, tok_p, st_p = self._ckpt_paths(name)
+        emb_p, tok_p, st_p, opt_p = self._ckpt_paths(name)
         if not emb_p.exists() or not tok_p.exists():
             raise ValueError(f"Checkpoint '{name}' was not found.")
         cfg, params, meta = load_model(emb_p)
@@ -754,6 +894,11 @@ class Trainer:
             self.tokenizer = tok
             self.model = GPT(cfg, params=params)
             self.optimizer = AdamW(self.model.params, lr=3e-4)
+            if opt_p.exists():
+                try:
+                    self.optimizer.load_npz(opt_p)
+                except Exception:
+                    pass
             self.step = int(st.get("step", meta.get("step", 0)))
             self.best_loss = st.get("best_loss")
             self.val_loss = st.get("val_loss")
@@ -769,12 +914,13 @@ class Trainer:
             self.rebuild_streams_if_needed()
             self._sync_active_files()
         self._log(f"Loaded checkpoint '{name}' (step {self.step}).")
-        return self.status()
+        cur = self.status()
+        return {**cur, "model": cur, "corpus": self.corpus.summary()}
 
     def delete_checkpoint(self, name: str) -> bool:
-        emb_p, tok_p, st_p = self._ckpt_paths(name)
+        emb_p, tok_p, st_p, opt_p = self._ckpt_paths(name)
         removed = False
-        for p in (emb_p, tok_p, st_p):
+        for p in (emb_p, tok_p, st_p, opt_p):
             if p.exists():
                 p.unlink()
                 removed = True
@@ -804,7 +950,7 @@ class Trainer:
         return out
 
     def probe_autosave(self) -> dict[str, Any] | None:
-        emb_p, tok_p, st_p = self._ckpt_paths("autosave")
+        emb_p, tok_p, st_p, _ = self._ckpt_paths("autosave")
         if not emb_p.exists() or not tok_p.exists():
             return None
         try:
@@ -822,7 +968,7 @@ class Trainer:
             return {"name": "autosave", "error": str(exc)}
 
     # ------------------------------------------------------------------
-    # Portable Brain JSON (v4) + explicit legacy JS brain handling
+    # Portable Brain JSON (v4), .emb binary import, + legacy JS brain handling
     # ------------------------------------------------------------------
     def serialize_brain(self, name: str = "ember-brain", include_corpus: bool = True) -> dict[str, Any]:
         with self._lock:
@@ -856,6 +1002,77 @@ class Trainer:
             brain["corpusDocs"] = self.corpus.export_docs()
         return brain
 
+    def import_brain_emb(
+        self,
+        raw: bytes,
+        *,
+        name: str = "imported",
+        companion_tok_path: Path | None = None,
+        save_checkpoint: bool = True,
+    ) -> dict[str, Any]:
+        """Import a native v3 binary `.emb` file directly into the live vessel."""
+        if self.running or self.starting:
+            raise ValueError("Stop training before importing a model.")
+        cfg, params, meta = load_model_bytes(raw)
+        tok: BPETokenizer | None = None
+        if isinstance(meta.get("tokenizer"), dict):
+            tok = BPETokenizer.from_dict(meta["tokenizer"])
+        elif companion_tok_path is not None and companion_tok_path.exists():
+            tok = BPETokenizer.load(companion_tok_path)
+        elif self.tokenizer is not None and self.tokenizer.vocab_size == cfg.vocab_size:
+            tok = self.tokenizer
+        else:
+            raise ValueError(
+                f"This standalone .emb file (vocab={cfg.vocab_size}) has no embedded tokenizer metadata "
+                "and no matching active tokenizer. Export as a full brain or place its .tok.json alongside it."
+            )
+        if tok.vocab_size != cfg.vocab_size:
+            raise ValueError(
+                f"Tokenizer vocab_size ({tok.vocab_size}) does not match model vocab_size ({cfg.vocab_size})."
+            )
+
+        if self.ready and self.step > 0:
+            try:
+                self.save_checkpoint("pre-import")
+            except Exception:
+                pass
+
+        with self._lock:
+            self.cfg = cfg
+            self.tokenizer = tok
+            self.model = GPT(cfg, params=params)
+            self.optimizer = AdamW(self.model.params, lr=3e-4)
+            self.step = int(meta.get("step", 0))
+            self.best_loss = None
+            self.val_loss = None
+            self.best_val_loss = None
+            self.tokens_processed = 0
+            self.loss_tokens_processed = 0
+            self.sequences_sampled = 0
+            self.train_seconds = 0.0
+            self.losses = []
+            self.validations = []
+            self.rebuild_streams_if_needed()
+            self._sync_active_files()
+            ckpt_info = self.save_checkpoint(name) if save_checkpoint else None
+
+        st = self.status()
+        self._emit("model.imported", st)
+        return {
+            "imported": True,
+            "version": BRAIN_VERSION,
+            "name": str(meta.get("name") or name),
+            "step": self.step,
+            "nParams": cfg.n_params,
+            "vocabSize": cfg.vocab_size,
+            "tokenizer": TOKENIZER_TYPE,
+            "corpusAdded": 0,
+            "importedCorpusDocuments": 0,
+            "checkpoint": ckpt_info,
+            "model": st,
+            "corpus": self.corpus.summary(),
+        }
+
     def import_brain(
         self,
         data: dict[str, Any],
@@ -871,8 +1088,6 @@ class Trainer:
         version = int(data.get("version") or 0)
         fmt_str = str(data.get("format") or "")
         if data.get("kind") != BRAIN_KIND or version != BRAIN_VERSION:
-            # Recover reusable corpus docs if the legacy JS brain bundled them,
-            # while explicitly telling the user why legacy weights cannot load!
             docs = data.get("corpusDocs") or data.get("corpus") or []
             recovered = 0
             if isinstance(docs, list) and docs:
@@ -893,6 +1108,12 @@ class Trainer:
         tok = BPETokenizer.from_dict(data["tokenizer"])
         params = model_from_dict(cfg, data["weights"])
         check_params(cfg, params)
+
+        if self.ready and self.step > 0:
+            try:
+                self.save_checkpoint("pre-import")
+            except Exception:
+                pass
 
         docs = data.get("corpusDocs")
         corpus_added = 0
@@ -920,15 +1141,21 @@ class Trainer:
             self._sync_active_files()
             ckpt_info = self.save_checkpoint(name) if save_checkpoint else None
 
+        st = self.status()
+        self._emit("model.imported", st)
         return {
             "imported": True,
+            "version": BRAIN_VERSION,
             "name": str(data.get("name") or name),
             "step": self.step,
             "nParams": cfg.n_params,
             "vocabSize": cfg.vocab_size,
             "tokenizer": TOKENIZER_TYPE,
             "corpusAdded": corpus_added,
+            "importedCorpusDocuments": corpus_added,
             "checkpoint": ckpt_info,
+            "model": st,
+            "corpus": self.corpus.summary(),
         }
 
     # ------------------------------------------------------------------

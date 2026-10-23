@@ -434,6 +434,38 @@ def inspect_bytes(
             "message": "No documents found.",
         }
 
+    # Check if this is a native v3 binary model (.emb)
+    if len(entries) == 1 and entries[0][2] == "ember-model":
+        from .model import load_model_bytes
+
+        cfg, _, meta = load_model_bytes(entries[0][1])
+        has_tok = isinstance(meta.get("tokenizer"), dict)
+        return {
+            "token": token,
+            "kind": "brain",
+            "name": name,
+            "mime": mime,
+            "bytes": len(raw),
+            "format": "ember-model",
+            "compression": compression,
+            "archive": archive,
+            "entries": 1,
+            "encoding": "binary",
+            "resumable": False,
+            "legacy": False,
+            "fields": [
+                {"label": "Format", "value": "Ember v3 binary (.emb)"},
+                {"label": "Step", "value": str(meta.get("step", 0))},
+                {"label": "Parameters", "value": f"{cfg.n_params:,}"},
+                {"label": "Layers / Embd", "value": f"{cfg.n_layer} / {cfg.n_embd}"},
+                {"label": "Tokenizer", "value": "Embedded byte-BPE v3" if has_tok else f"vocab {cfg.vocab_size}"},
+            ],
+            "documents": [],
+            "warnings": [],
+            "notes": [],
+            "message": "Ready to import Ember v3 binary model (.emb).",
+        }
+
     # Check if this is a brain file (v4 current or legacy v1–v3)
     if len(entries) == 1 and entries[0][2] == "brain":
         text, enc = _decode_text_bytes(entries[0][1])
@@ -557,6 +589,42 @@ class ImportManager:
         self.corpus = corpus
         self._lock = threading.Lock()
         self._jobs: dict[str, _ImportJob] = {}
+        self._rehydrate_manifest()
+
+    def _rehydrate_manifest(self) -> None:
+        raw_rows = self.corpus.get_kv("imports_manifest")
+        if not isinstance(raw_rows, list):
+            return
+        changed = False
+        for row in raw_rows:
+            if not isinstance(row, dict):
+                continue
+            tok = str(row.get("id") or "").strip()
+            if not tok:
+                continue
+            status = str(row.get("status") or "paused")
+            if status == "running":
+                status = "paused"
+                changed = True
+            raw_path = row.get("path")
+            p = Path(raw_path) if raw_path else None
+            self._jobs[tok] = _ImportJob(
+                token=tok,
+                path=p,
+                raw_text=None,
+                name=str(row.get("name") or (p.name if p else "import")),
+                mime=str(row.get("mime") or ""),
+                status=status,
+                data_format=str(row.get("dataFormat") or "text"),
+                accepted=int(row.get("documents") or row.get("accepted") or 0),
+                merged=int(row.get("merged") or 0),
+                skipped=int(row.get("skipped") or 0),
+                malformed=int(row.get("malformed") or 0),
+                records=int(row.get("records") or 0),
+                updated_at=int(row.get("updatedAt") or int(time.time() * 1000)),
+            )
+        if changed:
+            self._persist_manifest()
 
     def stage_path(self, token: str, path: str | Path, name: str = "", mime: str = "") -> dict[str, Any]:
         p = Path(path)
@@ -607,6 +675,14 @@ class ImportManager:
                 p = Path(path)
                 job = _ImportJob(token=token, path=p, raw_text=None, name=p.name, mime="")
                 self._jobs[token] = job
+            elif path is not None:
+                job.path = Path(path)
+            if job.path is not None and not job.path.exists():
+                job.status = "failed"
+                self._persist_manifest()
+                raise ValueError(
+                    f"Staged import file '{job.name}' is no longer cached on disk. Re-select the file to import."
+                )
             job.status = "running"
             job.cancel_flag = False
             job.pause_flag = False
@@ -617,6 +693,7 @@ class ImportManager:
         arch: list[str] = []
         entries = _iter_container_entries(raw, job.name, comp, arch)
         decompressed_bytes = sum(len(b) for _, b, _, _ in entries)
+        est_records = max(1, decompressed_bytes // 512)
 
         batch: list[dict[str, Any]] = []
         seen_records = 0
@@ -641,12 +718,14 @@ class ImportManager:
                         job.records = seen_records
                         job.updated_at = int(time.time() * 1000)
                         if on_progress:
+                            pct = min(99, max(1, int(round(100 * seen_records / max(seen_records + 50, est_records)))))
                             on_progress(
                                 {
                                     "token": token,
+                                    "documents": job.accepted + job.merged,
                                     "processed": job.accepted + job.merged,
-                                    "total": 0,
-                                    "percent": 50,
+                                    "total": max(seen_records, est_records),
+                                    "percent": pct,
                                     "stage": "committing",
                                     "records": job.records,
                                     "merged": job.merged,
@@ -683,13 +762,20 @@ class ImportManager:
             self._persist_manifest()
 
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        if outcome == "completed":
+            final_pct = 100
+        else:
+            # Paused/cancelled runs keep the honest percentage they reached, so
+            # the progress bar never snaps back to 0% after real work was done.
+            final_pct = min(99, max(1, int(round(100 * seen_records / max(seen_records + 50, est_records)))))
         if on_progress:
             on_progress(
                 {
                     "token": token,
+                    "documents": job.accepted + job.merged,
                     "processed": job.accepted + job.merged,
-                    "total": job.records,
-                    "percent": 100 if outcome == "completed" else 0,
+                    "total": max(job.records, est_records),
+                    "percent": final_pct,
                     "stage": outcome,
                     "records": job.records,
                     "merged": job.merged,
@@ -762,7 +848,7 @@ class ImportManager:
                     "dataFormat": j.data_format,
                     "documents": j.accepted,
                     "updatedAt": j.updated_at,
-                    "resumable": True,
+                    "resumable": j.path is not None and j.path.exists(),
                 }
                 for j in self._jobs.values()
                 if j.status in ("paused", "partial", "failed", "running")
@@ -773,11 +859,18 @@ class ImportManager:
             {
                 "id": j.token,
                 "name": j.name,
+                "mime": j.mime,
+                "path": str(j.path) if j.path is not None else None,
                 "status": j.status,
                 "dataFormat": j.data_format,
                 "documents": j.accepted,
+                "accepted": j.accepted,
+                "merged": j.merged,
+                "skipped": j.skipped,
+                "malformed": j.malformed,
+                "records": j.records,
                 "updatedAt": j.updated_at,
-                "resumable": True,
+                "resumable": j.path is not None and j.path.exists(),
             }
             for j in self._jobs.values()
         ]

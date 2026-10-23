@@ -17,9 +17,8 @@ import com.kilkproduct.ember.R
 /**
  * Foreground service for an explicitly user-started training or foraging run.
  * It keeps a partial CPU wake lock and a visible notification while the
- * activity is backgrounded. It deliberately makes no promise that JavaScript
- * survives Android killing the app process: training is in-memory and a
- * process death loses the un-checkpointed run.
+ * activity is backgrounded. Training runs inside the app process in Python
+ * and saves periodic checkpoints automatically on disk.
  */
 class EmberWorkService : Service() {
 
