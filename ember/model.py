@@ -15,17 +15,13 @@ from .spec import (
     DTYPE_ITEMSIZE,
     FORMAT_MAGIC,
     FORMAT_VERSION,
-    MASK_NEG,
     NORM_EPS,
     POSITIONAL,
-    estimate_params,
     ffn_dim,
-    gelu,
-    gelu_back,
     tensor_specs,
 )
 
-__all__ = ["ModelConfig", "GPT", "init_params", "save_model", "load_model", "model_to_dict", "model_from_dict"]
+__all__ = ["ModelConfig", "Llama", "GPT", "init_params", "save_model", "load_model", "model_to_dict", "model_from_dict"]
 
 HEADER_ALIGN = 16
 
@@ -58,7 +54,7 @@ class ModelConfig:
 
     @property
     def ffn(self) -> int:
-        return self.intermediate_size or ffn_dim(self.n_embd, self.ffn_mult)
+        return self.intermediate_size if self.intermediate_size is not None else ffn_dim(self.n_embd, self.ffn_mult)
 
     @property
     def n_params(self) -> int:
@@ -170,6 +166,8 @@ def init_params(cfg: ModelConfig, seed: int | None = None) -> dict[str, np.ndarr
 
 def check_params(cfg: ModelConfig, params: dict[str, np.ndarray]) -> None:
     expected = tensor_specs(cfg)
+    extra = set(params)-{name for name,_ in expected}
+    if extra: raise ValueError(f"unexpected model tensors: {sorted(extra)}")
     missing = [n for n, _ in expected if n not in params]
     if missing:
         raise ValueError("model is missing tensors: %s" % ", ".join(missing[:6]))
@@ -265,41 +263,6 @@ class Llama:
 
 # Source API alias only; checkpoints are EMB4 Llama and never accept GPT weights.
 GPT = Llama
-
-
-def _layernorm(x, gain, bias, eps):
-    mean = x.mean(axis=-1, keepdims=True)
-    xc = x - mean
-    var = (xc * xc).mean(axis=-1, keepdims=True)
-    rstd = 1.0 / np.sqrt(var + eps)
-    y = xc * rstd * gain + bias
-    return y.astype(np.float32), mean.astype(np.float32), rstd.astype(np.float32)
-
-
-def _layernorm_backward(dy, x, mean, rstd, gain, eps):
-    xc = x - mean
-    xhat = xc * rstd
-    dxhat = dy * gain
-    dvar = np.sum(dxhat * xc * -0.5 * rstd**3, axis=-1, keepdims=True)
-    dmu = -np.sum(dxhat * rstd, axis=-1, keepdims=True) - 2.0 * dvar * np.mean(xc, axis=-1, keepdims=True)
-    N = x.shape[-1]
-    dx = dxhat * rstd + dvar * (2.0 * xc / N) + dmu / N
-    dg = np.sum(dy * xhat, axis=tuple(range(dy.ndim - 1)))
-    db = np.sum(dy, axis=tuple(range(dy.ndim - 1)))
-    return dx.astype(np.float32), dg.astype(np.float32), db.astype(np.float32)
-
-
-def _softmax(x):
-    m = np.max(x, axis=-1, keepdims=True)
-    e = np.exp(x - m)
-    return (e / e.sum(axis=-1, keepdims=True)).astype(np.float32)
-
-
-def _dropout(x, rate, rng):
-    if not rate or rng is None:
-        return x, None
-    mask = (rng.random(x.shape) >= rate).astype(np.float32) / (1.0 - float(rate))
-    return (x * mask).astype(np.float32), mask
 
 
 def _cross_entropy_backward(logits, targets):
@@ -408,6 +371,7 @@ def load_model_bytes(blob: bytes) -> tuple[ModelConfig, dict[str, np.ndarray], d
     (count,) = struct.unpack("<I", blob[off : off + 4])
     off += 4
     params: dict[str, np.ndarray] = {}
+    if count != len(tensor_specs(cfg)): raise ValueError("checkpoint tensor count mismatch")
     for _ in range(count):
         if off + 4 > len(blob) - 4:
             raise ValueError("truncated tensor table")
@@ -432,7 +396,9 @@ def load_model_bytes(blob: bytes) -> tuple[ModelConfig, dict[str, np.ndarray], d
             raise ValueError("truncated tensor data for %s" % name)
         arr = np.frombuffer(blob, dtype="<f4", count=n, offset=off).reshape(shape).copy()
         off += nbytes
+        if name in params: raise ValueError("duplicate checkpoint tensor")
         params[name] = arr
+    if off != len(blob)-4: raise ValueError("unexpected trailing checkpoint data")
     check_params(cfg, params)
     return cfg, params, header.get("meta", {}) or {}
 
@@ -463,6 +429,7 @@ def model_from_dict(cfg: ModelConfig, blobs: dict) -> dict[str, np.ndarray]:
             raise ValueError("brain is missing tensor %s" % name)
         raw = base64.b64decode(blobs[name])
         arr = np.frombuffer(raw, dtype="<f4").reshape(shape).copy()
+        if name in params: raise ValueError("duplicate checkpoint tensor")
         params[name] = arr
     check_params(cfg, params)
     return params

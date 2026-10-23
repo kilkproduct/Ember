@@ -76,6 +76,9 @@ data class ModelConfig(
     val ffnMult: Double,
     val nKvHead: Int = 1,
     val ropeTheta: Double = 500000.0,
+    val maxTrainTokens: Int = 3000000,
+    val maxValTokens: Int = 250000,
+    val tokenizerChars: Int = 2000000,
 ) {
     companion object {
         fun fromJson(json: JSONObject?): ModelConfig? {
@@ -104,6 +107,9 @@ data class ModelConfig(
         .put("ffnMult", ffnMult)
         .put("nKvHead", nKvHead)
         .put("ropeTheta", ropeTheta)
+        .put("maxTrainTokens", maxTrainTokens)
+        .put("maxValTokens", maxValTokens)
+        .put("tokenizerChars", tokenizerChars)
 }
 
 data class LastRun(

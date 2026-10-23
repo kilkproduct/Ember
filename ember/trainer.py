@@ -85,7 +85,10 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
                             n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head", 1))),
                             rope_theta=float(cfg_in.get("ropeTheta", cfg_in.get("rope_theta",500000))),
                             intermediate_size=cfg_in.get("intermediate_size"),
-                            dropout=float(cfg_in.get("dropout",0)))
+                            dropout=float(cfg_in.get("dropout",0)),
+                            bias=bool(cfg_in.get("bias",False)),
+                            training_dtype=str(cfg_in.get("training_dtype","float32")),
+                            rope_scaling=str(cfg_in.get("rope_scaling","none")))
     candidate.validate()
     n_params = candidate.n_params
     # Parameter states (16 B/param) + activation working set for batch=2
@@ -164,6 +167,8 @@ class Trainer:
         self.tokenizer_chars = int(prep.get("tokenizerChars", 2_000_000))
 
         # Persistent metrics & run state
+        self.schedule_state: dict = {}
+        self.batcher_state: dict = {}
         self.step: int = 0
         self.best_loss: float | None = None
         self.val_loss: float | None = None
@@ -296,6 +301,46 @@ class Trainer:
             self.train_log = self.train_log[-400:]
         self._emit("train.log", entry)
 
+    def _checkpoint_state(self):
+        return {"step":self.step, "schedule":self.schedule_state, "batcher":self.batcher_state,
+                "best_loss":self.best_loss,"val_loss":self.val_loss,"best_val_loss":self.best_val_loss,
+                "tokens_processed":self.tokens_processed,"loss_tokens_processed":self.loss_tokens_processed,
+                "sequences_sampled":self.sequences_sampled,"train_seconds":self.train_seconds,
+                "passes":self.passes,"losses":self.losses[-400:],"validations":self.validations[-120:],
+                "last_run":self.last_run}
+
+    def _publish_checkpoint(self, path, name="active"):
+        import uuid
+        opt = None
+        previous = None
+        if path.exists():
+            try: previous = load_model(path)[2].get("optimizer_file")
+            except ValueError:
+                # Recasting must work after a schema migration, but retain the
+                # incompatible file byte-for-byte before replacing active data.
+                import hashlib, shutil
+                digest=hashlib.sha256(path.read_bytes()).hexdigest()[:16]
+                backup=self.ckpts_dir/(path.stem+"-legacy-"+digest+".emb")
+                if not backup.exists(): shutil.copy2(path,backup)
+                previous="legacy-backed-up"
+        if path.exists() and previous is None:
+            # Existing EMB4 checkpoints without optimizer references remain readable.
+            load_model(path)
+        if self.optimizer is not None and self.optimizer.t > 0:
+            opt = path.with_name(path.stem+".state-"+uuid.uuid4().hex+".npz")
+            self.optimizer.save_npz(opt)
+        meta = {"step":self.step,"name":name,"tokenizer":self.tokenizer.to_dict(),
+                "training_state":self._checkpoint_state(),"optimizer_file":opt.name if opt else None}
+        try:
+            save_model(path,self.cfg,self.model.params,meta=meta)
+        except BaseException:
+            if opt is not None: opt.unlink(missing_ok=True)
+            raise
+        if previous and previous != meta["optimizer_file"] and Path(previous).name == previous:
+            old = path.parent/previous
+            if old.name.startswith(path.stem+".state-"): old.unlink(missing_ok=True)
+        return meta
+
     def _sync_active_files(self) -> tuple[Path, Path]:
         """Atomically persist active `.emb` + `.tok.json` (+ `.opt.npz`) for C++ inference & crash recovery."""
         with self._lock:
@@ -303,12 +348,6 @@ class Trainer:
                 raise RuntimeError("No cast vessel is active.")
             mpath = self.active_model_path
             tpath = self.active_tokenizer_path
-            save_model(
-                mpath,
-                self.cfg,
-                self.model.params,
-                meta={"step": self.step, "tokenizer": self.tokenizer.to_dict()},
-            )
             tmp_tok = str(tpath) + ".tmp"
             with open(tmp_tok, "w", encoding="utf-8") as fh:
                 fh.write(self.tokenizer.to_json())
@@ -316,18 +355,11 @@ class Trainer:
                 os.fsync(fh.fileno())
             os.replace(tmp_tok, tpath)
             if self.optimizer is not None and self.optimizer.t > 0:
-                try:
-                    self.optimizer.save_npz(self.active_optimizer_path)
-                except Exception:
-                    pass
-            # The GGUF used by llama.cpp is refreshed by sync_gguf() when the
-            # weights actually changed; generation reads inference_model_path.
-            self._gguf_dirty = True
+                self.optimizer.save_npz(self.active_optimizer_path)
+            self._publish_checkpoint(mpath)
+            self._gguf_dirty=True
         if self._on_model_synced is not None:
-            try:
-                self._on_model_synced(mpath, tpath)
-            except Exception:
-                pass
+            self._on_model_synced(mpath,tpath)
         return mpath, tpath
 
     def rebuild_streams_if_needed(
@@ -601,6 +633,8 @@ class Trainer:
         steps = max(1, int(opts.get("steps", 150)))
         batch_size = max(1, min(32, int(opts.get("batch", 2))))
         base_lr = float(opts.get("lr", 3e-4))
+        accum = int(opts.get("gradientAccumulation",1))
+        if not 1 <= accum <= 64: raise ValueError("gradientAccumulation must be 1..64")
         sample_every = max(0, int(opts.get("every", 25)))
         val_every = max(0, int(opts.get("validateEvery", 50)))
         grad_clip = float(opts.get("gradClip", 1.0))
@@ -648,7 +682,19 @@ class Trainer:
         self.started_at_ms = int(time.time() * 1000)
         self.outcome = None
 
-        schedule = LRSchedule.for_run(base_lr, steps)
+        resume_schedule = bool(opts.get("resumeSchedule",False)) and bool(self.schedule_state)
+        if resume_schedule:
+            state=self.schedule_state
+            schedule=LRSchedule(state["base_lr"],state["total_steps"],state["warmup_steps"],state["min_frac"])
+            schedule_offset=int(state["position"])
+        else:
+            schedule=LRSchedule.for_run(base_lr,steps)
+            schedule_offset=0
+        self.schedule_state={**vars(schedule),"position":schedule_offset}
+        self.optimizer.weight_decay=float(opts.get("weightDecay",self.optimizer.weight_decay))
+        if not math.isfinite(base_lr) or base_lr<=0 or not math.isfinite(self.optimizer.weight_decay) or self.optimizer.weight_decay<0:
+            self.running=False
+            raise ValueError("learning rate must be positive and weight decay nonnegative (finite)")
         batcher = Batcher(
             self.train_stream,
             block_size=self.cfg.block_size,
@@ -657,6 +703,14 @@ class Trainer:
             sampler=sampler_mode,
             boundaries=boundaries,
         )
+        if resume_schedule and self.batcher_state:
+            bs=self.batcher_state
+            if bs.get("sampler") != sampler_mode or bs.get("boundaries") != boundaries:
+                self.running=False
+                raise ValueError("resumeSchedule requires unchanged sampler/boundaries")
+            batcher.rng.bit_generator.state=bs["rng"]
+            batcher._cursor=bs["cursor"]
+            batcher._order=np.array(bs["order"],dtype=np.int64) if bs["order"] is not None else None
         working_bytes = estimate_train_bytes(self.cfg.n_params) + batch_size*self.cfg.n_layer*(self.cfg.block_size*self.cfg.n_embd*80 + self.cfg.n_head*self.cfg.block_size**2*16)
         if working_bytes > BLOCK_PHONE_BYTES:
             self.running = False
@@ -679,30 +733,40 @@ class Trainer:
                     break
 
                 step_t0 = time.perf_counter()
-                lr = schedule.lr_at(local_i)
+                lr = schedule.lr_at(schedule_offset + local_i)
 
                 with self._lock:
                     self.optimizer.set_lr(lr)
-                    x, y, doc_ids = batcher.batch()
-                    self.model.zero_grad()
-                    _, loss = self.model.forward(
-                        x,
-                        doc_ids=doc_ids,
-                        targets=y,
-                        dropout=self.cfg.dropout,
-                        rng=drop_rng,
-                    )
-                    if loss is None or not math.isfinite(loss):
-                        self.model._cache = None
-                        self._log(f"! step {self.step + 1}: non-finite loss skipped")
+                    grads = None
+                    loss_sum, count, step_loss_tokens, valid_micro = 0.0, 0, 0, 0
+                    for micro in range(accum):
+                        if self._stop_event.is_set(): break
+                        x,y,doc_ids=batcher.batch()
+                        self.model.zero_grad()
+                        _,loss=self.model.forward(x,doc_ids=doc_ids,targets=y,dropout=self.cfg.dropout,rng=drop_rng)
+                        if loss is None or not math.isfinite(loss):
+                            self.model._cache=None
+                            self._log(f"! step {self.step+1}: non-finite loss refused")
+                            break
+                        micro_grads=self.model.backward()
+                        if grad_has_nan(micro_grads.values()):
+                            self._log(f"! step {self.step+1}: NaN/Inf gradient refused")
+                            break
+                        n_valid=int(np.count_nonzero(y != IGNORE_INDEX))
+                        if grads is None: grads={k:g*n_valid for k,g in micro_grads.items()}
+                        else:
+                            for k,g in micro_grads.items(): grads[k] += g*n_valid
+                        loss_sum += loss*n_valid
+                        count += n_valid
+                        step_loss_tokens += n_valid
+                        valid_micro += 1
+                    if self._stop_event.is_set():
+                        outcome="doused"
+                        break
+                    if grads is None or count == 0 or valid_micro != accum:
                         continue
-
-                    grads = self.model.backward()
-                    self.model._cache = None
-                    if grad_has_nan(grads.values()):
-                        self._log(f"! step {self.step + 1}: NaN/Inf gradient refused")
-                        continue
-
+                    grads={k:g/count for k,g in grads.items()}
+                    loss=loss_sum/count
                     gnorm, clipped = clip_grad_norm(grads, grad_clip)
                     self.optimizer.step(grads)
 
@@ -710,12 +774,15 @@ class Trainer:
                     self.mark_gguf_dirty()
                     completed += 1
                     step_sec = max(1e-6, time.perf_counter() - step_t0)
-                    step_tokens = int(batch_size * self.cfg.block_size)
-                    step_loss_tokens = int(np.count_nonzero(y != IGNORE_INDEX))
+                    self.schedule_state["position"]=schedule_offset+local_i+1
+                    self.batcher_state={"rng":batcher.rng.bit_generator.state,"cursor":batcher._cursor,
+                        "order":batcher._order.tolist() if batcher._order is not None else None,
+                        "sampler":sampler_mode,"boundaries":boundaries}
+                    step_tokens = int(accum * batch_size * self.cfg.block_size)
 
                     self.tokens_processed += step_tokens
                     self.loss_tokens_processed += step_loss_tokens
-                    self.sequences_sampled += batch_size
+                    self.sequences_sampled += batch_size*accum
                     self.train_seconds += step_sec
                     self.train_tps = step_tokens / step_sec
                     self.grad_norm = gnorm
@@ -790,6 +857,7 @@ class Trainer:
                 "completedSteps": completed,
                 "batchSize": batch_size,
                 "baseLr": base_lr,
+                "gradientAccumulation": accum,
                 "gradientClip": grad_clip,
                 "sampler": sampler_mode,
                 "boundaries": boundaries,
@@ -1112,12 +1180,6 @@ class Trainer:
             if not self.ready or self.cfg is None or self.model is None or self.tokenizer is None:
                 raise ValueError("No active vessel to checkpoint.")
             emb_p, tok_p, st_p, opt_p = self._ckpt_paths(name)
-            save_model(
-                emb_p,
-                self.cfg,
-                self.model.params,
-                meta={"step": self.step, "name": name, "tokenizer": self.tokenizer.to_dict()},
-            )
             tmp_tok = str(tok_p) + ".tmp"
             with open(tmp_tok, "w", encoding="utf-8") as fh:
                 fh.write(self.tokenizer.to_json())
@@ -1125,28 +1187,7 @@ class Trainer:
                 os.fsync(fh.fileno())
             os.replace(tmp_tok, tok_p)
 
-            if self.optimizer is not None and self.optimizer.t > 0:
-                try:
-                    self.optimizer.save_npz(opt_p)
-                except Exception:
-                    pass
-
-            state_obj = {
-                "name": name,
-                "step": self.step,
-                "best_loss": self.best_loss,
-                "val_loss": self.val_loss,
-                "best_val_loss": self.best_val_loss,
-                "tokens_processed": self.tokens_processed,
-                "loss_tokens_processed": self.loss_tokens_processed,
-                "sequences_sampled": self.sequences_sampled,
-                "train_seconds": self.train_seconds,
-                "passes": self.passes,
-                "losses": self.losses[-400:],
-                "validations": self.validations[-120:],
-                "last_run": self.last_run,
-                "saved_at": int(time.time() * 1000),
-            }
+            state_obj = self._checkpoint_state()
             tmp_st = str(st_p) + ".tmp"
             with open(tmp_st, "w", encoding="utf-8") as fh:
                 json.dump(state_obj, fh)
@@ -1154,6 +1195,7 @@ class Trainer:
                 os.fsync(fh.fileno())
             os.replace(tmp_st, st_p)
 
+            self._publish_checkpoint(emb_p, name)
             total_bytes = emb_p.stat().st_size + tok_p.stat().st_size + st_p.stat().st_size
             return {
                 "name": emb_p.stem,
@@ -1168,14 +1210,14 @@ class Trainer:
         if not emb_p.exists() or not tok_p.exists():
             raise ValueError(f"Checkpoint '{name}' was not found.")
         cfg, params, meta = load_model(emb_p)
-        tok = BPETokenizer.load(tok_p)
-        st = json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {}
+        tok = BPETokenizer.from_dict(meta["tokenizer"]) if meta.get("tokenizer") else BPETokenizer.load(tok_p)
+        st = meta.get("training_state") or (json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {})
         step_val = int(st.get("step", meta.get("step", 0)))
         brain: dict[str, Any] = {
             "kind": BRAIN_KIND,
             "format": "ember-brain",
             "version": BRAIN_VERSION,
-            "spec": "v3",
+            "spec": "v4",
             "name": emb_p.stem,
             "exportedAt": datetime.now(timezone.utc).isoformat(),
             "step": step_val,
@@ -1206,18 +1248,20 @@ class Trainer:
         if not emb_p.exists() or not tok_p.exists():
             raise ValueError(f"Checkpoint '{name}' was not found.")
         cfg, params, meta = load_model(emb_p)
-        tok = BPETokenizer.load(tok_p)
-        st = json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {}
+        tok = BPETokenizer.from_dict(meta["tokenizer"]) if meta.get("tokenizer") else BPETokenizer.load(tok_p)
+        st = meta.get("training_state") or (json.loads(st_p.read_text(encoding="utf-8")) if st_p.exists() else {})
         with self._lock:
             self.cfg = cfg
             self.tokenizer = tok
             self.model = GPT(cfg, params=params)
             self.optimizer = AdamW(self.model.params, lr=3e-4)
-            if opt_p.exists():
-                try:
-                    self.optimizer.load_npz(opt_p)
-                except Exception:
-                    pass
+            opt_name = meta.get("optimizer_file")
+            if opt_name:
+                if Path(opt_name).name != opt_name: raise ValueError("invalid optimizer reference")
+                self.optimizer.load_npz(emb_p.parent/opt_name)
+            elif opt_p.exists(): self.optimizer.load_npz(opt_p)
+            self.schedule_state = st.get("schedule",{})
+            self.batcher_state = st.get("batcher",{})
             self.step = int(st.get("step", meta.get("step", 0)))
             self.best_loss = st.get("best_loss")
             self.val_loss = st.get("val_loss")
@@ -1300,7 +1344,7 @@ class Trainer:
                 "kind": BRAIN_KIND,
                 "format": "ember-brain",
                 "version": BRAIN_VERSION,
-                "spec": "v3",
+                "spec": "v4",
                 "name": name,
                 "exportedAt": datetime.now(timezone.utc).isoformat(),
                 "step": self.step,

@@ -52,6 +52,18 @@ build products are ignored by Git. Android needs Java 17, Gradle 8.7, NDK
 source before `gradle testDebugUnitTest assembleDebug` in `android/`.
 ABIs: `arm64-v8a` and `x86_64`; minimum Android API 24.
 
+## Train an existing corpus from the command line
+
+```sh
+python -m ember.train --data ./data --preset phone --steps 200 --seed 42 \
+  --max-train-tokens 100000 --tokenizer-chars 200000 \
+  --export model.gguf --quantization q8_0
+```
+
+The same training pipeline runs in the APK. The command-line environment is
+optional, not required for normal Android use. Preparation limits are explicit
+and do not delete documents. See the migration guide for JSONL import and resume.
+
 ## Architecture and format boundary
 
 See [migration and audit](docs/llama-cpp-migration.md) for the tensor mapping,

@@ -105,6 +105,7 @@ class AdamW:
         import os
 
         arrays: dict[str, np.ndarray] = {"__t__": np.asarray([int(self.t)], dtype=np.int64)}
+        arrays["__hyper__"]=np.asarray([self.lr,self.base_lr,self.beta1,self.beta2,self.eps,self.weight_decay],dtype=np.float64)
         for name in self.m:
             arrays[f"m::{name}"] = np.asarray(self.m[name], dtype=np.float32)
             arrays[f"v::{name}"] = np.asarray(self.v[name], dtype=np.float32)
@@ -117,6 +118,10 @@ class AdamW:
             keys = set(archive.files)
             if "__t__" in keys:
                 self.t = max(0, int(archive["__t__"].reshape(-1)[0]))
+            if "__hyper__" in keys:
+                hyper=archive["__hyper__"]
+                if hyper.shape != (6,) or not np.isfinite(hyper).all(): raise ValueError("invalid optimizer hyperparameters")
+                self.lr,self.base_lr,self.beta1,self.beta2,self.eps,self.weight_decay=map(float,hyper)
             self.m.clear()
             self.v.clear()
             for name, p in self.params.items():
@@ -127,6 +132,8 @@ class AdamW:
                     if m.shape == p.shape and v.shape == p.shape and np.all(np.isfinite(m)) and np.all(np.isfinite(v)):
                         self.m[name] = m.copy()
                         self.v[name] = v.copy()
+                    else: raise ValueError(f"invalid optimizer moments for {name}")
+                elif self.t > 0: raise ValueError(f"missing optimizer moments for {name}")
 
 
 class LRSchedule:

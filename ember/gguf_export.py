@@ -280,7 +280,7 @@ def _infer_type(value: Any) -> int:
 
 
 def ember_to_llama_tensors(cfg: ModelConfig, params: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
-    """Rename/transpose Ember parameters into llama.cpp ``gpt2`` tensors."""
+    """Rename/transpose EMB4 parameters into llama.cpp ``llama`` tensors."""
     expected = dict(tensor_specs(cfg))
     extra = set(params) - set(expected)
     if extra: raise GgufExportError(f"unexpected tensors: {sorted(extra)}")
@@ -307,9 +307,7 @@ def ember_to_llama_tensors(cfg: ModelConfig, params: dict[str, np.ndarray]) -> d
     return out
 
 
-#: Tensors that may be quantized without harming quality materially. Embeddings,
-#: positional embeddings and all biases stay float32 (upstream quantizers do the
-#: same, and llama.cpp requires ``position_embd`` rows for ``ggml_get_rows``).
+# Quantize eligible projection matrices; embedding and RMS gains stay float32.
 QUANTIZABLE_SUFFIXES = (
     "attn_q.weight",
     "attn_k.weight",
@@ -368,7 +366,7 @@ class ExportReport:
 
 
 def validate_export_config(cfg: ModelConfig, tokenizer: BPETokenizer) -> None:
-    """Reject configurations llama.cpp's gpt2 arch cannot represent.
+    """Reject configurations llama.cpp's Llama arch cannot represent.
 
     Every failure is raised as :class:`GgufExportError` so callers (RPC, CLI,
     tests) handle one exception type with an actionable message.
@@ -379,7 +377,7 @@ def validate_export_config(cfg: ModelConfig, tokenizer: BPETokenizer) -> None:
         raise GgufExportError(f"model configuration cannot be exported to GGUF: {exc}") from exc
     if cfg.n_embd % cfg.n_head != 0:
         raise GgufExportError(
-            f"embedding {cfg.n_embd} is not divisible by {cfg.n_head} heads (required by gpt2 attention)"
+            f"embedding {cfg.n_embd} is not divisible by {cfg.n_head} heads (required by Llama attention)"
         )
     if cfg.n_embd < cfg.n_head:
         raise GgufExportError(f"embedding {cfg.n_embd} is smaller than head count {cfg.n_head}")

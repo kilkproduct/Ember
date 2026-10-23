@@ -19,6 +19,8 @@ on:
 jobs:
   apk:
     runs-on: ubuntu-latest
+    env:
+      OPENBLAS_NUM_THREADS: "1"
     steps:
       - uses: actions/checkout@v4
 

@@ -217,6 +217,29 @@ fun VesselScreen(
                     )
                 }
                 Spacer(Modifier.height(10.dp))
+                Text("Llama architecture · RMSNorm · adjacent-pair RoPE · SwiGLU", style = MaterialTheme.typography.bodySmall)
+                NumberStepper(
+                    label = "KV heads (must divide query heads)", value = form.kvHeads,
+                    onValueChange = { value -> vm.updateVessel { it.copy(kvHeads = value) } },
+                    step = 1.0, min = 1.0, max = 8.0, enabled = !casting,
+                )
+                NumberStepper(
+                    label = "RoPE frequency base", value = form.ropeTheta,
+                    onValueChange = { value -> vm.updateVessel { it.copy(ropeTheta = value) } },
+                    step = 10000.0, min = 10000.0, max = 1000000.0, enabled = !casting,
+                )
+                NumberStepper(
+                    label = "Training preparation token limit", value = form.maxTrainTokens,
+                    onValueChange = { value -> vm.updateVessel { it.copy(maxTrainTokens = value) } },
+                    step = 100000.0, min = 1000.0, max = 10000000.0, enabled = !casting,
+                    helper = "Explicit subset budget; unused source documents remain in Fuel.",
+                )
+                NumberStepper(
+                    label = "Tokenizer sample character limit", value = form.tokenizerChars,
+                    onValueChange = { value -> vm.updateVessel { it.copy(tokenizerChars = value) } },
+                    step = 100000.0, min = 1000.0, max = 10000000.0, enabled = !casting,
+                    helper = "Fits BPE only on training documents, never validation documents.",
+                )
                 ChoiceRow(
                     label = "FFN multiplier",
                     options = listOf("2" to "2×", "3" to "3×", "4" to "4×", "6" to "6×"),

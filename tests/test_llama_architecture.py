@@ -102,3 +102,91 @@ def test_legacy_gpt_checkpoint_is_rejected_without_modification(tmp_path):
     path=tmp_path/'old.emb'; data=b'EMB3'+b'\0'*100;path.write_bytes(data)
     with pytest.raises(ValueError,match='magic'):load_model(path)
     assert path.read_bytes()==data
+
+
+def make_backend(path):
+    from ember.backend import EmberBackend
+    b=EmberBackend(path)
+    for i in range(5):
+        b.dispatch('corpus.addText',{'title':str(i),'text':('The tide rises and falls. '* (i+3))})
+    b.dispatch('vessel.cast',{'config':{'nLayer':1,'nHead':2,'nEmbd':32,
+        'blockSize':16,'vocabSize':300},'seed':13})
+    return b
+
+
+def test_gradient_accumulation_matches_large_batch(tmp_path):
+    a=make_backend(tmp_path/'a');b=make_backend(tmp_path/'b')
+    try:
+        opts={'steps':2,'every':0,'validateEvery':0,'lr':.001}
+        a.dispatch('train.sync',dict(opts,batch=4))
+        b.dispatch('train.sync',dict(opts,batch=2,gradientAccumulation=2))
+        assert a.trainer.tokens_processed==b.trainer.tokens_processed
+        for k in a.trainer.model.params:
+            np.testing.assert_allclose(a.trainer.model.params[k],b.trainer.model.params[k],atol=3e-6,rtol=3e-5,err_msg=k)
+    finally:a.close();b.close()
+
+
+def test_checkpoint_resume_preserves_optimizer_schedule_and_sampling(tmp_path):
+    a=make_backend(tmp_path/'full');b=make_backend(tmp_path/'resume')
+    try:
+        opts={'steps':8,'batch':2,'every':0,'validateEvery':0,'lr':.002}
+        a.dispatch('train.sync',opts)
+        old_emit=b.trainer._emit
+        def emit(event,data):
+            if event=='train.progress' and data['step']==3:b.trainer.stop()
+            old_emit(event,data)
+        b.trainer._emit=emit
+        b.dispatch('train.sync',opts)
+        assert b.trainer.step==3
+        b.trainer.save_checkpoint('pause')
+        b.trainer._emit=old_emit
+        b.trainer.load_checkpoint('pause')
+        assert b.trainer.optimizer.t==3 and b.trainer.schedule_state['position']==3
+        b.dispatch('train.sync',dict(opts,steps=5,resumeSchedule=True))
+        assert b.trainer.step==8
+        for k in a.trainer.model.params:
+            np.testing.assert_array_equal(a.trainer.model.params[k],b.trainer.model.params[k],err_msg=k)
+    finally:a.close();b.close()
+
+
+def test_tokenizer_fit_excludes_validation_and_records_preparation_limits(tmp_path):
+    b=make_backend(tmp_path/'split')
+    try:
+        split=b.corpus.get_kv('training:split')
+        val=set(split['validationIds'])
+        assert val
+        assert val.isdisjoint({s.doc_id for s in b.trainer.train_stream.spans})
+        assert val=={s.doc_id for s in b.trainer.val_stream.spans}
+        b.dispatch('vessel.cast',{'config':{'nLayer':1,'nHead':2,'nEmbd':32,'blockSize':16,
+            'vocabSize':300,'maxTrainTokens':40,'maxValTokens':40,'tokenizerChars':40},'seed':1})
+        status=b.trainer.status()
+        assert status['preparationLimits']['maxTrainTokens']==40
+        assert b.trainer.train_stream.n_tokens<=40
+        assert b.corpus.count()==5
+        from ember.tokenizer import train_bpe
+        texts=[];remaining=40
+        for doc in b.corpus.iter_documents():
+            if doc.id in val:continue
+            texts.append(doc.text[:remaining]);remaining-=len(texts[-1])
+            if remaining<=0:break
+        assert b.trainer.tokenizer.to_dict()==train_bpe(texts,vocab_size=300,min_pair_count=2).to_dict()
+    finally:b.close()
+
+
+def test_interrupted_checkpoint_publication_restores_consistent_old_state(tmp_path,monkeypatch):
+    b=make_backend(tmp_path/'checkpoint')
+    try:
+        opts={'steps':2,'batch':2,'every':0,'validateEvery':0}
+        b.dispatch('train.sync',opts);b.trainer.save_checkpoint('stable')
+        before={k:v.copy() for k,v in b.trainer.model.params.items()}
+        b.dispatch('train.sync',opts)
+        real_replace=os.replace
+        def fail(src,dst):
+            if str(dst).endswith('stable.emb'):raise OSError('simulated crash before checkpoint commit')
+            return real_replace(src,dst)
+        monkeypatch.setattr(os,'replace',fail)
+        with pytest.raises(OSError):b.trainer.save_checkpoint('stable')
+        b.trainer.load_checkpoint('stable')
+        assert b.trainer.step==2 and b.trainer.optimizer.t==2
+        for k in before:np.testing.assert_array_equal(before[k],b.trainer.model.params[k])
+    finally:b.close()

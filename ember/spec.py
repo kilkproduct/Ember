@@ -1,18 +1,6 @@
-"""Shared Ember model + tokenizer specification, version 3.
+"""EMB4 Llama training tensor schema and shared byte-BPE special IDs.
 
-This module is the single source of truth for everything the Python trainer
-(``ember.model``) and the native C++ inference engine (``native/``) must agree
-on:
-
-* the on-disk weight format (``.emb``, magic ``EMB3``),
-* the tensor names, shapes and row-major float32 ordering,
-* the tokenizer contract (byte-level BPE, special ids, pre-tokenizer rules),
-* the numeric details (LayerNorm epsilon, GELU variant, attention scaling).
-
-Both implementations read this file's *behaviour*, not its code: the C++ side
-re-implements the same rules in ``native/src/model.cpp`` / ``bpe.cpp``.  The
-constants and layout below are mirrored in ``native/include/ember/spec.hpp``
-and cross-checked by ``tests/python/test_interop.py``.
+Inference metadata/layout is defined by ember.gguf_export and official llama.cpp.
 """
 
 from __future__ import annotations
@@ -165,42 +153,16 @@ def tensor_specs(cfg) -> list[tuple[str, list[int]]]:
     return specs
 
 
-def estimate_params(n_layer: int, n_head: int, n_embd: int, block_size: int, vocab_size: int, ffn_mult: float = 4.0) -> int:
-    """Number of trainable float32 parameters."""
-    f = ffn_dim(n_embd, ffn_mult)
-    embed = vocab_size * n_embd + block_size * n_embd
-    per_block = (
-        4 * n_embd * n_embd  # qkv + attn projection
-        + 2 * n_embd * f  # mlp
-        + 3 * n_embd  # qkv bias
-        + n_embd  # attn proj bias
-        + f  # mlp fc bias
-        + n_embd  # mlp proj bias
-        + 4 * n_embd  # two layernorms
-    )
-    total = embed + n_layer * per_block + 2 * n_embd
-    return int(total)
+def estimate_params(n_layer: int, n_head: int, n_embd: int, block_size: int, vocab_size: int,
+                    ffn_mult: float = 4.0, n_kv_head: int = 1, tie_embeddings: bool = True) -> int:
+    """Bias-free Llama parameter count (no learned position table)."""
+    f = ffn_dim(n_embd,ffn_mult)
+    kv = n_kv_head*(n_embd//n_head)
+    return vocab_size*n_embd*(1 if tie_embeddings else 2) + n_embd + n_layer*(
+        2*n_embd*n_embd + 2*n_embd*kv + 3*n_embd*f + 2*n_embd)
 
 
 def estimate_train_bytes(params: int) -> int:
     """Weights + gradients + Adam first/second moments (float32)."""
     return int(params) * 16
 
-
-def gelu(x):
-    """tanh-approximated GELU (the only activation in Ember v3)."""
-    import numpy as np
-
-    c = 0.7978845608028654  # sqrt(2 / pi)
-    return 0.5 * x * (1.0 + np.tanh(c * (x + 0.044715 * x * x * x)))
-
-
-def gelu_back(x, dy):
-    """d/dx gelu(x) * dy, using the activation input ``x``."""
-    import numpy as np
-
-    c = 0.7978845608028654
-    t = np.tanh(c * (x + 0.044715 * x * x * x))
-    inner = 1.0 + 0.134145 * x * x  # 3 * 0.044715
-    dt = (1.0 - t * t) * c * inner
-    return dy * (0.5 * (1.0 + t) + 0.5 * x * dt)

@@ -37,9 +37,8 @@ def test_upstream_forward_logits_and_greedy(fixture):
     for text in ['hi', 'Café 灯台 🔥', 'hello world!']:
         ids = [257] + tok.encode(text)
         expected = model.forward_logits(np.array([ids], dtype=np.int32))[0, -1]
-        # Upstream ggml-cpu/vec.h defines GGML_GELU_FP16: even the F32
-        # kernel uses its fp16 LUT, unlike NumPy's analytic tanh. Measured max
-        # error is 1.26e-4; use an explicit 2e-4 bound, not text plausibility.
+        # Explicit F32 CPU tolerance covers backend reduction/SiLU rounding;
+        # this compares actual logits, not plausibility of generated text.
         np.testing.assert_allclose(engine.forward_logits(ids), expected, atol=2e-4, rtol=2e-4)
     a = engine.generate('hello', GenParams(max_tokens=12, temperature=0, repeat_penalty=1, seed=7))
     b = engine.generate('hello', GenParams(max_tokens=12, temperature=0, repeat_penalty=1, seed=7))
@@ -123,8 +122,8 @@ def test_random_seed_is_actual_replayable_seed(fixture):
 
 def test_repetition_penalty_uses_upstream_sampler_chain(fixture, tmp_path):
     engine, tok, model, _ = fixture
-    # A controlled *valid GPT-2 graph*, not a mocked sampler: zero blocks, final
-    # norm bias selects dimension 0, and two output rows compete at logits 2/1.8.
+    # A controlled valid Llama graph: zero residual branches and a BOS
+    # embedding in dimension 0. RMSNorm and two tied output rows compete.
     # First token is A. After repeat_penalty=1.6 its score is 1.25, so B must win.
     for weight in model.params.values(): weight.fill(0)
     model.params['output_norm.weight'][0] = 1

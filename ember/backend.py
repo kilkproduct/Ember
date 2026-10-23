@@ -101,16 +101,20 @@ class EmberBackend:
                 from .tokenizer import BPETokenizer
 
                 cfg, params, meta = load_model(self.trainer.active_model_path)
-                tok = BPETokenizer.load(self.trainer.active_tokenizer_path)
+                tok = BPETokenizer.from_dict(meta["tokenizer"]) if meta.get("tokenizer") else BPETokenizer.load(self.trainer.active_tokenizer_path)
                 self.trainer.cfg = cfg
                 self.trainer.tokenizer = tok
                 self.trainer.model = GPT(cfg, params=params)
                 self.trainer.optimizer = AdamW(self.trainer.model.params, lr=3e-4)
-                if self.trainer.active_optimizer_path.exists():
-                    try:
-                        self.trainer.optimizer.load_npz(self.trainer.active_optimizer_path)
-                    except Exception:
-                        pass
+                opt_name=meta.get("optimizer_file")
+                if opt_name:
+                    if Path(opt_name).name != opt_name: raise ValueError("invalid optimizer reference")
+                    self.trainer.optimizer.load_npz(self.trainer.models_dir/opt_name)
+                elif self.trainer.active_optimizer_path.exists():
+                    self.trainer.optimizer.load_npz(self.trainer.active_optimizer_path)
+                state=meta.get("training_state",{})
+                self.trainer.schedule_state=state.get("schedule",{})
+                self.trainer.batcher_state=state.get("batcher",{})
                 self.trainer.step = int(meta.get("step", 0))
                 self.trainer.rebuild_streams_if_needed()
                 # Restore the GGUF the native engine loads (weights come from
@@ -121,8 +125,8 @@ class EmberBackend:
                 except GgufExportError:
                     pass
                 self._handle_model_synced(self.trainer.active_model_path, self.trainer.active_tokenizer_path)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.trainer._log(f"! Active checkpoint recovery failed: {exc}; corpus preserved.")
 
     def _maybe_auto_fire_after_forage(self) -> None:
         if self.trainer.ready and not self.trainer.running and not self.trainer.starting:

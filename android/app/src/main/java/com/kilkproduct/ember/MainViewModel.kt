@@ -49,6 +49,10 @@ data class VesselForm(
     val dropout: String = "0",
     val ffn: String = "4",
     val tokenizer: String = "byte-bpe",
+    val kvHeads: String = "1",
+    val ropeTheta: String = "500000",
+    val maxTrainTokens: String = "3000000",
+    val tokenizerChars: String = "2000000",
     val lr: String = "0.0003",
 )
 
@@ -200,6 +204,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val vocab = form.vocab.toIntOrNull() ?: return null
         val dropout = form.dropout.toDoubleOrNull() ?: 0.0
         val ffn = form.ffn.toDoubleOrNull() ?: 4.0
+        val kv = form.kvHeads.toIntOrNull() ?: return null
+        val theta = form.ropeTheta.toDoubleOrNull() ?: return null
+        val tokenBudget = form.maxTrainTokens.toIntOrNull() ?: return null
+        val tokenizerBudget = form.tokenizerChars.toIntOrNull() ?: return null
+        if (kv < 1 || heads % kv != 0 || !theta.isFinite() || theta <= 0 || tokenBudget < 32 || tokenizerBudget < 32) return null
         if (layers !in 2..6 || heads !in 2..8 || embd !in 32..256) return null
         if (ctx !in 32..256 || vocab !in 500..6000) return null
         if (embd % heads != 0 || (embd / heads) % 2 != 0 || dropout != 0.0) return null
@@ -211,6 +220,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             vocabSize = vocab,
             dropout = dropout,
             ffnMult = ffn,
+            nKvHead = kv,
+            ropeTheta = theta,
+            maxTrainTokens = tokenBudget,
+            tokenizerChars = tokenizerBudget,
         )
     }
 

@@ -122,3 +122,37 @@ verifies APK contents and uploads `Ember-debug.apk`. Final CI outcome is reporte
 in the implementation response, not assumed here. No physical Android device or
 emulator is available: install/start, JNI execution on Android, interactive SAF,
 UI responsiveness and airplane-mode operation on a phone remain unverified.
+
+## Training CLI, accumulation and transactional resume
+
+For an existing Ember data directory (no deletion/re-download):
+
+```sh
+python -m ember.train --data ./data --preset phone --steps 200 --batch 2 \
+  --lr 0.0003 --seed 42 --max-train-tokens 100000 \
+  --tokenizer-chars 200000 --export ./model.gguf --quantization q8_0
+# Optional --jsonl documents.jsonl imports documents line by line.
+# Optional --config overrides.json supplies architecture/preparation keys.
+# --resume cli-latest resumes a named checkpoint rather than recasting.
+```
+
+Vessel now exposes KV heads, RoPE theta, training token budget and tokenizer sample
+budget. Python/RPC `train.sync` supports `gradientAccumulation` (1–64) and
+`weightDecay`. Accumulated gradients are weighted by valid loss-token counts;
+tokens/throughput account for all microbatches. Cancellation does not apply a
+partial accumulated update. Unsupported settings fail explicitly.
+
+EMB4 checkpoint metadata now embeds tokenizer and training state. Adam moments
+and hyperparameters are written to an immutable referenced NPZ **before** atomic
+publication of the EMB4 commit marker. Readers prefer embedded metadata, so a
+failed later checkpoint cannot pair old weights with new optimizer/scheduler
+state. Superseded generated optimizer snapshots are removed only after successful
+publication; legacy files remain backed up. `resumeSchedule=true` restores cosine
+schedule position, RNG state and shuffled-batch cursor/order; a normal new Fire
+starts a fresh schedule. An interrupted/resumed run is tested bit-for-bit against
+an uninterrupted run. Restart recovery logs errors rather than silently hiding them.
+
+Latest local suite: **99 passed**, with two visible overflow warnings from the
+deliberate runaway-learning-rate test. Actual native F32 and Q8_0 fixtures, each
+trained four steps, both pass the C++ lifecycle/generation suite. CLI and Android
+CI verification results are reported separately when executed.

@@ -10,7 +10,7 @@
   "destination": "third_party/llama.cpp",
   "selected_because": [
     "b11836 is the newest upstream release tag at the time of the migration (2026-10-23), so it is a published snapshot rather than an arbitrary master commit.",
-    "It implements the `gpt2` architecture (src/models/gpt2.cpp) that matches Ember's trained model exactly: learned positional embeddings, pre-LayerNorm with biases, fused QKV with bias, attention output with bias, MLP fc/proj with biases, tied output head, and ggml_gelu == Ember's tanh GELU.",
+    "Its llama architecture (src/models/llama.cpp) supports the EMB4 bias-free RMSNorm, adjacent-pair RoPE, GQA, SwiGLU decoder and tied or untied output; tokenizer metadata independently supports Ember byte-level BPE.",
     "Its Android build path is documented (docs/android.md) with the exact CMake options used by native/llama/CMakeLists.txt: GGML_NATIVE=OFF, GGML_OPENMP=OFF, GGML_LLAMAFILE=OFF, LLAMA_OPENSSL=OFF.",
     "The C API used by native/llama (llama_model_load_from_file, llama_init_from_model, llama_batch_get_one, llama_decode, llama_sampler_chain_*, llama_tokenize/llama_detokenize, llama_memory_clear) is present and stable in this revision (include/llama.h, LLAMA_SESSION_VERSION 11)."
   ]
