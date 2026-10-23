@@ -205,3 +205,36 @@ def test_reused_cross_entropy_buffer_matches_float64_oracle_without_mutating_log
     assert abs(loss-expected_loss)<2e-6
     np.testing.assert_allclose(grad,expected,rtol=2e-6,atol=1e-8)
     np.testing.assert_array_equal(x,before)
+
+
+def test_quantized_size_table_matches_exact_pinned_upstream():
+    import runpy
+    from pathlib import Path
+    from ember.gguf_export import _dtype_nbytes
+    source=Path('third_party/llama.cpp/gguf-py/gguf/constants.py')
+    if not source.exists():pytest.skip('fetch checksum-verified pinned llama.cpp source to compare its table')
+    table=runpy.run_path(str(source))['GGML_QUANT_SIZES']
+    for dtype,(block,size) in table.items():assert _dtype_nbytes(int(dtype),[block])==size
+
+
+def test_gguf_mapping_is_closed_on_header_failure(tmp_path,monkeypatch):
+    import mmap
+    from ember import gguf_export
+    path=tmp_path/'invalid.gguf';path.write_bytes(b'NOTGGUF!'+b'\0'*64)
+    mappings=[];real=mmap.mmap
+    def mapped(*args,**kwargs):
+        result=real(*args,**kwargs);mappings.append(result);return result
+    monkeypatch.setattr(gguf_export.mmap,'mmap',mapped)
+    with pytest.raises(ValueError):gguf_export.read_gguf_header(path)
+    assert mappings and all(m.closed for m in mappings)
+
+
+def test_backend_presets_match_all_android_phone_shapes_and_explicit_ffn():
+    from ember.spec import PRESETS
+    from ember.trainer import estimate_vessel
+    for name in ('micro','deep-narrow','wide-shallow','gqa-4','ffn-rich','long-context','vocab-50k'):
+        p=PRESETS[name]
+        cfg=ModelConfig(**{k:v for k,v in p.items() if k!='dropout'})
+        cfg.validate();estimate=estimate_vessel({'preset':name})
+        assert estimate['params']==cfg.n_params
+    assert not estimate_vessel({'preset':'long-context'})['blocked']

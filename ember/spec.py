@@ -133,6 +133,19 @@ PRESETS = {
     "desktop": {"n_layer": 8, "n_head": 8, "n_embd": 256, "block_size": 384, "vocab_size": 8192, "dropout": 0.0},
 }
 
+# Phone-facing presets are mirrored by MainViewModel.VESSEL_PRESETS; keep the
+# existing tablet/desktop CLI names for compatibility. These are shapes, not
+# measured quality/device-fit guarantees.
+PRESETS.update({
+    "micro":dict(n_layer=1,n_head=2,n_embd=32,block_size=32,vocab_size=500,dropout=0.0),
+    "deep-narrow":dict(n_layer=8,n_head=4,n_kv_head=2,n_embd=64,block_size=128,vocab_size=2000,dropout=0.0),
+    "wide-shallow":dict(n_layer=2,n_head=8,n_kv_head=2,n_embd=256,block_size=128,vocab_size=8000,dropout=0.0),
+    "gqa-4":dict(n_layer=4,n_head=8,n_kv_head=4,n_embd=128,block_size=256,vocab_size=4000,dropout=0.0),
+    "ffn-rich":dict(n_layer=3,n_head=4,n_kv_head=2,n_embd=128,block_size=128,vocab_size=4000,ffn_mult=8.0,dropout=0.0),
+    "long-context":dict(n_layer=1,n_head=1,n_kv_head=1,n_embd=32,block_size=2048,vocab_size=2000,dropout=0.0),
+    "vocab-50k":dict(n_layer=2,n_head=4,n_kv_head=1,n_embd=64,block_size=128,vocab_size=50000,dropout=0.0),
+})
+
 
 def ffn_dim(n_embd: int, ffn_mult: float) -> int:
     return max(1, int(round(n_embd * float(ffn_mult or DEFAULT_FFN_MULT))))

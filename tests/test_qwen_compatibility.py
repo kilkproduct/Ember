@@ -12,7 +12,7 @@ from ember.model import ModelConfig,Llama
 from ember.inference import LlamaCppEngine,EngineConfig,GenParams
 
 
-def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph',quantized=False):
+def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph',quantized=False,head_dim=32):
     tok=train_bpe(['Hello world. A small deterministic fixture. '*20],vocab_size=300)
     tokens,types,merges=gguf_vocab_entries(tok.vocab,tok.merges,special_ids=(256,257,258,259,260))
     start=len(tokens);end=start+1
@@ -21,8 +21,12 @@ def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph',quantized=False):
     model=Llama(cfg,seed=42)
     tensors=ember_to_llama_tensors(cfg,model.params)
     if arch=='qwen3':
-        tensors['blk.0.attn_q_norm.weight']=np.ones(32,np.float32)
-        tensors['blk.0.attn_k_norm.weight']=np.ones(32,np.float32)
+        tensors['blk.0.attn_q_norm.weight']=np.ones(head_dim,np.float32)
+        tensors['blk.0.attn_k_norm.weight']=np.ones(head_dim,np.float32)
+        if head_dim!=32:
+            rng=np.random.default_rng(7)
+            for suffix,shape in [('q',(2*head_dim,64)),('k',(head_dim,64)),('v',(head_dim,64)),('output',(64,2*head_dim))]:
+                tensors['blk.0.attn_'+suffix+'.weight']=(rng.standard_normal(shape)*.01).astype(np.float32)
     else:
         tensors['blk.0.attn_q.bias']=np.zeros(64,np.float32)
         tensors['blk.0.attn_k.bias']=np.zeros(32,np.float32)
@@ -30,8 +34,9 @@ def qwen_fixture(path,arch='qwen2',name='Qwen2 test graph',quantized=False):
     w=GgufWriter(arch)
     w.add_string('general.architecture',arch);w.add_string('general.name',name)
     for suffix,value in [('context_length',2048),('embedding_length',64),('block_count',1),
-        ('feed_forward_length',256),('attention.head_count',2),('attention.head_count_kv',1),('rope.dimension_count',32)]:
+        ('feed_forward_length',256),('attention.head_count',2),('attention.head_count_kv',1),('rope.dimension_count',head_dim)]:
         w.add_u32(arch+'.'+suffix,value)
+    w.add_u32(arch+'.attention.key_length',head_dim);w.add_u32(arch+'.attention.value_length',head_dim)
     w.add_f32(arch+'.attention.layer_norm_rms_epsilon',1e-6)
     w.add_f32(arch+'.rope.freq_base',1000000)
     w.add_string('tokenizer.ggml.model','gpt2');w.add_string('tokenizer.ggml.pre','qwen2')
@@ -64,4 +69,15 @@ def test_dense_qwen_load_template_context_stream_cancel_and_recovery(tmp_path,ar
         assert result.prompt_tokens==len(e.tokenize(rendered,parse_special=True))
         assert e.generate('Hello',GenParams(max_tokens=4,temperature=0,stop_on_eos=False)).new_tokens==4
         e.unload();assert not e.is_loaded()
+    finally:e.close()
+
+
+@pytest.mark.parametrize('quantized',[False,True])
+def test_qwen3_independent_head_dimensions(tmp_path,quantized):
+    path=tmp_path/'independent.gguf';qwen_fixture(path,'qwen3',quantized=quantized,head_dim=64)
+    assert validate_gguf_file(path)['arch']=='qwen3'
+    e=LlamaCppEngine()
+    try:
+        e.load_model(path,EngineConfig(n_ctx=2048,n_batch=64,n_ubatch=16,n_threads=2))
+        assert e.generate('Hello',GenParams(max_tokens=3,temperature=0,stop_on_eos=False)).new_tokens==3
     finally:e.close()

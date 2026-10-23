@@ -88,6 +88,12 @@ if (NOT MSVC)
     target_compile_options(ember_llama PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# Only Ember's C ABI / JNI are public. Hide static upstream archive symbols;
+# permits ELF dead-section elimination without changing upstream model graphs.
+if (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(ember_llama PRIVATE "-Wl,--exclude-libs,ALL" "-Wl,--gc-sections")
+endif()
+
 if (ANDROID)
     target_sources(ember_llama PRIVATE src/ember_llama_jni.cpp)
     target_compile_definitions(ember_llama PRIVATE __ANDROID__=1)

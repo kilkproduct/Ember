@@ -557,11 +557,11 @@ def _dtype_nbytes(dtype: int, dims: Sequence[int]) -> int:
         numel *= int(d)
     # Pinned upstream gguf/constants.py GGML_QUANT_SIZES. No runtime dependency
     # on gguf-py in the APK; unsupported/new types fail closed.
-    sizes = {0:(1,4),1:(1,2),2:(32,18),3:(32,20),6:(32,22),7:(32,24),8:(32,34),9:(32,40),
+    sizes = {0:(1,4),1:(1,2),2:(32,18),3:(32,20),6:(32,22),7:(32,24),8:(32,34),9:(32,36),
         10:(256,84),11:(256,110),12:(256,144),13:(256,176),14:(256,210),15:(256,292),
         16:(256,66),17:(256,74),18:(256,98),19:(256,50),20:(32,18),21:(256,110),
         22:(256,82),23:(256,136),24:(1,1),25:(1,2),26:(1,4),27:(1,8),28:(1,8),
-        29:(256,56),30:(1,2),34:(256,54),35:(256,66),39:(32,17),40:(64,36),41:(128,18)}
+        29:(256,56),30:(1,2),34:(256,54),35:(256,66),39:(32,17),40:(64,36),41:(128,18),42:(64,18)}
     if dtype not in sizes: raise GgufExportError(f"unsupported GGUF tensor dtype {dtype}")
     block,size=sizes[dtype]
     if not dims or any(d<=0 for d in dims) or dims[0]%block or numel%block:
@@ -580,104 +580,115 @@ def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> 
     with open(p, "rb") as fh:
         head = mmap.mmap(fh.fileno(), length=min(size,max_bytes), access=mmap.ACCESS_READ)
 
-    magic = struct.unpack_from("<I", head, 0)[0]
-    if magic != GGUF_MAGIC:
-        raise GgufExportError(describe_incompatible_bytes(head, name=p.name))
-    version = struct.unpack_from("<I", head, 4)[0]
-    if version != GGUF_VERSION:
-        raise GgufExportError(f"unsupported GGUF version {version} (this build writes version {GGUF_VERSION})")
-    n_tensors = struct.unpack_from("<Q", head, 8)[0]
-    n_kv = struct.unpack_from("<Q", head, 16)[0]
-    if n_tensors > 100000 or n_kv > 100000:
-        raise GgufExportError(f"implausible GGUF header counts (tensors={n_tensors}, kv={n_kv})")
-
-    off = 24
-
-    def read_str() -> str:
-        nonlocal off
-        (ln,) = struct.unpack_from("<Q", head, off)
-        off += 8
-        if off + ln > len(head):
-            raise GgufExportError("truncated GGUF string")
-        raw = head[off : off + ln]
-        off += ln
-        return raw.decode("utf-8", errors="replace")
-
-    def read_val(vtype: int) -> Any:
-        nonlocal off
-        fmt, sz = {
-            _VT_U8: ("B", 1), _VT_I8: ("b", 1), _VT_U16: ("<H", 2), _VT_I16: ("<h", 2),
-            _VT_U32: ("<I", 4), _VT_I32: ("<i", 4), _VT_U64: ("<Q", 8), _VT_I64: ("<q", 8),
-            _VT_F32: ("<f", 4), _VT_F64: ("<d", 8),
-        }.get(vtype, (None, 0))
-        if fmt:
-            if off + sz > len(head):
-                raise GgufExportError("truncated GGUF metadata value")
-            val = struct.unpack_from(fmt, head, off)[0]
-            off += sz
-            return val
-        if vtype == _VT_BOOL:
-            val = struct.unpack_from("?", head, off)[0]
-            off += 1
-            return bool(val)
-        if vtype == _VT_STRING:
-            return read_str()
-        if vtype == _VT_ARRAY:
-            (ltype,) = struct.unpack_from("<I", head, off)
+    try:
+        magic = struct.unpack_from("<I", head, 0)[0]
+        if magic != GGUF_MAGIC:
+            raise GgufExportError(describe_incompatible_bytes(head, name=p.name))
+        version = struct.unpack_from("<I", head, 4)[0]
+        if version != GGUF_VERSION:
+            raise GgufExportError(f"unsupported GGUF version {version} (this build writes version {GGUF_VERSION})")
+        n_tensors = struct.unpack_from("<Q", head, 8)[0]
+        n_kv = struct.unpack_from("<Q", head, 16)[0]
+        if n_tensors > 100000 or n_kv > 100000:
+            raise GgufExportError(f"implausible GGUF header counts (tensors={n_tensors}, kv={n_kv})")
+    
+        off = 24
+    
+        def read_str() -> str:
+            nonlocal off
+            (ln,) = struct.unpack_from("<Q", head, off)
+            off += 8
+            if off + ln > len(head):
+                raise GgufExportError("truncated GGUF string")
+            raw = head[off : off + ln]
+            off += ln
+            return raw.decode("utf-8", errors="replace")
+    
+        def read_val(vtype: int, depth: int = 0) -> Any:
+            nonlocal off
+            if depth>4:raise GgufExportError("GGUF metadata array nesting exceeds safety limit")
+            fmt, sz = {
+                _VT_U8: ("B", 1), _VT_I8: ("b", 1), _VT_U16: ("<H", 2), _VT_I16: ("<h", 2),
+                _VT_U32: ("<I", 4), _VT_I32: ("<i", 4), _VT_U64: ("<Q", 8), _VT_I64: ("<q", 8),
+                _VT_F32: ("<f", 4), _VT_F64: ("<d", 8),
+            }.get(vtype, (None, 0))
+            if fmt:
+                if off + sz > len(head):
+                    raise GgufExportError("truncated GGUF metadata value")
+                val = struct.unpack_from(fmt, head, off)[0]
+                off += sz
+                return val
+            if vtype == _VT_BOOL:
+                val = struct.unpack_from("?", head, off)[0]
+                off += 1
+                return bool(val)
+            if vtype == _VT_STRING:
+                return read_str()
+            if vtype == _VT_ARRAY:
+                (ltype,) = struct.unpack_from("<I", head, off)
+                off += 4
+                (count,) = struct.unpack_from("<Q", head, off)
+                off += 8
+                if count > 5_000_000:
+                    raise GgufExportError(f"implausible GGUF array length {count}")
+                return [read_val(ltype,depth+1) for _ in range(count)]
+            raise GgufExportError(f"unsupported GGUF metadata type {vtype}")
+    
+        metadata: dict[str, Any] = {}
+        for _ in range(n_kv):
+            key = read_str()
+            (vtype,) = struct.unpack_from("<I", head, off)
             off += 4
-            (count,) = struct.unpack_from("<Q", head, off)
+            if key in metadata:raise GgufExportError("duplicate GGUF metadata key: "+key)
+            metadata[key] = read_val(vtype)
+    
+        tensors: list[GgufTensorMeta] = []
+        for _ in range(n_tensors):
+            name = read_str()
+            (n_dims,) = struct.unpack_from("<I", head, off)
+            off += 4
+            if n_dims < 1 or n_dims > 8:
+                raise GgufExportError(f"tensor {name!r} has implausible dimension count {n_dims}")
+            dims = []
+            for _ in range(n_dims):
+                (d,) = struct.unpack_from("<Q", head, off)
+                off += 8
+                dims.append(int(d))
+            (dtype,) = struct.unpack_from("<I", head, off)
+            off += 4
+            (toffset,) = struct.unpack_from("<Q", head, off)
             off += 8
-            if count > 5_000_000:
-                raise GgufExportError(f"implausible GGUF array length {count}")
-            return [read_val(ltype) for _ in range(count)]
-        raise GgufExportError(f"unsupported GGUF metadata type {vtype}")
-
-    metadata: dict[str, Any] = {}
-    for _ in range(n_kv):
-        key = read_str()
-        (vtype,) = struct.unpack_from("<I", head, off)
-        off += 4
-        metadata[key] = read_val(vtype)
-
-    tensors: list[GgufTensorMeta] = []
-    for _ in range(n_tensors):
-        name = read_str()
-        (n_dims,) = struct.unpack_from("<I", head, off)
-        off += 4
-        if n_dims < 1 or n_dims > 8:
-            raise GgufExportError(f"tensor {name!r} has implausible dimension count {n_dims}")
-        dims = []
-        for _ in range(n_dims):
-            (d,) = struct.unpack_from("<Q", head, off)
-            off += 8
-            dims.append(int(d))
-        (dtype,) = struct.unpack_from("<I", head, off)
-        off += 4
-        (toffset,) = struct.unpack_from("<Q", head, off)
-        off += 8
-        nbytes = _dtype_nbytes(dtype, dims)
-        tensors.append(GgufTensorMeta(name=name, dims=tuple(dims), dtype=dtype, offset=toffset, nbytes=nbytes))
-
-    if len({t.name for t in tensors}) != len(tensors):
-        raise GgufExportError("duplicate GGUF tensors")
-    alignment = int(metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT))
-    if alignment < 1 or alignment > 4096 or alignment & (alignment-1):
-        raise GgufExportError("invalid GGUF alignment")
-    data_start = _ggml_pad(off, alignment)
-    last_end = max((t.offset + t.nbytes for t in tensors), default=0)
-    if data_start + last_end > size:
-        raise GgufExportError(
-            f"{p.name} is truncated: header claims {data_start + last_end} bytes but the file is {size}"
+            nbytes = _dtype_nbytes(dtype, dims)
+            tensors.append(GgufTensorMeta(name=name, dims=tuple(dims), dtype=dtype, offset=toffset, nbytes=nbytes))
+    
+        if len({t.name for t in tensors}) != len(tensors):
+            raise GgufExportError("duplicate GGUF tensors")
+        alignment = int(metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT))
+        if alignment < 1 or alignment > 4096 or alignment & (alignment-1):
+            raise GgufExportError("invalid GGUF alignment")
+        data_start = _ggml_pad(off, alignment)
+        last_end = max((t.offset + t.nbytes for t in tensors), default=0)
+        if data_start + last_end > size:
+            raise GgufExportError(
+                f"{p.name} is truncated: header claims {data_start + last_end} bytes but the file is {size}"
+            )
+        end=0
+        for tensor in sorted(tensors,key=lambda t:t.offset):
+            if tensor.offset%alignment or tensor.offset<end:raise GgufExportError("overlapping or unaligned GGUF tensors")
+            end=tensor.offset+tensor.nbytes
+        return GgufHeader(
+            version=version,
+            arch=str(metadata.get("general.architecture", "")),
+            metadata=metadata,
+            tensors=tensors,
+            alignment=alignment,
+            data_start=data_start,
         )
-    head.close()
-    return GgufHeader(
-        version=version,
-        arch=str(metadata.get("general.architecture", "")),
-        metadata=metadata,
-        tensors=tensors,
-        alignment=alignment,
-        data_start=data_start,
-    )
+    except (struct.error, UnicodeDecodeError) as exc:
+        raise GgufExportError("Truncated or malformed GGUF metadata/header") from exc
+    finally:
+        head.close()
+
 
 
 def describe_incompatible_bytes(head: bytes, *, name: str = "model") -> str:

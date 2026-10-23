@@ -1,0 +1,20 @@
+name: Native sanitizers
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, "arena/**"]
+    paths: ["native/**", "ember/gguf_export.py", "scripts/test-native-sanitizers.sh", ".github/workflows/native-sanitizers.yml"]
+jobs:
+  asan-ubsan:
+    runs-on: ubuntu-latest
+    env:
+      OPENBLAS_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: python -m pip install numpy
+      - run: scripts/fetch-llama-cpp.sh
+      - name: ASan, UBSan and leak checks against pinned upstream
+        run: scripts/test-native-sanitizers.sh

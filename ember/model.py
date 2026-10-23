@@ -63,6 +63,8 @@ class ModelConfig:
     def validate(self) -> None:
         for name in ("n_layer","n_head","n_embd","n_kv_head","block_size","vocab_size"):
             if not isinstance(getattr(self,name),int): raise ValueError(f"{name} must be an integer")
+        if not (1<=self.n_layer<=64 and 1<=self.n_head<=128 and 1<=self.n_embd<=8192 and 1<=self.block_size<=8192):
+            raise ValueError("Training shape exceeds bounded architecture limits")
         if self.intermediate_size is not None and (not isinstance(self.intermediate_size,int) or self.intermediate_size<1):
             raise ValueError("intermediate_size must be a positive integer")
         if not np.isfinite(self.ffn_mult) or self.ffn_mult<=0: raise ValueError("ffn_mult must be positive and finite")

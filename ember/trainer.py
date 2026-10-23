@@ -73,7 +73,7 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
     n_embd = int(cfg_in.get("nEmbd") or cfg_in.get("n_embd") or base["n_embd"])
     block_size = int(cfg_in.get("blockSize") or cfg_in.get("block_size") or base["block_size"])
     vocab_size = int(cfg_in.get("vocabSize") or cfg_in.get("vocab_size") or base["vocab_size"])
-    ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or 4.0)
+    ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or base.get("ffn_mult",4.0))
 
     if n_layer < 1 or n_head < 1 or n_embd < 1 or block_size < 4:
         raise ValueError("Model dimensions must all be positive integers (context >= 4).")
@@ -83,7 +83,7 @@ def estimate_vessel(params: dict[str, Any]) -> dict[str, Any]:
 
     candidate = ModelConfig(n_layer=n_layer, n_head=n_head, n_embd=n_embd,
                             block_size=block_size, vocab_size=vocab_size, ffn_mult=ffn_mult,
-                            n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head", 1))),
+                            n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head", base.get("n_kv_head",1)))),
                             rope_theta=float(cfg_in.get("ropeTheta", cfg_in.get("rope_theta",500000))),
                             intermediate_size=cfg_in.get("intermediate_size"),
                             tie_embeddings=bool(cfg_in.get("tie_embeddings",True)),
@@ -432,7 +432,7 @@ class Trainer:
         block_size = int(cfg_in.get("blockSize") or cfg_in.get("block_size") or base["block_size"])
         target_vocab = int(cfg_in.get("vocabSize") or cfg_in.get("vocab_size") or base["vocab_size"])
         self.requested_vocab=target_vocab
-        ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or 4.0)
+        ffn_mult = float(cfg_in.get("ffnMult") or cfg_in.get("ffn_mult") or base.get("ffn_mult",4.0))
         dropout = float(cfg_in.get("dropout", base.get("dropout", 0.0)))
         base_lr = float(params.get("lr", cfg_in.get("lr", 3e-4)))
 
@@ -498,7 +498,7 @@ class Trainer:
 
             _stage("model")
             cfg = ModelConfig(
-                n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head",1))),
+                n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head",base.get("n_kv_head",1)))),
                 rope_theta=float(cfg_in.get("ropeTheta",cfg_in.get("rope_theta",500000))),
                 rope_scaling=str(cfg_in.get("rope_scaling","none")),
                 tie_embeddings=bool(cfg_in.get("tie_embeddings",True)),
