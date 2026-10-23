@@ -149,7 +149,7 @@ class LlamaInference {
                 settings.nGpuLayers,
                 settings.useMmap,
                 settings.checkTensors,
-                settings.nUbatch.coerceAtMost(settings.nBatch),
+                settings.nUbatch,
             )
             val response = parse(raw)
             if (!response.optBoolean("ok", false)) {
@@ -270,6 +270,11 @@ data class EngineSettings(
     val useMmap: Boolean = true,
     val checkTensors: Boolean = true,
 ) {
+    init {
+        require(nCtx in 1..8192 && nBatch in 1..2048 && nUbatch in 1..nBatch && nThreads in 0..8 && nGpuLayers==0) {
+            "CPU inference requires context 1–8192, microbatch <= batch <= 2048, threads 0–8 and no GPU layers"
+        }
+    }
     companion object {
         fun fromJson(json: JSONObject?): EngineSettings {
             if (json == null) return EngineSettings()

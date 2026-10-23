@@ -65,6 +65,7 @@ data class ModelDescriptor(
     val nCtxTrain: Int = 0,
     val nCtx: Int = 0,
     val nBatch: Int = 0,
+    val microBatch: Int = 0,
     val nThreads: Int = 0,
     val nGpuLayers: Int = 0,
     val modelBytes: Long = 0,
@@ -89,7 +90,7 @@ data class ModelDescriptor(
                 vocabSize = json.optInt("vocabSize", 0),
                 nCtxTrain = json.optInt("nCtxTrain", 0),
                 nCtx = json.optInt("nCtx", 0),
-                nBatch = json.optInt("nBatch", 0),
+                nBatch = json.optInt("nBatch", 0),microBatch=json.optInt("microBatch",0),
                 nThreads = json.optInt("nThreads", 0),
                 nGpuLayers = json.optInt("nGpuLayers", 0),
                 modelBytes = json.optLong("modelBytes", 0),
@@ -112,7 +113,7 @@ data class ModelDescriptor(
         .put("vocabSize", vocabSize)
         .put("nCtxTrain", nCtxTrain)
         .put("nCtx", nCtx)
-        .put("nBatch", nBatch)
+        .put("nBatch", nBatch).put("microBatch",microBatch)
         .put("nThreads", nThreads)
         .put("nGpuLayers", nGpuLayers)
         .put("modelBytes", modelBytes)

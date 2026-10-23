@@ -268,6 +268,7 @@ def train_bpe(
     min_pair_count: int = 2,
     progress=None,
     total_hint: int = 0,
+    scan_progress=None,
 ) -> BPETokenizer:
     """Learn a byte-level BPE vocabulary from ``texts``.
 
@@ -277,7 +278,7 @@ def train_bpe(
     """
     if int(vocab_size)>50000: raise ValueError("Ember training vocabulary maximum is 50,000; imported model vocabularies are independent")
     vocab_size = max(FIRST_MERGE_ID + 1, int(vocab_size))
-    counts = _chunk_counts(texts, progress=progress, total_hint=total_hint)
+    counts = _chunk_counts(texts, progress=scan_progress, total_hint=total_hint)
     if not counts:
         raise ValueError("cannot train a tokenizer on an empty corpus")
 

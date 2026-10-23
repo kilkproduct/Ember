@@ -340,22 +340,21 @@ fun VesselScreen(
                             color = MaterialTheme.colorScheme.onPrimary,
                         )
                         Spacer(Modifier.width(8.dp))
-                        val pct = model.castProgress?.let { (it * 100).roundToInt() }
-                        Text(if (pct != null) "Casting… $pct%" else "Casting…")
+                        Text("Casting…")
                     } else {
                         Text(if (model.ready) "Cast new vessel (replaces weights)" else "Cast vessel from corpus")
                     }
                 }
-                if (casting && model.castProgress != null) {
+                if (casting) {
                     Spacer(Modifier.height(10.dp))
-                    LinearProgressIndicator(
-                        progress = { model.castProgress.toFloat().coerceIn(0f, 1f) },
-                        modifier = Modifier.fillMaxWidth().height(6.dp),
-                    )
+                    val castRatio=model.castProgress
+                    if(castRatio!=null)LinearProgressIndicator(progress={castRatio.toFloat().coerceIn(0f,1f)},modifier=Modifier.fillMaxWidth().height(6.dp))
+                    else LinearProgressIndicator(modifier=Modifier.fillMaxWidth().height(6.dp))
                     Text(
                         text = when (model.castStage) {
                             "corpus" -> "Counting the corpus…"
-                            "tokenizer" -> "Learning the tokenizer…"
+                            "tokenizer" -> "BPE merge target ${((model.castProgress ?: 0.0)*100).roundToInt()}% · corpus may finish earlier"
+                            "tokenizer-scan" -> "Reading the bounded tokenizer sample…"
                             "model" -> "Building the model…"
                             "stream" -> "Tokenizing documents into the training stream…"
                             else -> "Casting…"

@@ -427,6 +427,7 @@ fun VoiceScreen(
                 if (model != null && model.loaded) {
                     KeyValueRow("Model", model.name.ifBlank { model.path.substringAfterLast('/') })
                     KeyValueRow("Architecture", "${model.arch} · ${model.emberFormat.ifBlank { "gguf" }}")
+                    KeyValueRow("Applied CPU settings","${model.nThreads} threads · batch ${model.nBatch} · microbatch ${model.microBatch}")
                     KeyValueRow("Shape", "${model.vocabSize} vocab · ctx ${model.nCtx} · ${Formats.bytes(model.modelBytes)}")
                 } else {
                     KeyValueRow("Model", if (ui.libraryModels.isEmpty()) "none loaded yet" else "not loaded")

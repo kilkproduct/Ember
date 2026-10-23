@@ -452,15 +452,15 @@ class Trainer:
 
         self.casting = True
         try:
-            def _stage(stage: str, ratio: float) -> None:
+            def _stage(stage: str, ratio: float | None = None) -> None:
                 self.cast_stage = stage
                 self.cast_progress = ratio
                 self._emit("cast.progress", {"stage": stage, "ratio": ratio})
                 self._emit("model.castProgress", self.status())
 
-            _stage("corpus", 0.08)
+            _stage("corpus")
             n_docs = self.corpus.count()
-            _stage("tokenizer", 0.25)
+            _stage("tokenizer-scan")
             # Tokenizer fitting excludes validation documents and uses an explicit
             # bounded sample; source documents are never modified or deleted.
             holdout = compute_holdout_ids(self.corpus.id_kind_pairs(), holdout_frac=0.05)
@@ -477,12 +477,12 @@ class Trainer:
             tok = train_bpe(
                 tokenizer_sample(),
                 vocab_size=target_vocab,
-                progress=lambda done,total: _stage("tokenizer", .1+.45*done/max(1,total)) if done%32==0 else None,
+                progress=lambda done,total: _stage("tokenizer", done/max(1,total)) if done%32==0 else None,
                 min_pair_count=2,
                 total_hint=n_docs,
             )
 
-            _stage("stream", 0.60)
+            _stage("stream")
             rev = self.corpus.revision
             meta_rows = self.corpus.id_kind_pairs()
             holdout = compute_holdout_ids(meta_rows, holdout_frac=0.05)
@@ -496,7 +496,7 @@ class Trainer:
                 balance=self.balance_mode,
             )
 
-            _stage("model", 0.88)
+            _stage("model")
             cfg = ModelConfig(
                 n_kv_head=int(cfg_in.get("nKvHead", cfg_in.get("n_kv_head",1))),
                 rope_theta=float(cfg_in.get("ropeTheta",cfg_in.get("rope_theta",500000))),
