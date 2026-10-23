@@ -66,10 +66,15 @@ class ModelDocumentsProvider : DocumentsProvider() {
 class ModelDocumentGrantReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context,intent: Intent) {
         val target=intent.getStringExtra("targetPackage") ?: return
-        for (id in listOf("model","denied","truncated")) {
-            context.grantUriPermission(target,DocumentsContract.buildDocumentUri(ModelDocumentsProvider.AUTHORITY,id),Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            for (id in listOf("model","denied","truncated")) {
+                context.grantUriPermission(target,DocumentsContract.buildDocumentUri(ModelDocumentsProvider.AUTHORITY,id),Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            resultCode=android.app.Activity.RESULT_OK
+        } catch(e:Exception) {
+            resultCode=android.app.Activity.RESULT_CANCELED
+            resultData=e.stackTraceToString()
         }
-        resultCode=android.app.Activity.RESULT_OK
     }
 }
 
@@ -81,14 +86,18 @@ class SafModelImportTest {
     @Before fun grantOnlySelectedDocumentAccess() {
         val done=CountDownLatch(1)
         var code=android.app.Activity.RESULT_CANCELED
+        var detail="Grant receiver was not invoked"
         val testPackage=InstrumentationRegistry.getInstrumentation().context.packageName
         val intent=Intent().setComponent(ComponentName(testPackage,ModelDocumentGrantReceiver::class.java.name))
+            // An instrumentation APK has no launcher activity and can remain
+            // stopped after installation even while its tests run in the target.
+            .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES or Intent.FLAG_RECEIVER_FOREGROUND)
             .putExtra("targetPackage",context.packageName)
         context.sendOrderedBroadcast(intent,null,object:BroadcastReceiver() {
-            override fun onReceive(context:Context,intent:Intent) {code=resultCode;done.countDown()}
+            override fun onReceive(context:Context,intent:Intent) {code=resultCode;detail=resultData ?: detail;done.countDown()}
         },null,android.app.Activity.RESULT_CANCELED,null,null)
         assertTrue("Test provider did not grant document access",done.await(15,TimeUnit.SECONDS))
-        assertEquals(android.app.Activity.RESULT_OK,code)
+        assertEquals(detail,android.app.Activity.RESULT_OK,code)
     }
 
     @Test fun contentDocumentPipeStagesAndLoadsThroughNativeEngine() {
