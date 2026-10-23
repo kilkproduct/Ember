@@ -125,8 +125,8 @@ test("document-level split: held-out docs never enter the training stream", asyn
   }
   // deterministic: rebuilding from the same docs yields the same val stream
   const valBefore = [...trainer.valTokens];
-  trainer.refreshDocs(docs);
-  assert.deepEqual(trainer.valTokens, valBefore);
+  await trainer.refreshDocs(docs);
+  assert.deepEqual([...trainer.valTokens], valBefore);
 });
 
 test("lessons and weighted docs are never held out", () => {

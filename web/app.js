@@ -1,7 +1,7 @@
 import { createForager, STARTER, TOPIC_PACK, TRANSLATION_PACK, RESEARCH_PACK, SKILLS_PACK } from "./scrape.js";
 import { openStore } from "./store.js";
 import { corpusHealth, searchDocs } from "./corpus.js";
-import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, validateModelConfig, fmtTps, formatLessonPrompt } from "./engine.js";
+import { DeviceTrainer, EmberNet, initBackend, estimateParams, estimateTrainBytes, validateModelConfig, fmtTps, formatLessonPrompt, MAX_STREAM_CHARS } from "./engine.js";
 import { beginBackgroundWork } from "./lifecycle.js";
 import { TEACHERS, WINDOWS, TeacherDesk } from "./teachers.js";
 import { githubPull, githubPush, githubHead } from "./github.js";
@@ -877,8 +877,11 @@ $("btn-init").addEventListener("click", async () => {
   state.casting = true;
   renderModelPills();
   try {
-    const stats = await state.store.stats();
-    if (!stats.documents) {
+    // Bounded load only: stats() would materialize every document, which
+    // froze/OOMed the tab on very large corpora. Over-budget corpora cast
+    // from a stable sample (lessons always included).
+    const totals = await state.store.corpusTotals();
+    if (!totals.documents) {
       notifyWarn("No fuel yet", "Forage or paste some text in the Fuel tab first.");
       return;
     }
@@ -888,7 +891,11 @@ $("btn-init").addEventListener("click", async () => {
       await saveCkpt(rollback, { quiet: true });
       notifyInfo("Old brain saved", `Checkpoint “${rollback}” is on this device — Load it any time to go back.`);
     }
-    await state.trainer.initDocs(stats.docs, {
+    const loaded = await state.store.loadDocsBounded(MAX_STREAM_CHARS);
+    if (loaded.sampled) {
+      logEl($("train-log"), `corpus is ${(loaded.characters / 1048576).toFixed(0)}M chars — casting a bounded ${(loaded.keptChars / 1048576).toFixed(0)}M-char sample (${loaded.docs.length}/${loaded.documents} documents, lessons included) so the cast cannot run out of memory`);
+    }
+    await state.trainer.initDocs(loaded.docs, {
       nLayer: +$("v-layer").value,
       nHead,
       nEmbd,
@@ -1002,8 +1009,8 @@ async function applyBrain(raw) {
       }
     }
   }
-  const stats = await state.store.stats();
-  state.trainer.refreshDocs(stats.docs || []);
+  const loaded = await state.store.loadDocsBounded(MAX_STREAM_CHARS);
+  await state.trainer.refreshDocs(loaded.docs);
   syncVesselSliders(cfg, norm.tokenizer?.type || "legacy");
   if (norm.trainingData) {
     if ($("t-balance")) $("t-balance").value = norm.trainingData.balanceMode;
@@ -1184,9 +1191,10 @@ async function startFire(stepsOverride = null, { jump = true, source = "manual" 
     state.trainer.gradClip = Number.isFinite(clipRaw) && clipRaw > 0 ? clipRaw : 0;
     state.trainer.samplerMode = $("t-sampler")?.value === "epoch" ? "epoch" : "random";
     const valEvery = Math.max(0, Math.floor(+$("t-val")?.value) || 0);
-    const stats = await state.store.stats();
-    if (!stats.documents) throw new Error("No training corpus is attached. Add fuel in the Fuel tab before firing this brain.");
-    state.trainer.refreshDocs(stats.docs || []);
+    const totals = await state.store.corpusTotals();
+    if (!totals.documents) throw new Error("No training corpus is attached. Add fuel in the Fuel tab before firing this brain.");
+    const loaded = await state.store.loadDocsBounded(MAX_STREAM_CHARS);
+    await state.trainer.refreshDocs(loaded.docs);
 
     state.stopTrain = false;
     const startStep = state.trainer.step;

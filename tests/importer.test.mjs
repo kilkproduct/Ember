@@ -19,6 +19,7 @@ import { createCorpusSink } from "../web/ingest/sink.js";
 import { createControl, planImport, runImport } from "../web/ingest/pipeline.js";
 import { MemorySource } from "../web/ingest/source.js";
 import { crc32 } from "../web/ingest/checksum.js";
+import { inspectParquet } from "../web/ingest/parquet.js";
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
@@ -232,6 +233,85 @@ test("Parquet without a text column and truncated Parquet fail with clear reason
   assert.ok(truncated && /truncated/i.test(truncated[0]), truncated?.[0]);
 });
 
+test("Parquet is detected from seek reads even when the streamed head is mangled", async () => {
+  // Regression: container detection sniffed only the streamed head. On
+  // Android the streamed fetch of a staged file can deliver a first chunk
+  // that does not match the file, while every random-access read (the
+  // transport Parquet actually uses) is exact — so a good .parquet was
+  // refused as "binary data". Detection must use the seek reads.
+  await reset();
+  const bytes = fixture("articles_snappy.parquet");
+  class MangledStreamSource extends MemorySource {
+    async *stream(start = 0) {
+      const mangled = this.bytes.slice();
+      mangled.fill(0, 0, Math.min(8192, mangled.length));
+      yield* new MemorySource(mangled).stream(start);
+    }
+  }
+  const source = new MangledStreamSource(bytes, { name: "articles_snappy.parquet" });
+  const plan = await planImport({ source, name: "articles_snappy.parquet" });
+  assert.equal(plan.dataFormat, "parquet");
+  const sink = createCorpusSink(store, {});
+  const summary = await runImport({ source, plan, sink });
+  assert.equal(summary.outcome, "completed");
+  assert.equal(summary.documents, 5);
+});
+
+test("Parquet with a damaged header magic is detected from its footer", async () => {
+  // Readers validate the footer (trailing PAR1 + metadata length), not
+  // the header magic. A file whose first four bytes are damaged — as
+  // reported from a real device, where the header read back as mid-file
+  // bytes while every seek read was exact — must still import, with the
+  // plan saying how it was detected.
+  await reset();
+  const bytes = fixture("articles_snappy.parquet").slice();
+  bytes.fill(0, 0, 4); // destroy the leading PAR1; footer untouched
+  const { plan, summary } = await runBytes(bytes, "damaged-header.parquet");
+  assert.equal(plan.dataFormat, "parquet");
+  assert.ok(
+    plan.warnings.some((warning) => /footer/i.test(warning)),
+    `footer detection should be reported, got: ${plan.warnings.join(" ")}`
+  );
+  assert.equal(summary.outcome, "completed");
+  assert.equal(summary.documents, 5);
+});
+
+test("random binary ending in PAR1 with an impossible metadata length is not Parquet", async () => {
+  await reset();
+  const bytes = Uint8Array.from({ length: 4096 }, (_, i) => (i * 37) % 251);
+  bytes.set([0xff, 0xff, 0xff, 0xff, 0x50, 0x41, 0x52, 0x31], bytes.length - 8);
+  let message = "";
+  try {
+    await runBytes(bytes, "coincidence.parquet");
+  } catch (error) {
+    message = error.message;
+  }
+  assert.match(message, /binary data/);
+  assert.match(message, /Last bytes:/);
+});
+
+test("encrypted Parquet (PARE) is refused by name, not as generic binary", async () => {
+  await reset();
+  const bytes = new Uint8Array(1024);
+  bytes.set([0x50, 0x41, 0x52, 0x45], 0); // "PARE"
+  bytes.set([0x50, 0x41, 0x52, 0x45], bytes.length - 4);
+  await assert.rejects(() => runBytes(bytes, "secret.parquet"), /encrypted/i);
+});
+
+test("a binary file named .parquet reports the bytes it actually starts with", async () => {
+  await reset();
+  const bytes = Uint8Array.from({ length: 4096 }, (_, i) => (i * 37) % 251);
+  let message = "";
+  try {
+    await runBytes(bytes, "fake.parquet");
+  } catch (error) {
+    message = error.message;
+  }
+  assert.match(message, /binary data/);
+  assert.match(message, /First bytes: 00 25 4a/);
+  assert.match(message, /PAR1/);
+});
+
 test("truncated or corrupted compressed files are rejected, never half-imported", async () => {
   await reset();
   const cases = [
@@ -388,4 +468,72 @@ test("progress reports real byte and document counts", async () => {
   const last = events[events.length - 1];
   assert.ok(last.documents >= 5);
   assert.ok(last.bytesRead > 0);
+});
+
+// ---------------------------------------------------------------------------
+// Metadata-failure verdict (inspectParquet's rereadVerdict): when the
+// Parquet metadata does not parse, Ember re-reads the identical region
+// twice and reports whether the reads are even self-consistent — the
+// difference between "our read path is lying" and "your copy of the
+// file is damaged". Added after a 2.1 GB FineWeb shard failed with a
+// bare thrift error that could not discriminate the two.
+
+function parquetMetadataStart(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return bytes.length - 8 - view.getUint32(bytes.length - 8, true);
+}
+
+test("a metadata failure on stable bytes blames the file", async () => {
+  const bytes = fixture("articles_snappy.parquet").slice();
+  bytes[parquetMetadataStart(bytes)] = 0xff; // first field header: unknown type 15
+  const source = {
+    seekable: true,
+    size: bytes.length,
+    async slice(start, end) {
+      return bytes.slice(start, end).buffer;
+    },
+  };
+  await assert.rejects(inspectParquet({ source, limits: {} }), /read back identically twice/);
+});
+
+test("a metadata failure on changing bytes blames the reads", async () => {
+  const bytes = fixture("articles_snappy.parquet").slice();
+  const metaStart = parquetMetadataStart(bytes);
+  let flips = 0;
+  const source = {
+    seekable: true,
+    size: bytes.length,
+    async slice(start, end) {
+      const copy = bytes.slice(start, end);
+      if (start <= metaStart && metaStart < end) {
+        // Both values corrupt the parse, alternating per read.
+        copy[metaStart - start] = flips++ % 2 === 0 ? 0xff : 0xfe;
+      }
+      return copy.buffer;
+    },
+  };
+  await assert.rejects(inspectParquet({ source, limits: {} }), /reads of this file are unreliable/);
+});
+
+test("a Parquet file missing its footer is named an incomplete download", async () => {
+  // The on-device FineWeb case: the big shards imported, but the
+  // 014 shard "around 417 MB" did not — the real 014_00000.parquet is
+  // 574,962,194 bytes, so that copy was a partial download. It used to
+  // fail as "parquet file invalid (footer != PAR1)"; the user deserves
+  // to be told to re-download, with this copy's byte count.
+  const complete = fixture("articles_snappy.parquet");
+  const bytes = complete.slice(0, Math.floor(complete.length * 0.73));
+  const source = {
+    seekable: true,
+    size: bytes.length,
+    async slice(start, end) {
+      return bytes.slice(start, end).buffer;
+    },
+  };
+  await assert.rejects(inspectParquet({ source, limits: {} }), (error) => {
+    assert.equal(error.code, "truncated-parquet");
+    assert.match(error.message, /incomplete download/);
+    assert.match(error.message, new RegExp(`${bytes.length} bytes`));
+    return true;
+  });
 });

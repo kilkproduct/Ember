@@ -120,10 +120,24 @@ export async function openLayers(source, { limits, accountant, startOffset = 0 }
     }
     const isTop = layer === 0;
     let tail = null;
+    let sniffHead = head;
     if (isTop && source.seekable && Number.isFinite(source.size) && source.size > 8) {
       tail = new Uint8Array(await source.slice(Math.max(0, source.size - 8), source.size));
+      // Sniff the container magic from a random-access read, not only from
+      // the streamed head. Random access is the transport the Parquet
+      // reader itself uses for everything (footer, metadata, row groups),
+      // while in some runtimes a streamed fetch can shift or mangle its
+      // first chunk — which here would misreport a perfectly good seekable
+      // file (e.g. Parquet) as "binary data". The streamed reader above
+      // still supplies the data for formats that are actually streamed.
+      try {
+        const sliceHead = new Uint8Array(await source.slice(0, Math.min(8192, source.size)));
+        if (sliceHead.length >= 4) sniffHead = sliceHead;
+      } catch {
+        /* keep the streamed head */
+      }
     }
-    const container = sniffContainer(head, { isTopLevel: isTop, totalSize: source.size, tail });
+    const container = sniffContainer(sniffHead, { isTopLevel: isTop, totalSize: source.size, tail });
     if (!container) break;
     if (container.kind === "corrupt") {
       throw new ImportError(container.note || "The file is truncated.", {
@@ -760,6 +774,7 @@ export async function planImport({ source, name = "file", limits: limitOverrides
       }
     } else if (container?.kind === "data" && container.format === "parquet") {
       dataFormat = "parquet";
+      if (container.note) warnings.push(container.note);
       if (!source.seekable || !Number.isFinite(source.size) || chain.length > 0) {
         throw new UnsupportedFormatError(
           chain.length > 0
@@ -789,9 +804,32 @@ export async function planImport({ source, name = "file", limits: limitOverrides
       warnings.push(...(sniffed.notes || []));
       info.push(...(sniffed.info || []));
       if (sniffed.format === "binary") {
+        // Name what was actually seen: "binary data" alone gives the user
+        // (and us) no way to tell a misnamed file from a detection bug.
+        // First AND last bytes: for footer-indexed formats like Parquet
+        // the tail is the more telling half.
+        const toHex = (bytes) => [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join(" ");
+        const seen = (head.length ? head : detectedHead).subarray(0, 16);
+        const magic = toHex(seen);
+        let tailMagic = "";
+        if (source.seekable && Number.isFinite(source.size) && source.size > 0) {
+          try {
+            const tailBytes = new Uint8Array(await source.slice(Math.max(0, source.size - 16), source.size));
+            tailMagic = toHex(tailBytes);
+          } catch {
+            /* diagnostics only: a failed tail read must not mask the refusal */
+          }
+        }
+        const namedParquet = /\.parquet$/i.test(String(name || ""));
         throw new UnsupportedFormatError(
           "That file is binary data, not text or a supported dataset. Ember imports text, JSON, CSV/TSV, XML, " +
-            "HTML, Parquet, and the supported compression/archive formats.",
+            `HTML, Parquet, and the supported compression/archive formats. First bytes: ${magic || "(none)"}.` +
+            (tailMagic ? ` Last bytes: ${tailMagic}.` : "") +
+            (namedParquet
+              ? " A Parquet file must end with 50 41 52 31 (\"PAR1\") preceded by its metadata length, and" +
+                " normally starts with PAR1 too; neither was found, so it may be encrypted, truncated, a" +
+                " different format renamed to .parquet, or a download that did not finish."
+              : ""),
           { format: "binary", stage: "detecting the format" }
         );
       }

@@ -99,7 +99,35 @@ function readElement(reader, type) {
     }
     return structValues
   }
-  // TODO: MAP and SET
+  // SET and MAP: not used by parquet's own structs, but this is a generic
+  // decoder — unknown fields are consumed by parsing them, so every valid
+  // wire type must consume its exact bytes instead of throwing. (Ember
+  // patch: upstream leaves these as a TODO, which surfaced on a real file
+  // as "thrift unhandled type: 10".)
+  case CompactType.SET: {
+    const [elemType, setSize] = readCollectionBegin(reader)
+    const boolType = elemType === CompactType.TRUE || elemType === CompactType.FALSE
+    const values = new Array(setSize)
+    for (let i = 0; i < setSize; i++) {
+      values[i] = boolType ? readElement(reader, CompactType.BYTE) === 1 : readElement(reader, elemType)
+    }
+    return values
+  }
+  case CompactType.MAP: {
+    const size = readVarInt(reader)
+    /** @type {Record<string, any>} */
+    const values = {}
+    if (!size) return values
+    const kvType = reader.view.getUint8(reader.offset++)
+    const keyType = kvType >> 4
+    const valType = getCompactType(kvType)
+    for (let i = 0; i < size; i++) {
+      const key = readElement(reader, keyType)
+      const compositeKey = key instanceof Uint8Array ? new TextDecoder().decode(key) : String(key)
+      values[compositeKey] = readElement(reader, valType)
+    }
+    return values
+  }
   case CompactType.UUID: {
     // Read 16 bytes to uuid string
     let uuid = ''
@@ -109,7 +137,9 @@ function readElement(reader, type) {
     return uuid
   }
   default:
-    throw new Error(`thrift unhandled type: ${type}`)
+    // Include the offset: on a desync this locates where parsing left
+    // the rails instead of leaving a bare type number to guess from.
+    throw new Error(`thrift unhandled type: ${type} at offset ${reader.offset}`)
   }
 }
 
@@ -208,7 +238,13 @@ function readFieldBegin(reader, lastFid) {
     // add delta to last field id
     fid = lastFid + delta
   } else {
-    throw new Error('non-delta field id not supported')
+    // Long form: the field id follows as a zigzag i16. Writers must use
+    // it when the id jump exceeds 15 or fields are out of order — e.g.
+    // a union whose only member has id 16+ (a VARIANT logical type) or
+    // a sparse struct written late in the format's evolution. (Ember
+    // patch: upstream throws "non-delta field id not supported" here,
+    // which surfaced verbatim on a real-world file.)
+    fid = readZigZag(reader)
   }
   return [getCompactType(type), fid, fid]
 }

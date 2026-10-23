@@ -165,7 +165,7 @@ export function sourceFromBlob(blob, { name = "", mime = "" } = {}) {
  *     reads, so an import still completes, just slower.
  */
 export class HttpSource {
-  constructor({ url, name = "file", size = null, readRange = null, fetchImpl = null }) {
+  constructor({ url, name = "file", size = null, readRange = null, fetchImpl = null, preferRangedStream = false }) {
     this.url = url;
     this.name = name;
     this.size = Number.isFinite(size) ? size : null;
@@ -174,6 +174,10 @@ export class HttpSource {
     this._fetch = fetchImpl || ((...args) => fetch(...args));
     this._head = null;
     this._streamBroken = false;
+    // When the ranged reader is known-good and the fetch stream is not
+    // (Android WebView interception), stream through ranged reads from
+    // the start instead of discovering mid-import that the stream lies.
+    this._preferRangedStream = preferRangedStream;
     this.bytesRead = 0;
   }
 
@@ -192,12 +196,20 @@ export class HttpSource {
     const to = Math.min(this.size, Math.floor(end));
     if (to <= from) return new ArrayBuffer(0);
     const bytes = await this._readRange(from, to - from);
+    // A short (or overlong) read inside the file must never reach a
+    // parser: silently truncated buffers are how a 2.1 GB FineWeb shard
+    // turned into "thrift unhandled type: 10" deep inside hyparquet when
+    // a large bridge read came back short. `to` is already clamped to
+    // the file size, so anything but the exact count is a broken read.
+    if (bytes.length !== to - from) {
+      throw new Error(`Short read at offset ${from}: wanted ${to - from} bytes, got ${bytes.length}.`);
+    }
     this.bytesRead += bytes.length;
     return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   }
 
   async *stream(start = 0) {
-    if (!this._streamBroken) {
+    if (!this._preferRangedStream && !this._streamBroken) {
       try {
         yield* this._fetchStream(start);
         return;
@@ -252,7 +264,11 @@ export class HttpSource {
     for (let offset = start; offset < this.size; offset += chunk) {
       const end = Math.min(offset + chunk, this.size);
       const bytes = await this._readRange(offset, end - offset);
-      if (!bytes.length) break;
+      // Same rule as slice(): a short read here would skip bytes and
+      // silently truncate the stream. Fail loudly at the exact offset.
+      if (bytes.length !== end - offset) {
+        throw new Error(`Short read at offset ${offset}: wanted ${end - offset} bytes, got ${bytes.length}.`);
+      }
       yield bytes;
       await new Promise((resolve) => setTimeout(resolve, 0));
     }

@@ -358,6 +358,10 @@ class EmberRepository private constructor(
                     "Step ${data.longOr("step")} · ${Formats.bytes(data.longOr("bytes"))}",
                 )
             }
+            "model.castProgress" -> if (data != null) {
+                // Progress only: deliberately does not clear `casting`.
+                _state.update { it.copy(status = it.status.copy(model = ModelStatus.fromJson(data))) }
+            }
             "model.cast" -> if (data != null) {
                 _state.update {
                     it.copy(status = it.status.copy(model = ModelStatus.fromJson(data), casting = false))

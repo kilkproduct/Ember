@@ -225,6 +225,35 @@ test("vessel casting uses the real tokenizer/model and reports exact parameters"
   assert.ok(cast.model.corpusTokens > 0);
 });
 
+test("estimate is corpus-aware; over-budget vessels refuse cleanly; casts report progress", async () => {
+  await resetCorpus();
+  const small = { nLayer: 1, nHead: 2, nEmbd: 32, blockSize: 16, vocabSize: 500, dropout: 0, ffnMult: 2 };
+  const estimate = await call("vessel.estimate", { config: small });
+  const corpusChars = SAMPLE_CORPUS.reduce((s, d) => s + d.text.length, 0);
+  assert.equal(estimate.corpusDocuments, 3);
+  assert.equal(estimate.corpusChars, corpusChars);
+  assert.equal(estimate.blocked, false);
+  assert.ok(estimate.estTokens > 0);
+  assert.equal(estimate.streamBytes, estimate.estTokens * 5);
+
+  const monster = { nLayer: 32, nHead: 16, nEmbd: 2048, blockSize: 256, vocabSize: 6000, dropout: 0, ffnMult: 4 };
+  const bigEstimate = await call("vessel.estimate", { config: monster });
+  assert.equal(bigEstimate.blocked, true);
+  assert.match(bigEstimate.warning, /refused/);
+  await assert.rejects(() => call("vessel.cast", { config: monster, lr: 0.003, tokenizer: "byte-bpe" }), /phone budget/);
+
+  // The refusal must not wedge casting state: a sane cast right after works,
+  // and emits cast progress events while it runs.
+  const cursor = eventCursor();
+  const cast = await call("vessel.cast", { config: small, lr: 0.003, tokenizer: "byte-bpe" });
+  assert.equal(cast.model.ready, true);
+  const progress = events.slice(cursor).filter((e) => e.name === "model.castProgress");
+  assert.ok(progress.length >= 1, "expected at least one model.castProgress event");
+  assert.ok(progress.every((e) => e.data.castProgress >= 0 && e.data.castProgress <= 1));
+  assert.equal(cast.model.castProgress, null, "progress is cleared in the final snapshot");
+  assert.equal(cast.model.castSampled, false);
+});
+
 test("real training runs, emits progress/validation, and completes", async () => {
   await call("corpus.clear");
   for (const doc of SAMPLE_CORPUS) await call("corpus.addText", doc);
@@ -612,6 +641,31 @@ test("a paused import can be resumed after the runtime forgets its job", async (
   }
 });
 
+test("Android staged-file server reads the token from the full URL path", () => {
+  // Regression guard for a bug the in-memory fetch mock above cannot see:
+  // EmberEngine.shouldInterceptRequest calls serveImport with the FULL URL
+  // path ("/__ember_file__/<token>"), while WebViewAssetLoader's PathHandler
+  // calls it with only the suffix ("<token>"). serveImport once took the
+  // FIRST path segment, so every intercepted fetch looked up the token
+  // "__ember_file__", found no staged file, and returned 404 — every import
+  // in the APK failed with "The selected file is no longer available
+  // (HTTP 404)". The Kotlin side is covered for real by
+  // ImportTokenFromPathTest (run in CI via testDebugUnitTest); this keeps
+  // the contract visible from the JS suite too.
+  const kotlin = fs.readFileSync(
+    new URL("../android/app/src/main/java/com/kilkproduct/ember/backend/EmberEngine.kt", import.meta.url),
+    "utf8"
+  );
+  assert.match(kotlin, /fun importTokenFromPath\(path: String\)/);
+  assert.match(kotlin, /val token = importTokenFromPath\(path\)/);
+  assert.ok(
+    !/val token = path\.trimStart\('\/'\)\.substringBefore\('\/'\)/.test(kotlin),
+    "first-segment token parsing is back: full URL paths would 404 every staged import"
+  );
+  // The fetch mocks below mirror the fixed server: the token is the LAST
+  // URL segment, which is what `/__ember_file__/<token>` carries.
+});
+
 test("a staged file served with byte ranges imports without buffering it", async () => {
   // This is the WebView path in the APK: EmberEngine answers Range requests
   // with 206, so the importer seeks (Parquet footers, archive directories)
@@ -646,5 +700,228 @@ test("a staged file served with byte ranges imports without buffering it", async
     assert.ok(rangedReads > 1);
   } finally {
     globalThis.fetch = original;
+  }
+});
+
+test("Android range bodies absorb the WebView's own seek", () => {
+  // Chromium re-applies Range to intercepted streams (InputStreamReader::
+  // Seek skips to the first byte, ignoring the 206 status), so a bare
+  // pre-seeked slice is seeked twice and any read past offset 0 — the
+  // Parquet footer read is the first — dies as "Failed to fetch". The
+  // Kotlin side must hand Chromium a SkippedPrefixInputStream; covered
+  // for real by SkippedPrefixInputStreamTest in CI.
+  const kotlin = fs.readFileSync(
+    new URL("../android/app/src/main/java/com/kilkproduct/ember/backend/EmberEngine.kt", import.meta.url),
+    "utf8"
+  );
+  assert.match(kotlin, /class SkippedPrefixInputStream\(/);
+  assert.match(kotlin, /SkippedPrefixInputStream\(start, BoundedInputStream\(stream, count\)\)/);
+});
+
+test("a runtime whose seeks break past offset 0 falls back to buffering", async () => {
+  // Emulates the unfixed WebView behavior above: offset-0 range reads
+  // succeed, any later seek rejects as Chromium ERR_FAILED does. The
+  // bridge probe must detect that during inspect and buffer the file as
+  // a Blob instead of failing the import with "Failed to fetch".
+  const body = fixtureBody("articles_snappy.parquet");
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const header = init?.headers?.Range;
+    if (!header) return new Response(body, { status: 200 });
+    const [startText, endText] = String(header).replace("bytes=", "").split("-");
+    const start = Number(startText);
+    const end = endText ? Number(endText) : body.length - 1;
+    if (start > 0) throw new TypeError("Failed to fetch");
+    return new Response(body.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${body.length}` },
+    });
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", {
+      token: "tok-broken-range",
+      name: "articles_snappy.parquet",
+      size: body.length,
+    });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-broken-range" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("a staged Parquet whose streamed head is mangled still imports via seek reads", async () => {
+  // Device regression: range reads exact, but the plain streamed fetch
+  // delivered a first chunk that was not the file's first bytes, so
+  // detection never saw PAR1 and a good .parquet was refused as "binary
+  // data". Container detection now sniffs the seek-read head, and the
+  // Parquet reader only ever uses seek reads.
+  const body = fixtureBody("articles_snappy.parquet");
+  const mangled = body.slice();
+  mangled.fill(0, 0, Math.min(8192, mangled.length));
+  const original = globalThis.fetch;
+  globalThis.fetch = async (url, init = {}) => {
+    const header = init?.headers?.Range;
+    if (!header) return new Response(mangled, { status: 200 });
+    const [startText, endText] = String(header).replace("bytes=", "").split("-");
+    const start = Number(startText);
+    const end = endText ? Number(endText) : body.length - 1;
+    return new Response(body.slice(start, end + 1), {
+      status: 206,
+      headers: { "Content-Range": `bytes ${start}-${end}/${body.length}` },
+    });
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", {
+      token: "tok-mangled-stream",
+      name: "articles_snappy.parquet",
+      size: body.length,
+    });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-mangled-stream" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test("a staged Parquet with damaged header magic imports via its footer", async () => {
+  // On a real device the header of a valid .parquet read back as
+  // mid-file bytes ("65 77 2c 81 ...") while seek reads were exact, so
+  // header-magic detection refused it as binary. Detection now also
+  // accepts an intact Parquet footer (trailing PAR1 + sane metadata
+  // length) — the same check the Parquet reader itself performs.
+  const body = fixtureBody("articles_snappy.parquet").slice();
+  body.fill(0, 0, 4);
+  const restore = serveFixtures({ "tok-noheader": body });
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-noheader", name: "articles_snappy.parquet" });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-noheader" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+  } finally {
+    restore();
+  }
+});
+
+test("staged files import through the native bridge reader without fetch", async () => {
+  // The WebView fetch/interception path returned wrong bytes for a
+  // 2.147 GB FineWeb shard on a real device (header read as mid-file
+  // bytes "65 77 2c 81 ..."). When the bridge offers readStagedRange,
+  // staged bytes must come off disk through it — fetch must not be
+  // touched at all, and the size comes from stagedFileLength (no hint
+  // is passed here).
+  const body = fixtureBody("articles_snappy.parquet");
+  const originalFetch = globalThis.fetch;
+  const bridgedReads = [];
+  globalThis.fetch = async (url, ...args) => {
+    if (String(url).includes("__ember_file__")) {
+      throw new TypeError("fetch must not be used for staged files when the bridge reader exists");
+    }
+    return originalFetch(url, ...args);
+  };
+  globalThis.EmberNative.stagedFileLength = (token) => (token === "tok-bridge" ? body.length : -1);
+  globalThis.EmberNative.readStagedRange = (token, start, length) => {
+    if (token !== "tok-bridge" || start < 0 || length < 0) return null;
+    bridgedReads.push({ start, length });
+    return Buffer.from(body.subarray(start, start + length)).toString("base64");
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-bridge", name: "000_00000.parquet" });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-bridge" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+    assert.ok(bridgedReads.length > 0, "the bridge reader served the file");
+    assert.ok(
+      bridgedReads.some((read) => read.start > 0),
+      "the bridge reader served real seeks (footer/row-group reads)",
+    );
+  } finally {
+    delete globalThis.EmberNative.stagedFileLength;
+    delete globalThis.EmberNative.readStagedRange;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a bridge read failure mid-inspect reports the byte offset", async () => {
+  // The bridge honours the small probe reads near offset 0 but dies on
+  // the real seeks (footer at size-8): the failure must surface with the
+  // byte offset, not as a bare bridge exception.
+  const body = fixtureBody("articles_snappy.parquet");
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, ...args) => {
+    if (String(url).includes("__ember_file__")) {
+      throw new TypeError("fetch must not be used for staged files when the bridge reader exists");
+    }
+    return originalFetch(url, ...args);
+  };
+  globalThis.EmberNative.stagedFileLength = (token) => (token === "tok-broken" ? body.length : -1);
+  globalThis.EmberNative.readStagedRange = (token, start, length) => {
+    if (token !== "tok-broken") return null;
+    if (start >= 64) throw new Error("ENOENT simulated");
+    return Buffer.from(body.subarray(start, start + length)).toString("base64");
+  };
+  try {
+    await assert.rejects(
+      call("file.inspect", { token: "tok-broken", name: "000_00000.parquet" }),
+      /Reading the picked file failed at byte \d+: ENOENT simulated/,
+    );
+  } finally {
+    delete globalThis.EmberNative.stagedFileLength;
+    delete globalThis.EmberNative.readStagedRange;
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a bridge that truncates large payloads still imports exactly", async () => {
+  // On a real device, large reads of a 2.1 GB FineWeb shard came back
+  // from the WebView bridge short while small reads (header, footer)
+  // were intact; the truncated buffer reached hyparquet silently and
+  // the import died as "thrift unhandled type: 10". The bridge mock
+  // below returns at most 997 bytes of any request (a prefix, like a
+  // capped bridge string). The reader must ask for the remainder, and
+  // HttpSource must never hand a short buffer to a parser.
+  const body = fixtureBody("articles_snappy.parquet");
+  const originalFetch = globalThis.fetch;
+  const CAP = 997;
+  let maxRequest = 0;
+  globalThis.fetch = async (url, ...args) => {
+    if (String(url).includes("__ember_file__")) {
+      throw new TypeError("fetch must not be used for staged files when the bridge reader exists");
+    }
+    return originalFetch(url, ...args);
+  };
+  globalThis.EmberNative.stagedFileLength = (token) => (token === "tok-trunc" ? body.length : -1);
+  globalThis.EmberNative.readStagedRange = (token, start, length) => {
+    if (token !== "tok-trunc" || start < 0 || length < 0) return null;
+    maxRequest = Math.max(maxRequest, length);
+    return Buffer.from(body.subarray(start, start + Math.min(length, CAP))).toString("base64");
+  };
+  try {
+    await call("corpus.clear");
+    const inspected = await call("file.inspect", { token: "tok-trunc", name: "000_00000.parquet" });
+    assert.equal(inspected.format, "parquet");
+    const committed = await call("file.commit", { token: "tok-trunc" });
+    assert.equal(committed.outcome, "completed");
+    assert.equal(committed.counts.documents, 5);
+    assert.equal((await call("corpus.list", { limit: 1 })).total, 5);
+    assert.ok(maxRequest > 0 && maxRequest <= 256 * 1024, `bridge requests stay small (max ${maxRequest})`);
+  } finally {
+    delete globalThis.EmberNative.stagedFileLength;
+    delete globalThis.EmberNative.readStagedRange;
+    globalThis.fetch = originalFetch;
   }
 });
