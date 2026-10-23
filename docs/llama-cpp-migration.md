@@ -144,3 +144,18 @@ are reported in the delivery message, not predicted here.
 - Browser UI has automated module/id/RPC contract tests, not a physical browser
   session. Optional external foragers/teacher APIs are not required or verified
   by this migration.
+
+## Convert an actual saved checkpoint on the desktop
+
+```sh
+export EMBER_LLAMA_LIB="$PWD/native/build-llama/libember_llama.so"
+python -m ember.gguf_export data/checkpoints/my-checkpoint.emb /tmp/my-model.gguf \
+    --quantization q8_0 --validate-native
+```
+
+The converter reads weights/config from the real checkpoint and the exact
+embedded tokenizer (or `--tokenizer my-checkpoint.tok.json`). It validates
+shapes, required/unexpected tensors and tokenizer schema; a missing or old v3
+tokenizer is an error, not an invitation to guess from vocab size. The JSON report
+includes source step, tensor counts, dtype choices, fallback-to-F32 warnings and
+successful native-load facts when `--validate-native` is requested.

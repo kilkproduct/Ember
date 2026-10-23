@@ -321,7 +321,7 @@ EMBER_API int ember_llama_load(
         FILE* probe = std::fopen(model_path, "rb");
         if (!probe) {
             engine->set_error(EMBER_LLAMA_ERR_MODEL_NOT_FOUND,
-                              std::string("Model file not found or not readable: ") + model_path);
+                              std::string("Model file not found or not readable. Import the local GGUF file again."));
             return engine->code;
         }
         unsigned char magic[4] = {0, 0, 0, 0};
@@ -331,12 +331,12 @@ EMBER_API int ember_llama_load(
         std::fclose(probe);
         if (got < 4 || size < 1024) {
             engine->set_error(EMBER_LLAMA_ERR_MODEL_INVALID,
-                              std::string("Not a usable GGUF model (too small or unreadable): ") + model_path);
+                              std::string("Not a usable GGUF model (too small or unreadable)."));
             return engine->code;
         }
         if (!(magic[0] == 'G' && magic[1] == 'G' && magic[2] == 'U' && magic[3] == 'F')) {
             engine->set_error(EMBER_LLAMA_ERR_MODEL_INVALID,
-                              std::string("Not a GGUF file (missing 'GGUF' magic): ") + model_path +
+                              std::string("Not a GGUF file (missing GGUF magic)") +
                               ". Ember training checkpoints (.emb) and JSON brains must be exported to GGUF first.");
             return engine->code;
         }
@@ -368,7 +368,7 @@ EMBER_API int ember_llama_load(
             engine->set_error(EMBER_LLAMA_ERR_CANCELLED, "Model loading was cancelled.");
         } else {
             engine->set_error(EMBER_LLAMA_ERR_MODEL_INVALID,
-                              std::string("llama.cpp could not load this model: ") + model_path +
+                              std::string("llama.cpp could not load this local model") +
                               ". The file may be corrupt, truncated, quantized in an unsupported way, "
                               "or use an architecture this build does not include.");
         }

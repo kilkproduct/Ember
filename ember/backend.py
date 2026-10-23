@@ -146,6 +146,13 @@ class EmberBackend:
         self.trainer.stop()
         self.forager.stop()
         self.teachers.stop_auto()
+        # Workers can be saving a checkpoint or accepting a document. Never close
+        # SQLite beneath them during an app/runtime restart.
+        for worker in (self.trainer._train_thread, self.forager._thread, getattr(self.teachers, "_thread", None)):
+            if worker is not None and worker is not threading.current_thread():
+                worker.join(timeout=60)
+                if worker.is_alive():
+                    raise RuntimeError("Background work is still stopping; runtime storage was kept open.")
         # Release native model memory; the process-wide engine object stays alive
         # so a later restart can reload without re-initializing llama.cpp.
         try:

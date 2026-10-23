@@ -868,3 +868,38 @@ def validate_gguf_file(path: str | Path) -> dict[str, Any]:
         "name": str(md.get("general.name", "")),
         "valid": True,
     }
+
+
+def main() -> int:
+    """Convert a real .emb training checkpoint, with its exact v4 tokenizer."""
+    import argparse
+    from .model import load_model
+    parser = argparse.ArgumentParser(description="Convert an Ember training checkpoint to llama.cpp GPT-2 GGUF")
+    parser.add_argument("checkpoint", type=Path)
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--tokenizer", type=Path, help="companion tokenizer (otherwise use embedded metadata)")
+    parser.add_argument("--quantization", choices=("f32", "q8_0"), default="f32")
+    parser.add_argument("--validate-native", action="store_true", help="also load the export with llama.cpp")
+    args = parser.parse_args()
+    cfg, weights, meta = load_model(args.checkpoint)
+    if args.tokenizer:
+        tok = BPETokenizer.load(args.tokenizer)
+    elif isinstance(meta.get("tokenizer"), dict):
+        tok = BPETokenizer.from_dict(meta["tokenizer"])
+    else:
+        raise GgufExportError("Checkpoint has no tokenizer. Supply its exact --tokenizer file; do not guess from vocabulary size.")
+    report = export_gguf(args.output, cfg, weights, tok, name=args.checkpoint.stem,
+                         step=int(meta.get("step", 0)), quantization=args.quantization).to_dict()
+    if args.validate_native:
+        from .inference import LlamaCppEngine
+        engine = LlamaCppEngine()
+        try:
+            report["nativeValidation"] = engine.load_model(args.output).to_dict()
+        finally:
+            engine.close()
+    print(json.dumps(report, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

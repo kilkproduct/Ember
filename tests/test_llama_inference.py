@@ -138,3 +138,16 @@ def test_repetition_penalty_uses_upstream_sampler_chain(fixture, tmp_path):
     assert plain.token_ids == [ord('A')]*6
     assert penalized.token_ids[:2] == [ord('A'), ord('B')]
     assert plain.text != penalized.text
+
+def test_real_checkpoint_conversion_cli(fixture, tmp_path):
+    import os, subprocess, sys, json
+    from ember.model import save_model
+    _, tok, model, _ = fixture
+    checkpoint = tmp_path/'trained.emb'
+    save_model(checkpoint, model.cfg, model.params, {'step':12, 'tokenizer':tok.to_dict()})
+    dest = tmp_path/'converted.gguf'
+    proc = subprocess.run([sys.executable, '-m', 'ember.gguf_export', str(checkpoint), str(dest),
+                           '--quantization', 'q8_0', '--validate-native'], capture_output=True, text=True, check=True)
+    report = json.loads(proc.stdout)
+    assert report['sourceStep'] == 12 and report['quantization'] == 'q8_0'
+    assert report['nativeValidation']['loaded'] and report['nativeValidation']['arch'] == 'gpt2'

@@ -321,7 +321,8 @@ class TeacherDesk:
                 self._emit_state()
                 self._emit("teachers.done", {"accepted": accepted})
 
-        threading.Thread(target=_worker, name="ember-teachers", daemon=True).start()
+        self._thread = threading.Thread(target=_worker, name="ember-teachers", daemon=True)
+        self._thread.start()
         return {"started": True}
 
     def stop_auto(self) -> dict[str, Any]:

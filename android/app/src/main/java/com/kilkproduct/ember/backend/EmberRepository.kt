@@ -356,6 +356,12 @@ class EmberRepository private constructor(
 
     fun retryInitialization() {
         if (gate.isBusy(Ops.INIT)) return
+        val current = _state.value
+        if (current.workActive || current.generating || current.importBusy || current.modelBusy) {
+            addNotice(NoticeLevel.WARNING, "Finish or stop active work first",
+                "Restart is unavailable while training, importing or generating.")
+            return
+        }
         initialize()
     }
 
