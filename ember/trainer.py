@@ -959,6 +959,10 @@ class Trainer:
             raise InferenceError(engine.load_error or "llama.cpp unavailable", code=-2, name="backend-not-initialized")
         # Native validation is mandatory: tensor bytes, tokenizer support, and
         # context allocation are checked by llama.cpp, not inferred from a header.
+        # Native validation can replace a currently loaded sample/chat model.
+        # Invalidate the path cache even if copying later fails or select=False.
+        self._engine_model_path = ""
+        self._engine_model_mtime = -1.0
         engine.load_model(src, EngineConfig())
         target_name = (name or src.stem or "imported-model")
         safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
@@ -1477,7 +1481,7 @@ class Trainer:
             "sourceBoosts": {k: int(round(v * 100)) for k, v in (ts.source_boosts.items() if ts else ())},
             "config": self.cfg.to_dict() if self.cfg else None,
             "lastRun": self.last_run,
-            "backend": "python-numpy + native-cpp",
+            "backend": "python-numpy + llama.cpp",
             "castProgress": self.cast_progress,
             "castStage": self.cast_stage,
             "castSampled": bool(ts.truncated) if ts else False,

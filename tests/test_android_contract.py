@@ -171,7 +171,7 @@ def test_status_snapshot_matches_emberstatus_fromjson(backend) -> None:
         "github",
     ):
         assert key in st, f"EmberStatus.fromJson expects '{key}'"
-    assert st["backend"] == "python-numpy + native-cpp"
+    assert st["backend"] == "python-numpy + llama.cpp"
     assert "NumPy" in st["runtime"]
     _assert_model_status(st["model"], ready=False)
 

@@ -108,6 +108,7 @@ class EmberEngine private constructor(private val app: Application) {
     private var startupError: String? = null
 
     private val started = AtomicBoolean(false)
+    private val generationCancelled = AtomicBoolean(false)
     private var ready = CompletableDeferred<Unit>()
 
     /** Serializes interpreter start/restart so they can never overlap. */
@@ -230,6 +231,7 @@ class EmberEngine private constructor(private val app: Application) {
     }
 
     fun cancelGeneration() {
+        generationCancelled.set(true)
         inference.cancel()
     }
 
@@ -272,6 +274,7 @@ class EmberEngine private constructor(private val app: Application) {
         // Route text generation to the native llama.cpp engine. Python only
         // prepares the prompt and reports which GGUF model to load.
         if (method == "gen.run") {
+            generationCancelled.set(false)
             return withTimeout(timeoutMs) {
                 val prep = withContext(Dispatchers.IO) { invokePythonRpc("gen.prepare", params) }
                 prep.optJSONObject("modelError")?.let { failure ->
@@ -279,6 +282,8 @@ class EmberEngine private constructor(private val app: Application) {
                         failure.optString("error").ifBlank { "No GGUF model is available for inference." }
                     )
                 }
+                if (generationCancelled.get()) return@withTimeout GenerationOutcome(
+                    ok = true, stoppedBy = "cancelled").toJson()
                 val formattedPrompt = prep.optString("formattedPrompt", params.optString("prompt", ""))
                 val modelPath = prep.optString("modelPath", "")
                 if (modelPath.isBlank()) {
@@ -297,6 +302,8 @@ class EmberEngine private constructor(private val app: Application) {
                 val requestId = params.optString("requestId", java.util.UUID.randomUUID().toString())
                 val descriptor = withContext(Dispatchers.IO) { inference.loadModel(modelPath, settings) }
                 _events.tryEmit(EngineEvent("inference.loaded", descriptor.toJson()))
+                if (generationCancelled.get()) return@withTimeout GenerationOutcome(
+                    ok = true, stoppedBy = "cancelled").toJson()
                 val outcome = inference.generate(
                     prompt = formattedPrompt,
                     settings = GenerationSettings(
@@ -312,7 +319,7 @@ class EmberEngine private constructor(private val app: Application) {
                     ),
                 ) { piece, tokenId, generated ->
                     _generationTokens.tryEmit(GenerationToken(requestId, piece, tokenId, generated))
-                    true
+                    !generationCancelled.get()
                 }
                 if (!outcome.ok && outcome.error != null && !outcome.cancelled) {
                     throw EmberBackendException(outcome.error)

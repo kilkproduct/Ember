@@ -161,7 +161,7 @@ class EmberBackend:
         gh = self.corpus.get_kv("github") or {}
         return {
             "ready": True,
-            "backend": "python-numpy + native-cpp",
+            "backend": "python-numpy + llama.cpp",
             "backendTried": ["python-numpy", "native-cpp"],
             "runtime": f"Python {platform.python_version()} · NumPy {np.__version__}",
             "model": self.trainer.status(),

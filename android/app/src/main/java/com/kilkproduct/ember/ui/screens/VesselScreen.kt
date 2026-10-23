@@ -231,14 +231,14 @@ fun VesselScreen(
                 Spacer(Modifier.height(10.dp))
                 ChoiceRow(
                     label = "Tokenizer",
-                    options = listOf("byte-bpe" to "Byte BPE", "legacy" to "Legacy"),
+                    options = listOf("byte-bpe" to "GPT-2 byte BPE"),
                     selected = form.tokenizer,
                     onSelect = { value -> vm.updateVessel { it.copy(tokenizer = value) } },
                     enabled = !casting,
                     helper = if (model.ready && model.tokenizerType != form.tokenizer) {
                         "Switching tokenizer starts a fresh brain. The old weights are saved as a pre-switch checkpoint first."
                     } else {
-                        "Byte BPE handles any text including non-English. Legacy matches old brains."
+                        "GPT-2 byte BPE handles Unicode and is shared with llama.cpp. Old tokenizers require recasting."
                     },
                 )
                 Spacer(Modifier.height(10.dp))

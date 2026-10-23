@@ -354,10 +354,10 @@ EMBER_API int ember_llama_load(
     mp.load_mode = (cfg.use_mmap == 0) ? LLAMA_LOAD_MODE_NONE : LLAMA_LOAD_MODE_MMAP;
 
     ProgressTrampoline tramp{progress_cb, progress_user_data, &engine->cancel};
-    if (progress_cb) {
-        mp.progress_callback = progress_thunk;
-        mp.progress_callback_user_data = &tramp;
-    }
+    // Always register the cancellation hook, even without a visual progress
+    // listener (e.g. JNI). Otherwise Stop cannot interrupt a large model load.
+    mp.progress_callback = progress_thunk;
+    mp.progress_callback_user_data = &tramp;
 
     std::unique_ptr<llama_model, decltype(&llama_model_free)> model_owner(
         llama_model_load_from_file(model_path, mp), llama_model_free);
