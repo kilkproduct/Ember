@@ -1,5 +1,9 @@
 package com.kilkproduct.ember.backend
 
+import android.content.BroadcastReceiver
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.os.CancellationSignal
@@ -11,6 +15,9 @@ import java.io.File
 import java.io.IOException
 import org.junit.Assert.*
 import org.junit.Test
+import org.junit.Before
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /** A real Android DocumentsProvider in the test APK, not a mocked resolver.
  * Returns pipes intentionally: the app must consume the provider stream, not
@@ -27,12 +34,16 @@ class ModelDocumentsProvider : DocumentsProvider() {
     override fun queryRoots(projection: Array<out String>?): Cursor = MatrixCursor(arrayOf(
         DocumentsContract.Root.COLUMN_ROOT_ID,DocumentsContract.Root.COLUMN_DOCUMENT_ID,
         DocumentsContract.Root.COLUMN_TITLE,DocumentsContract.Root.COLUMN_FLAGS,
-    )).apply { addRow(arrayOf("fixtures","model","Ember SAF test models",0)) }
+    )).apply { addRow(arrayOf("fixtures","root","Ember SAF test models",0)) }
     override fun queryDocument(documentId: String,projection: Array<out String>?): Cursor = MatrixCursor(arrayOf(
         DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,
         DocumentsContract.Document.COLUMN_MIME_TYPE,DocumentsContract.Document.COLUMN_SIZE,
         DocumentsContract.Document.COLUMN_FLAGS,
-    )).apply { addRow(arrayOf(documentId,"/proc/self/fd/148","application/octet-stream",fixture().length(),0)) }
+    )).apply {
+        addRow(arrayOf(documentId,if(documentId=="root") "Fixtures" else "/proc/self/fd/148",
+            if(documentId=="root") DocumentsContract.Document.MIME_TYPE_DIR else "application/octet-stream",
+            if(documentId=="root") 0L else fixture().length(),0))
+    }
     override fun queryChildDocuments(parentDocumentId: String,projection: Array<out String>?,sortOrder: String?) = queryDocument("model",projection)
     override fun openDocument(documentId: String,mode: String,signal: CancellationSignal?): ParcelFileDescriptor {
         if (documentId=="denied") throw SecurityException("Fixture permission revoked")
@@ -50,10 +61,35 @@ class ModelDocumentsProvider : DocumentsProvider() {
     }
 }
 
+/** Runs in the test APK's UID, which owns the provider. The target app receives
+ * only per-document read grants, just as it would from a SAF picker result. */
+class ModelDocumentGrantReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context,intent: Intent) {
+        val target=intent.getStringExtra("targetPackage") ?: return
+        for (id in listOf("model","denied","truncated")) {
+            context.grantUriPermission(target,DocumentsContract.buildDocumentUri(ModelDocumentsProvider.AUTHORITY,id),Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        }
+        resultCode=android.app.Activity.RESULT_OK
+    }
+}
+
 class SafModelImportTest {
     private val context get()=InstrumentationRegistry.getInstrumentation().targetContext
     private fun uri(id: String)=DocumentsContract.buildDocumentUri(ModelDocumentsProvider.AUTHORITY,id)
     private fun directory()=File(context.filesDir,"model_staging_test/${java.util.UUID.randomUUID()}").apply {mkdirs()}
+
+    @Before fun grantOnlySelectedDocumentAccess() {
+        val done=CountDownLatch(1)
+        var code=android.app.Activity.RESULT_CANCELED
+        val testPackage=InstrumentationRegistry.getInstrumentation().context.packageName
+        val intent=Intent().setComponent(ComponentName(testPackage,ModelDocumentGrantReceiver::class.java.name))
+            .putExtra("targetPackage",context.packageName)
+        context.sendOrderedBroadcast(intent,null,object:BroadcastReceiver() {
+            override fun onReceive(context:Context,intent:Intent) {code=resultCode;done.countDown()}
+        },null,android.app.Activity.RESULT_CANCELED,null,null)
+        assertTrue("Test provider did not grant document access",done.await(15,TimeUnit.SECONDS))
+        assertEquals(android.app.Activity.RESULT_OK,code)
+    }
 
     @Test fun contentDocumentPipeStagesAndLoadsThroughNativeEngine() {
         val dir=directory();val engine=LlamaInference()

@@ -260,29 +260,6 @@ jobs:
               print("::error::"+text.replace('%','%25').replace('\n','%0A'))
           PYLINT
 
-      - name: Enable emulator acceleration
-        run: sudo chmod 666 /dev/kvm
-
-      - name: Run real SAF provider and JNI regressions on Android emulator
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 29
-          arch: x86_64
-          profile: pixel_2
-          disable-animations: true
-          script: cd android && gradle connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.kilkproduct.ember.backend.SafModelImportTest --no-daemon --stacktrace
-
-      - name: Upload Android test evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: Android-test-results
-          path: |
-            android/app/build/test-results/
-            android/app/build/outputs/androidTest-results/
-            android/app/build/reports/androidTests/
-          if-no-files-found: warn
-
       - name: Measure baseline APK from exact pre-overhaul commit
         run: |
           git fetch origin 412f8c1c6a26440d1d1043e429a534d7e1fc5751
@@ -367,3 +344,45 @@ jobs:
             baseline-apk-metrics.json
           if-no-files-found: error
           retention-days: 30
+
+      - name: Enable emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+
+      - name: Run real SAF provider and JNI regressions on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          script: cd android && gradle connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.kilkproduct.ember.backend.SafModelImportTest --no-daemon --stacktrace
+
+      - name: Summarize executed SAF instrumentation tests
+        if: always()
+        run: |
+          python3 - <<'PYSAF'
+          import glob, xml.etree.ElementTree as ET
+          paths=glob.glob('android/app/build/outputs/androidTest-results/connected/**/*.xml',recursive=True)
+          cases=[]
+          for path in paths:
+              cases.extend(c for c in ET.parse(path).getroot().iter('testcase') if 'SafModelImportTest' in c.get('classname',''))
+          for case in cases:
+              failures=list(case.findall('failure'))+list(case.findall('error'))
+              for failure in failures:
+                  text=f"{case.get('name')}: {failure.get('message','')} {failure.text or ''}"[:10000]
+                  print('::error::'+text.replace('%','%25').replace('\r','%0D').replace('\n','%0A'))
+          print(f'::notice::Executed SAF instrumentation test cases: {len(cases)}')
+          if len(cases)!=2 or any(c.find('failure') is not None or c.find('error') is not None or c.find('skipped') is not None for c in cases):
+              raise SystemExit('Both SAF instrumentation tests must execute and pass')
+          PYSAF
+
+      - name: Upload Android test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-test-results
+          path: |
+            android/app/build/test-results/
+            android/app/build/outputs/androidTest-results/
+            android/app/build/reports/androidTests/
+          if-no-files-found: warn

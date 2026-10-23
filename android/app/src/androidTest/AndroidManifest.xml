@@ -3,8 +3,11 @@
     <application>
         <provider android:name="com.kilkproduct.ember.backend.ModelDocumentsProvider"
             android:authorities="com.kilkproduct.ember.test.modeldocuments"
-            android:exported="true" android:grantUriPermissions="true">
+            android:exported="true" android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
             <intent-filter><action android:name="android.content.action.DOCUMENTS_PROVIDER" /></intent-filter>
         </provider>
+        <receiver android:name="com.kilkproduct.ember.backend.ModelDocumentGrantReceiver"
+            android:exported="true" />
     </application>
 </manifest>
