@@ -161,7 +161,7 @@ class Trainer:
         self._gguf_dirty: bool = True
         self._gguf_step: int = -1
         selected = self.corpus.get_kv("inference:selected_model")
-        self._imported_gguf: Path | None = Path(selected) if selected else None
+        self._imported_gguf: Path | None = Path(selected) if selected and not self.corpus.get_kv("inference:selected_external") else None
         self._engine_model_path: str = ""
         self._engine_model_mtime: float = -1.0
         self.quantization: str = "f32"
@@ -442,10 +442,7 @@ class Trainer:
 
         # Preserve prior trained model automatically before recasting
         if self.ready and self.step > 0:
-            try:
-                self.save_checkpoint("pre-recast")
-            except Exception:
-                pass
+            self.save_checkpoint("pre-recast-"+str(time.time_ns()))
 
         self.casting = True
         try:
@@ -652,6 +649,18 @@ class Trainer:
         balance = str(opts.get("balance") or "off")
         lesson_loss = str(opts.get("lessonLoss") or "both")
         sample_prompt = str(opts.get("samplePrompt") or "")
+        weight_decay=float(opts.get("weightDecay",self.optimizer.weight_decay if self.optimizer else .01))
+        beta1=float(opts.get("beta1",self.optimizer.beta1 if self.optimizer else .9))
+        beta2=float(opts.get("beta2",self.optimizer.beta2 if self.optimizer else .95))
+        epsilon=float(opts.get("epsilon",self.optimizer.eps if self.optimizer else 1e-8))
+        min_frac=float(opts.get("minLrFraction",.1))
+        training_seed=int(opts.get("trainingSeed",42))
+        warmup=opts.get("warmupSteps")
+        if (not all(math.isfinite(v) for v in (base_lr,grad_clip,weight_decay,beta1,beta2,epsilon,min_frac))
+            or base_lr<=0 or grad_clip<0 or weight_decay<0 or not 0<=beta1<1 or not 0<=beta2<1
+            or epsilon<=0 or not 0<=min_frac<=1 or training_seed<0
+            or (warmup is not None and not 0<=int(warmup)<=steps)):
+            raise ValueError("Invalid finite training hyperparameters (LR/clip/decay/betas/epsilon/warmup/seed)")
 
         need_rebuild = (
             self.train_stream is None
@@ -697,10 +706,12 @@ class Trainer:
             schedule=LRSchedule(state["base_lr"],state["total_steps"],state["warmup_steps"],state["min_frac"])
             schedule_offset=int(state["position"])
         else:
-            schedule=LRSchedule.for_run(base_lr,steps)
+            default=LRSchedule.for_run(base_lr,steps)
+            schedule=LRSchedule(base_lr,steps,default.warmup_steps if warmup is None else int(warmup),min_frac)
             schedule_offset=0
         self.schedule_state={**vars(schedule),"position":schedule_offset}
-        self.optimizer.weight_decay=float(opts.get("weightDecay",self.optimizer.weight_decay))
+        self.optimizer.weight_decay=weight_decay
+        self.optimizer.beta1=beta1;self.optimizer.beta2=beta2;self.optimizer.eps=epsilon
         if not math.isfinite(base_lr) or base_lr<=0 or not math.isfinite(self.optimizer.weight_decay) or self.optimizer.weight_decay<0:
             self.running=False
             raise ValueError("learning rate must be positive and weight decay nonnegative (finite)")
@@ -708,7 +719,7 @@ class Trainer:
             self.train_stream,
             block_size=self.cfg.block_size,
             batch_size=batch_size,
-            seed=(start_step * 7919 + 42) & 0x7FFFFFFF,
+            seed=(start_step * 7919 + training_seed) & 0x7FFFFFFF,
             sampler=sampler_mode,
             boundaries=boundaries,
         )
@@ -1431,10 +1442,7 @@ class Trainer:
             )
 
         if self.ready and self.step > 0:
-            try:
-                self.save_checkpoint("pre-import")
-            except Exception:
-                pass
+            self.save_checkpoint("pre-import-"+str(time.time_ns()))
 
         with self._lock:
             self.cfg = cfg
@@ -1512,10 +1520,7 @@ class Trainer:
         check_params(cfg, params)
 
         if self.ready and self.step > 0:
-            try:
-                self.save_checkpoint("pre-import")
-            except Exception:
-                pass
+            self.save_checkpoint("pre-import-"+str(time.time_ns()))
 
         docs = data.get("corpusDocs")
         corpus_added = 0

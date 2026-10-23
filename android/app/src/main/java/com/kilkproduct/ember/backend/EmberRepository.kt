@@ -1359,7 +1359,7 @@ class EmberRepository private constructor(
     }
 
     fun reportVesselConfigError(
-        message: String = "Layers 2–6 · heads 2–8 · width 32–256 · context 32–256 · vocab 500–6000. Heads must divide width.",
+        message: String = "Layers 1–12 · heads 1–16 · width 32–512 · context 32–2048 · vocab 262–50,000. Heads must divide width.",
     ) {
         _state.update { it.copy(vesselEstimate = null, vesselEstimateError = message) }
     }
@@ -1414,6 +1414,9 @@ class EmberRepository private constructor(
                 .put("weightDecay",options.weightDecay)
                 .put("gradientAccumulation",options.gradientAccumulation)
                 .put("checkpointEvery",options.checkpointEvery)
+                .put("beta1",options.beta1).put("beta2",options.beta2).put("epsilon",options.epsilon)
+                .put("warmupSteps",options.warmupSteps ?: JSONObject.NULL).put("minLrFraction",options.minLrFraction)
+                .put("trainingSeed",options.trainingSeed).put("resumeSchedule",options.resumeSchedule)
             val result = engine.call("train.start", params, timeoutMs = 300_000)
             _state.update {
                 it.copy(

@@ -418,13 +418,13 @@ class LlamaCppEngine(InferenceEngine):
         cfg = config or EngineConfig()
         if not (1 <= cfg.n_ctx <= 8192 and 1 <= cfg.n_batch <= 2048 and 0 <= cfg.n_threads <= 8):
             raise InferenceError("Context, batch or thread count is out of range.", code=-1, name="invalid-arguments")
-        if cfg.n_ubatch<1: raise InferenceError("microbatch must be positive",code=-1,name="invalid-arguments")
+        if not 1 <= cfg.n_ubatch <= cfg.n_batch: raise InferenceError("microbatch must be positive and no larger than batch",code=-1,name="invalid-arguments")
         if cfg.n_gpu_layers != 0:
             raise InferenceError("This build is CPU-only; GPU offload is not enabled.", code=-1, name="invalid-arguments")
         c_cfg = _CConfig(
             n_ctx=int(cfg.n_ctx),
             n_batch=int(cfg.n_batch),
-            n_ubatch=int(min(cfg.n_ubatch,cfg.n_batch)),
+            n_ubatch=int(cfg.n_ubatch),
             n_threads=int(cfg.n_threads),
             n_gpu_layers=int(cfg.n_gpu_layers),
             use_mmap=1 if cfg.use_mmap else 0,

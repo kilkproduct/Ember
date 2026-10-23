@@ -203,6 +203,16 @@ fun FireScreen(
                     step=.01,min=0.0,max=1.0,decimals=3,enabled=!running)
                 NumberStepper(label="Checkpoint interval (steps; 0 = end only)",value=form.checkpointEvery,onValueChange={v->vm.updateTrain{it.copy(checkpointEvery=v)}},
                     step=25.0,min=0.0,max=5000.0,enabled=!running)
+                NumberStepper(label="AdamW beta 1",value=form.beta1,onValueChange={v->vm.updateTrain{it.copy(beta1=v)}},step=.01,min=0.0,max=.999,decimals=3,enabled=!running)
+                NumberStepper(label="AdamW beta 2",value=form.beta2,onValueChange={v->vm.updateTrain{it.copy(beta2=v)}},step=.001,min=0.0,max=.9999,decimals=4,enabled=!running)
+                EmberTextField(label="AdamW epsilon",value=form.epsilon,onValueChange={v->vm.updateTrain{it.copy(epsilon=v)}},enabled=!running)
+                EmberTextField(label="Warmup steps (blank = automatic)",value=form.warmupSteps,onValueChange={v->vm.updateTrain{it.copy(warmupSteps=v)}},enabled=!running)
+                NumberStepper(label="Final learning-rate fraction",value=form.minLrFraction,onValueChange={v->vm.updateTrain{it.copy(minLrFraction=v)}},step=.05,min=0.0,max=1.0,decimals=2,enabled=!running)
+                EmberTextField(label="Batch sampling seed",value=form.trainingSeed,onValueChange={v->vm.updateTrain{it.copy(trainingSeed=v)}},enabled=!running)
+                Row(verticalAlignment=Alignment.CenterVertically) {
+                    androidx.compose.material3.Switch(checked=form.resumeSchedule,onCheckedChange={v->vm.updateTrain{it.copy(resumeSchedule=v)}},enabled=!running)
+                    Text("Resume saved LR schedule and batch cursor",style=MaterialTheme.typography.bodySmall)
+                }
                 EmberTextField(
                     label = "Sample prompt",
                     value = form.samplePrompt,

@@ -93,8 +93,13 @@ data class ModelConfig(
                 vocabSize = json.intOr("vocabSize"),
                 dropout = json.doubleOr("dropout"),
                 ffnMult = json.doubleOr("ffnMult", 4.0),
-                nKvHead = json.intOr("n_kv_head", 1),
-                ropeTheta = json.doubleOr("rope_theta", 500000.0),
+                nKvHead = json.intOr("n_kv_head", json.intOr("nKvHead",1)),
+                ropeTheta = json.doubleOr("rope_theta", json.doubleOr("ropeTheta",500000.0)),
+                intermediateSize = if(json.isNull("intermediate_size")) null else json.optInt("intermediate_size"),
+                maxTrainTokens=json.intOr("maxTrainTokens",3000000),
+                maxValTokens=json.intOr("maxValTokens",250000),
+                tokenizerChars=json.intOr("tokenizerChars",2000000),
+                seed=json.intOr("seed",42),
             ).takeIf { it.nLayer > 0 && it.nEmbd > 0 }
         }
     }
@@ -395,6 +400,7 @@ data class ForagingSnapshot(
     val error: String? = null,
     val activeRequests: Int = 0,
     val fetched: Long = 0,
+    val cached: Long = 0,
     val failed: Long = 0,
     val duplicates: Long = 0,
     val rejected: Long = 0,
@@ -406,7 +412,7 @@ data class ForagingSnapshot(
             return ForagingSnapshot(
                 running = json.boolOr("running"),
                 documentsAccepted = json.longOr("documentsAccepted"),
-                activeRequests=json.intOr("activeRequests"),fetched=json.longOr("fetched"),
+                activeRequests=json.intOr("activeRequests"),fetched=json.longOr("fetched"),cached=json.longOr("cached"),
                 failed=json.longOr("failed"),duplicates=json.longOr("duplicates"),
                 rejected=json.longOr("rejected"),bytesDownloaded=json.longOr("bytesDownloaded"),
                 lastDocument = json.stringOr("lastDocument"),
@@ -1130,6 +1136,13 @@ data class TrainingOptions(
     val weightDecay: Double = 0.01,
     val gradientAccumulation: Int = 1,
     val checkpointEvery: Int = 50,
+    val beta1: Double = .9,
+    val beta2: Double = .95,
+    val epsilon: Double = 1e-8,
+    val warmupSteps: Int? = null,
+    val minLrFraction: Double = .1,
+    val trainingSeed: Int = 42,
+    val resumeSchedule: Boolean = false,
 )
 
 data class GenerationOptions(

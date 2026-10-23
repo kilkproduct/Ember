@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
 import json
 import random
 import urllib.error
@@ -47,7 +50,10 @@ class Forager:
         self._auto_fire_cb = auto_fire_cb
         self._lock = threading.RLock()
         self._host_slots=defaultdict(lambda:threading.BoundedSemaphore(2))
-        self.metrics={k:0 for k in ("activeRequests","fetched","failed","duplicates","rejected","bytesDownloaded","completedSources")}
+        self._host_next=defaultdict(float)
+        self._cache_dir=corpus.db_path.parent/"forage_http_cache"
+        self._cache_dir.mkdir(exist_ok=True)
+        self.metrics={k:0 for k in ("activeRequests","cached","fetched","failed","duplicates","rejected","bytesDownloaded","completedSources")}
         self.progress=WorkProgress()
         self._budget=500
         self._last_summary=0.0
@@ -63,9 +69,10 @@ class Forager:
         self.logs: list[dict[str, Any]] = []
 
     def status(self) -> dict[str, Any]:
-        return {
+        with self._lock:
+            return {
             **self.metrics,
-            "progress": self.progress.update(self.metrics["completedSources"]),
+            "progress": self.progress.update(self.metrics["completedSources"],state="running" if self.running else "stopped"),
             "running": self.running,
             "documentsAccepted": self.documents_accepted,
             "lastDocument": self.last_document,
@@ -109,7 +116,35 @@ class Forager:
             self.logs = self.logs[-200:]
         self._emit("forage.log", entry)
 
+    def _cached(self,url):
+        path=self._cache_dir/(hashlib.sha256(url.encode()).hexdigest()+".json")
+        try:
+            if path.stat().st_size>8*1024*1024 or time.time()-path.stat().st_mtime>3600:return None
+            return json.loads(path.read_text(encoding="utf-8"))["payload"]
+        except (OSError,ValueError,KeyError):return None
+
+    def _cache(self,url,payload):
+        # Disposable public-response cache. Bound both entries and disk bytes;
+        # files are atomically replaced, never touch models/corpus/checkpoints.
+        raw=json.dumps({"payload":payload},ensure_ascii=False).encode("utf-8")
+        if len(raw)>8*1024*1024:return
+        path=self._cache_dir/(hashlib.sha256(url.encode()).hexdigest()+".json")
+        try:
+            with self._lock:
+                temporary=path.with_suffix(".tmp")
+                temporary.write_bytes(raw);os.replace(temporary,path)
+                entries=sorted(self._cache_dir.glob("*.json"),key=lambda p:p.stat().st_mtime)
+                size=sum(p.stat().st_size for p in entries)
+                while entries and (len(entries)>64 or size>16*1024*1024):
+                    oldest=entries.pop(0);size-=oldest.stat().st_size;oldest.unlink()
+        except OSError:pass # cache failures cannot turn successful retrieval into failure
+
     def _request(self,url):
+        if self._stop.is_set():raise InterruptedError("Forage cancelled")
+        cached=self._cached(url)
+        if cached is not None:
+            with self._lock:self.metrics["cached"]+=1
+            return cached
         host=urllib.parse.urlsplit(url).netloc
         slot=self._host_slots[host]
         while not self._stop.is_set():
@@ -123,7 +158,11 @@ class Forager:
             for attempt in range(3):
                 if self._stop.is_set():raise InterruptedError("Forage cancelled")
                 try:
+                    with self._lock:
+                        now=time.monotonic();due=max(now,self._host_next[host]);self._host_next[host]=due+.5
+                    if self._stop.wait(max(0,due-now)):raise InterruptedError("Forage cancelled")
                     result=_http_json(url,on_bytes=received)
+                    self._cache(url,result)
                     with self._lock:self.metrics["fetched"]+=1
                     return result
                 except urllib.error.HTTPError as exc:
@@ -134,6 +173,8 @@ class Forager:
                 except (TimeoutError,urllib.error.URLError):
                     if attempt==2:raise
                     if self._stop.wait(2**attempt):raise InterruptedError("Forage cancelled")
+        except InterruptedError:
+            raise
         except Exception:
             with self._lock:self.metrics["failed"]+=1
             raise
@@ -198,8 +239,12 @@ class Forager:
                 topic = queue.pop(0)
                 if topic.lower() in seen_topics:
                     continue
-                seen_topics.add(topic.lower())
                 self.current_seeds = topic
+                # Persist in-flight work before requests. Cancellation/crash must
+                # replay this topic; corpus dedup prevents repeated content.
+                self.saved_state={"running":True,"pendingTopics":[topic]+list(queue),
+                    "seenTopics":sorted(seen_topics),"options":opts}
+                self.corpus.set_kv("forager:autosave",self.saved_state)
 
                 jobs=[]
                 if opts.get("wikiOn",True):jobs.append((self._fetch_wikipedia,(topic,queue if autopilot and opts.get("wander",True) else None)))
@@ -216,6 +261,10 @@ class Forager:
                         future.result()
                         with self._lock:self.metrics["completedSources"]+=1
                         self._emit("forage.progress",self.status())
+                if self._stop.is_set() or self.documents_accepted>=budget:
+                    pending=[topic]+list(queue)
+                else:
+                    seen_topics.add(topic.lower());pending=list(queue)
                 state_blob = {
                     "running": not self._stop.is_set(),
                     "documentsAccepted": self.documents_accepted,
@@ -224,7 +273,7 @@ class Forager:
                     "startedAt": self.started_at,
                     "updatedAt": int(time.time() * 1000),
                     "options": opts,
-                    "pendingTopics":list(queue),
+                    "pendingTopics":pending,
                     "seenTopics":sorted(seen_topics),
                 }
                 self.saved_state = state_blob

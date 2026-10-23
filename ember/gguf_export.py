@@ -832,14 +832,14 @@ def _validate_gguf_file(path: str | Path) -> dict[str, Any]:
 from functools import lru_cache
 
 @lru_cache(maxsize=16)
-def _cached_validation(path,size,mtime):
+def _cached_validation(path,size,mtime,device,inode):
     return _validate_gguf_file(path)
 
 def validate_gguf_file(path):
     p=Path(path)
     if not p.exists(): raise GgufExportError(f"model file does not exist: {p}")
     st=p.stat()
-    return dict(_cached_validation(str(p),st.st_size,st.st_mtime_ns))
+    return dict(_cached_validation(str(p),st.st_size,st.st_mtime_ns,st.st_dev,st.st_ino))
 
 
 def main() -> int:

@@ -133,6 +133,16 @@ def _sniff_inner_format(raw: bytes, hint_name: str = "") -> tuple[str, str]:
     stripped = sample.lstrip()
     low_name = (hint_name or "").lower()
 
+    # A malformed first record must not turn an otherwise real JSONL dataset
+    # into one giant plain-text document. Still inspect bytes, not filename alone.
+    candidates=[line.strip() for line in sample.splitlines()[:10] if line.strip()]
+    if not stripped.startswith(("{","[")):
+        objects=0
+        for line in candidates:
+            try: objects+=isinstance(json.loads(line),dict)
+            except json.JSONDecodeError: pass
+        if objects>=2:return "jsonl",enc
+
     if stripped.startswith("{") or stripped.startswith("["):
         # Distinguish multi-line NDJSON from single JSON document/array
         lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
@@ -850,14 +860,21 @@ class ImportManager:
                 last_report=now
                 on_progress({"token":job.token,"documents":job.accepted,"processed":job.records,
                     "total":0,"percent":min(99,max(1,int(100*consumed/max(1,source_size)))) if not codec else 0,"stage":"committing","records":job.records,"merged":job.merged,
-                    "skipped":job.skipped,"failed":0,"bytesRead":consumed,"sourceBytes":source_size,"entries":1,
+                    "skipped":job.skipped,"failed":0,"bytesRead":consumed,"byteBasis":"decompressed" if codec else "source","sourceBytes":source_size,"entries":1,
                     "elapsedMs":int((now-t0)*1000),"malformed":job.malformed+malformed,
                     "documentsPerSecond":max(0,job.records-start)/max(.001,now-t0),
                     "message":"Streaming records; total unknown until completion"})
         try:
             with opener(job.path,"rb") as binary:
                 with io.TextIOWrapper(binary,encoding=encoding,errors="strict",newline="") as text:
-                    rows=csv.DictReader(text,delimiter="\t" if fmt=="tsv" else ",") if fmt!="jsonl" else text
+                    def bounded_lines():
+                        while True:
+                            line=text.readline(8*1024*1024+1)
+                            if not line:return
+                            if len(line)>8*1024*1024:raise ValueError("Dataset line exceeds the 8 Mi-character record safety limit; split this record")
+                            yield line
+                    lines=bounded_lines()
+                    rows=csv.DictReader(lines,delimiter="\t" if fmt=="tsv" else ",") if fmt!="jsonl" else lines
                     for index,row in enumerate(rows):
                         if job.cancel_flag or job.pause_flag:break
                         consumed=binary.tell()

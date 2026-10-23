@@ -11,6 +11,9 @@
 #include "ember_llama.h"
 
 #include "llama.h"
+#include "gguf.h"
+#include <fstream>
+#include <limits>
 
 #include <algorithm>
 #include <atomic>
@@ -27,6 +30,50 @@
 #include <vector>
 
 namespace {
+
+// Admission is conservative arithmetic, not an allocation guarantee. On Linux /
+// Android the kernel reports reclaimable system memory; unknown hosts defer to
+// llama.cpp's allocation errors. No device RAM capacity is hard-coded.
+uint64_t available_memory_bytes() {
+    std::ifstream f("/proc/meminfo");
+    std::string line;
+    while (std::getline(f,line)) {
+        if (line.rfind("MemAvailable:",0)==0) {
+            std::istringstream v(line.substr(13)); uint64_t kib=0; v>>kib;
+            return kib*1024;
+        }
+    }
+    return 0;
+}
+
+// Read only metadata and tensor descriptors, never the tensor payload.
+uint64_t admission_bytes(const char* path, int requested_ctx, int batch) {
+    gguf_init_params params{};params.no_alloc=true;
+    std::unique_ptr<gguf_context,decltype(&gguf_free)> g(gguf_init_from_file(path,params),gguf_free);
+    if (!g) return 0; // authoritative loader will produce the format error
+    auto str=[&](const char* key)->std::string {
+        auto i=gguf_find_key(g.get(),key);
+        return i>=0 && gguf_get_kv_type(g.get(),i)==GGUF_TYPE_STRING ? gguf_get_val_str(g.get(),i) : "";
+    };
+    auto integer=[&](const std::string& key,uint64_t fallback)->uint64_t {
+        auto i=gguf_find_key(g.get(),key.c_str());if(i<0)return fallback;
+        if(gguf_get_kv_type(g.get(),i)==GGUF_TYPE_UINT32)return gguf_get_val_u32(g.get(),i);
+        if(gguf_get_kv_type(g.get(),i)==GGUF_TYPE_INT32)return std::max(0,gguf_get_val_i32(g.get(),i));
+        return fallback;
+    };
+    const auto arch=str("general.architecture");
+    if(arch!="llama" && arch!="qwen2" && arch!="qwen3")return 0;
+    const auto c=integer(arch+".embedding_length",0),heads=integer(arch+".attention.head_count",0);
+    const auto layers=integer(arch+".block_count",0),kv=integer(arch+".attention.head_count_kv",heads);
+    if(!c || !heads || !layers || c>65536 || heads>1024 || layers>1024 || kv>1024)return 0;
+    const auto kd=integer(arch+".attention.key_length",c/heads),vd=integer(arch+".attention.value_length",kd);
+    if(kd>65536 || vd>65536)return 0;
+    const auto ctx=std::min(uint64_t(requested_ctx),integer(arch+".context_length",requested_ctx));
+    uint64_t weights=0;
+    for(int64_t i=0;i<gguf_get_n_tensors(g.get());++i)weights+=gguf_get_tensor_size(g.get(),i);
+    // F32 K/V, intermediate tensors/logits, graph, tokenizer and runtime reserve.
+    return weights+ctx*layers*kv*(kd+vd)*4+uint64_t(batch)*c*layers*16+96ULL*1024*1024;
+}
 
 // ---------------------------------------------------------------------------
 // Process-wide llama.cpp state
@@ -189,6 +236,7 @@ struct ember_llama_s {
     const llama_vocab* vocab = nullptr;
 
     ember_llama_config cfg{};
+    int32_t requested_ctx = 0;
     int32_t n_ctx = 0;
     int32_t n_batch = 0;
     std::vector<llama_logit_bias> suppress;  // control tokens that must never be emitted
@@ -350,13 +398,23 @@ EMBER_API int ember_llama_load(
     if (cfg.n_ctx <= 0) cfg.n_ctx = 512;
     if (cfg.n_batch <= 0) cfg.n_batch = 256;
     if (cfg.n_ubatch <= 0) cfg.n_ubatch = std::min(cfg.n_batch,64);
-    if (cfg.n_ubatch>cfg.n_batch || cfg.n_gpu_layers != 0 || cfg.n_ctx>8192 || cfg.n_batch>2048) {
+    if (cfg.n_ubatch>cfg.n_batch || cfg.n_gpu_layers != 0 || cfg.n_ctx>8192 || cfg.n_batch>2048 || cfg.n_threads>8 || cfg.n_threads<0) {
         engine->set_error(EMBER_LLAMA_ERR_ARGS,"CPU-only build: require microbatch <= batch <= 2048, context <= 8192, GPU layers = 0");
         return engine->code;
     }
     if (cfg.n_threads <= 0) cfg.n_threads = conservative_thread_count();
     if (cfg.n_gpu_layers < 0) cfg.n_gpu_layers = 0;
 
+    engine->requested_ctx=cfg.n_ctx;
+    const uint64_t required=admission_bytes(model_path,cfg.n_ctx,cfg.n_batch);
+    const uint64_t available=available_memory_bytes();
+    if(required && available && required>available*8/10) {
+        engine->set_error(EMBER_LLAMA_ERR_OUT_OF_MEMORY,
+            "Model + F32 KV/context working-set estimate " + std::to_string(required/(1024*1024)) +
+            " MiB exceeds 80% of currently available system memory (" + std::to_string(available/(1024*1024)) +
+            " MiB). Choose a smaller quantized model, context or batch.");
+        return engine->code;
+    }
     llama_model_params mp = llama_model_default_params();
     mp.n_gpu_layers = cfg.n_gpu_layers;
     mp.check_tensors = (cfg.check_tensors != 0);
@@ -662,7 +720,7 @@ EMBER_API int ember_llama_generate(
 
     const auto t_start = std::chrono::steady_clock::now();
     std::string warning;
-    if (engine->cfg.n_ctx != engine->n_ctx) warning="Requested context was clamped to the model's native training limit. ";
+    if (engine->requested_ctx != engine->n_ctx) warning="Requested context was clamped to the model's native training limit. ";
     std::string stopped_by = "length";
     int result_code = EMBER_LLAMA_OK;
 

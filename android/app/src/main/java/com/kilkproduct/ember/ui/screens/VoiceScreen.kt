@@ -300,7 +300,7 @@ fun VoiceScreen(
                         value = form.temperature,
                         onValueChange = { value -> vm.updateVoice { it.copy(temperature = value) } },
                         step = 0.05,
-                        min = 0.05,
+                        min = 0.0,
                         max = 2.0,
                         decimals = 2,
                         modifier = Modifier.weight(1f),
@@ -510,7 +510,7 @@ fun VoiceScreen(
                 }
                 Spacer(Modifier.height(6.dp))
                 Text(
-                    text = "Models live in app-private storage and survive restarts. Import copies the file, " +
+                    text = "Seekable SAF models stay in their original location with retained permission. Other providers require a cancellable copy. " +
                         "validates its GGUF metadata and tensors, and only then selects it — a model is never " +
                         "reported ready just because the file exists.",
                     style = MaterialTheme.typography.labelSmall,
