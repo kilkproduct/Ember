@@ -235,6 +235,8 @@ class Trainer:
         """Model file inference should use: an imported GGUF wins over the trained one."""
         if self._imported_gguf is not None:
             return self._imported_gguf if self._imported_gguf.exists() else None
+        if self.corpus.get_kv("inference:selected_external"):
+            return None  # Never substitute a trained model for an unavailable SAF selection.
         path = self.active_gguf_path
         return path if path.exists() else None
 
@@ -275,6 +277,7 @@ class Trainer:
         Raises a structured :class:`~ember.inference.InferenceError` (never a
         silent fallback) when there is no usable model.
         """
+        self.require_selected_source_available()
         engine = get_engine()
         if not engine.available():
             raise InferenceError(
@@ -1031,32 +1034,27 @@ class Trainer:
     # GGUF model library (user-imported models)
     # ------------------------------------------------------------------
     def register_external_model(self,path,uri,name,select=True):
-        # Android owns a seekable ParcelFileDescriptor for this process lifetime.
-        # URI permission, reopening after restart and revocation are Android duties.
-        if not str(path).startswith("/proc/self/fd/"): raise ValueError("external models require an Android-owned file descriptor")
-        info=validate_gguf_file(path)
-        self._model_import_cancel.clear()
-        engine=get_engine()
-        self._engine_model_path=""
-        try:
-            engine.load_model(path,EngineConfig(),on_progress=lambda value:
-                self._emit("model.importProgress",{"loadProgress":value,"stage":"native-validation"}))
-            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
-        finally:
-            engine.unload()
-        entry={**info,"nativeValidated":True,"name":name,"libraryName":name,"storage":"external","uri":uri,"path":path}
+        raise InferenceError("SAF descriptor paths cannot be reopened safely. Import the document through Android's private model staging flow.",
+                             code=-4,name="model-source-unavailable")
+
+    def restore_external_registration(self,uri,name):
+        # Preserve old registrations and selection without touching the source or
+        # inventing a valid filesystem path. A user can explicitly forget/reimport.
+        entry={"name":name,"libraryName":name,"storage":"external","uri":uri,
+               "path":uri,"valid":False,"requiresPrivateImport":True,
+               "error":"Re-import this document to create a durable private model copy."}
         self.external_models[uri]=entry
-        if select or self.corpus.get_kv("inference:selected_external")==uri:
-            self._imported_gguf=Path(path)
-            self.corpus.set_kv("inference:selected_external",uri)
-            self.corpus.set_kv("inference:selected_model",path)
-            self._engine_model_path=""
-        return {**entry,"imported":True,"selected":self._imported_gguf==Path(path)}
+        return {**entry,"selected":self.corpus.get_kv("inference:selected_external")==uri}
+
+    def require_selected_source_available(self):
+        if self._imported_gguf is None and self.corpus.get_kv("inference:selected_external"):
+            raise InferenceError("The selected legacy SAF model needs a private copy. Import the original document again; the source and registration have been preserved.",
+                                 code=-4,name="model-source-unavailable")
 
     def unregister_external_model(self,uri):
         with self._lock:
             entry=self.external_models.pop(uri,None)
-            if entry and self._imported_gguf==Path(entry["path"]):
+            if entry and (self._imported_gguf==Path(entry["path"]) or self.corpus.get_kv("inference:selected_external")==uri):
                 self._imported_gguf=None;self._engine_model_path=""
                 self.corpus.set_kv("inference:selected_external",None)
                 self.corpus.set_kv("inference:selected_model",None)
@@ -1099,7 +1097,7 @@ class Trainer:
                 "path": str(active),
                 "bytes": active.stat().st_size,
                 "mtime": int(active.stat().st_mtime * 1000),
-                "selected": self._imported_gguf is None,
+                "selected": self._imported_gguf is None and not self.corpus.get_kv("inference:selected_external"),
                 "valid": None,
                 "error": None,
                 "trained": True,
@@ -1124,11 +1122,14 @@ class Trainer:
                 entry["error"] = str(exc)
             out.insert(0, entry)
         for entry in self.external_models.values():
-            out.append({**entry,"selected":self._imported_gguf==Path(entry["path"]),"valid":Path(entry["path"]).exists()})
+            out.append({**entry,"selected":self.corpus.get_kv("inference:selected_external")==entry["uri"],"valid":False})
         return out
 
     def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True, staged: bool = False) -> dict[str, Any]:
         """Copy a user-selected GGUF into the model library and validate it."""
+        if str(source).startswith(("/proc/self/fd/", "content://", "saf:")):
+            raise InferenceError("Selected documents must be stream-copied by Android into private model storage before import; descriptor/URI paths cannot be reopened.",
+                                 code=-4,name="model-source-unavailable")
         src = Path(source)
         if not src.exists():
             raise InferenceError(f"Model file not found: {src}", code=-4, name="model-not-found")

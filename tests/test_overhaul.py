@@ -158,11 +158,11 @@ def test_external_descriptor_selection_and_restart_does_not_reuse_stale_fd(tmp_p
     try:
         with path.open('rb') as f:
             fd=f'/proc/self/fd/{f.fileno()}'
-            backend.dispatch('model.registerExternal',{'path':fd,'uri':'content://fixture/1','name':'fixture'})
-            result=backend.dispatch('model.select',{'path':fd})
-            assert result['selected']==fd
-            assert backend.trainer.inference_model_path.as_posix()==fd
-            assert backend.dispatch('model.list')['models'][-1]['storage']=='external'
+            with pytest.raises(InferenceError,match='private model staging'):
+                backend.dispatch('model.registerExternal',{'path':fd,'uri':'content://fixture/1','name':'fixture'})
+            with pytest.raises(InferenceError,match='stream-copied'):
+                backend.dispatch('model.importGguf',{'path':fd,'name':'fixture'})
+        assert backend.trainer._imported_gguf is None
     finally:backend.close()
     backend=EmberBackend(tmp_path/'app')
     try:assert backend.trainer._imported_gguf is None

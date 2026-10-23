@@ -439,6 +439,7 @@ class EmberBackend:
                 subreddit=str(p.get("subreddit") or ""),
             )
             try:
+                self.trainer.require_selected_source_available()
                 if self.trainer._imported_gguf is None:
                     self.trainer.sync_gguf()
                 gguf_path = self.trainer.inference_model_path
@@ -565,6 +566,9 @@ class EmberBackend:
         if method == "model.unregisterExternal":
             return self.trainer.unregister_external_model(str(p["uri"]))
 
+        if method == "model.restoreExternalRegistration":
+            return self.trainer.restore_external_registration(str(p["uri"]),str(p.get("name","External model")))
+
         if method == "model.registerExternal":
             return self.trainer.register_external_model(str(p["path"]),str(p["uri"]),str(p.get("name","External model")),bool(p.get("select",True)))
 
@@ -574,6 +578,11 @@ class EmberBackend:
                 raise ValueError("Missing staged model path for import.")
             source=Path(src)
             staged=bool(p.get("token")) and source.parent.resolve()==(self.data_dir.parent/"imports").resolve() and source.name.startswith(str(p["token"])+".")
+            model_id=str(p.get("modelStagingId") or "")
+            if model_id:
+                if not (len(model_id)==32 and model_id.isalnum() and source.parent.resolve()==(self.data_dir.parent/"model_staging").resolve() and source.name==model_id+".gguf"):
+                    raise ValueError("Invalid private model staging identity/path")
+                staged=True
             return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False,staged=staged)
 
         if method == "model.exportGguf":

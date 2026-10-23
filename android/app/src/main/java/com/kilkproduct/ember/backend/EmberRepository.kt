@@ -4,9 +4,6 @@ import android.app.Application
 import android.content.Context
 import android.net.Uri
 import android.content.Intent
-import android.os.ParcelFileDescriptor
-import android.system.Os
-import android.system.OsConstants
 import kotlinx.coroutines.ensureActive
 import com.kilkproduct.ember.BuildConfig
 import com.kilkproduct.ember.data.Preferences
@@ -1623,39 +1620,17 @@ class EmberRepository private constructor(
      * The file is copied into app-private storage first (so it survives the URI
      * permission expiring), then validated structurally before it is selected.
      */
-    private val externalDescriptors = java.util.concurrent.ConcurrentHashMap<String,ParcelFileDescriptor>()
     private var modelImportJob: Job? = null
 
-    private suspend fun registerExternal(uri: Uri, name: String, select: Boolean): JSONObject {
-        return withContext(Dispatchers.IO) {
-            if(externalDescriptors.size>=32 && !externalDescriptors.containsKey(uri.toString()))
-                throw EmberBackendException("32 external models are registered. Forget one to free a descriptor before adding another.")
-            var descriptor: ParcelFileDescriptor? = null
-            try {
-                descriptor=app.contentResolver.openFileDescriptor(uri,"r")
-                    ?: throw java.io.IOException("Provider could not open this model")
-                Os.lseek(descriptor.fileDescriptor,0,OsConstants.SEEK_CUR)
-                if (descriptor.statSize<=0) throw java.io.IOException("Provider does not expose a seekable file")
-                val result=engine.call("model.registerExternal",JSONObject()
-                    .put("path","/proc/self/fd/${descriptor.fd}").put("uri",uri.toString())
-                    .put("name",name).put("select",select),timeoutMs=300_000)
-                externalDescriptors.put(uri.toString(),descriptor)?.close()
-                descriptor=null
-                result
-            } finally { descriptor?.close() }
-        }
-    }
-
     private suspend fun restoreExternalModels() {
+        // Preserve pre-existing URI registrations, but never reopen /proc aliases.
+        // They remain visible as requiring an explicit one-time private import.
         val stored=app.getSharedPreferences("external_models",Context.MODE_PRIVATE).getString("models","[]") ?: "[]"
         val entries=JSONArray(stored)
         for (i in 0 until entries.length()) {
             val entry=entries.getJSONObject(i)
-            try { registerExternal(Uri.parse(entry.getString("uri")),entry.getString("name"),false) }
-            catch (t: Throwable) {
-                if(t is CancellationException) throw t
-                addNotice(NoticeLevel.WARNING,"External model unavailable","${entry.optString("name")}: permission revoked or file moved. Select it again. ${t.message}")
-            }
+            engine.call("model.restoreExternalRegistration",JSONObject()
+                .put("uri",entry.getString("uri")).put("name",entry.getString("name")))
         }
     }
 
@@ -1663,7 +1638,6 @@ class EmberRepository private constructor(
         launchOperation(Ops.MODEL_IMPORT,"Could not forget external model") {
             if(model.selected)engine.call("model.unload")
             engine.call("model.unregisterExternal",JSONObject().put("uri",model.uri))
-            externalDescriptors.remove(model.uri)?.close()
             val prefs=app.getSharedPreferences("external_models",Context.MODE_PRIVATE)
             val entries=JSONArray(prefs.getString("models","[]") ?: "[]");val kept=JSONArray()
             for(i in 0 until entries.length())if(entries.getJSONObject(i).optString("uri")!=model.uri)kept.put(entries.getJSONObject(i))
@@ -1684,40 +1658,21 @@ class EmberRepository private constructor(
         markBusy(Ops.MODEL_IMPORT, true)
         _state.update { it.copy(modelBusy = true, inferenceError = null) }
         modelImportJob = scope.launch {
-            var token: String? = null
+            var stagedModel: StagedModel? = null
             try {
                 val name = withContext(Dispatchers.IO) { Files.displayName(app, uri) }
-                _state.update { it.copy(modelImportDetail="Inspecting model metadata…") }
-                val result = try {
-                    withContext(Dispatchers.IO) {
-                        app.contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                    }
-                    registerExternal(uri,name,true).also {
-                        val prefs=app.getSharedPreferences("external_models",Context.MODE_PRIVATE)
-                        val entries=JSONArray(prefs.getString("models","[]") ?: "[]")
-                        val saved=JSONArray()
-                        for (i in 0 until entries.length()) if(entries.getJSONObject(i).optString("uri")!=uri.toString()) saved.put(entries.getJSONObject(i))
-                        saved.put(JSONObject().put("uri",uri.toString()).put("name",name))
-                        prefs.edit().putString("models",saved.toString()).apply()
-                        _state.update { state -> state.copy(modelImportDetail="Registered external model · no model copy · native model and context validated") }
-                    }
-                } catch(t: Throwable) {
-                    if(t is CancellationException) throw t
-                    // Only non-seekable/provider failures may need copying; an
-                    // invalid GGUF must fail validation rather than copying gigabytes.
-                    if(t is EmberBackendException) throw t
-                    addNotice(NoticeLevel.INFO,"Copy required","This provider cannot retain direct seekable access. Copying into Ember storage.")
-                    val mime=withContext(Dispatchers.IO) { Files.mimeType(app,uri) }
-                    val staged=withContext(Dispatchers.IO) {
-                        val taskContext=coroutineContext
-                        engine.stageImport(uri,name,mime,maxBytes=Long.MAX_VALUE,
-                            checkCancelled={taskContext.ensureActive()},onProgress={bytes ->
-                                _state.update { it.copy(modelImportDetail="Copied ${Formats.bytes(bytes)} · validation pending") }
-                            })
-                    }
-                    token=staged.token
-                    engine.call("model.importGguf",JSONObject().put("token",staged.token).put("name",name).put("select",true),timeoutMs=600_000)
+                _state.update { it.copy(modelImportDetail="Copying selected model into private storage…") }
+                val staged = withContext(Dispatchers.IO) {
+                    val taskContext=coroutineContext
+                    SafModelSource.stage(app.contentResolver,uri,File(app.filesDir,"model_staging"),
+                        checkCancelled={taskContext.ensureActive()},onProgress={bytes ->
+                            _state.update {it.copy(modelImportDetail="Copied ${Formats.bytes(bytes)} · verifying private copy")}
+                        }).also { stagedModel=it }
                 }
+                stagedModel=staged
+                val result=engine.call("model.importGguf",JSONObject()
+                    .put("path",staged.file.absolutePath).put("modelStagingId",staged.id)
+                    .put("name",name).put("select",true),timeoutMs=600_000)
                 addNotice(
                     NoticeLevel.SUCCESS,
                     "Model imported",
@@ -1751,7 +1706,10 @@ class EmberRepository private constructor(
                 _state.update { it.copy(inferenceError = message) }
                 addNotice(NoticeLevel.ERROR, "Model import failed", message)
             } finally {
-                token?.let { runCatching { engine.releaseImport(it) } }
+                // Python publishes a hard link into the durable model library
+                // only after native validation. Removing this staging link cannot
+                // remove a registered model, including after RPC cancellation.
+                stagedModel?.file?.delete()
                 _state.update { it.copy(modelBusy = false) }
                 markBusy(Ops.MODEL_IMPORT, false)
                 gate.finish(Ops.MODEL_IMPORT)

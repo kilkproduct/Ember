@@ -191,6 +191,11 @@ jobs:
           echo "--- server log tail ---"
           tail -5 /tmp/ember-server.log || true
 
+      - name: Generate synthetic GGUF for Android SAF regression tests
+        run: |
+          mkdir -p android/app/src/androidTest/assets
+          python scripts/make_test_gguf.py android/app/src/androidTest/assets/saf-fixture.gguf --steps 4
+
       - name: Test Android unit suite and assemble debug APK (NDK CMake + Chaquopy Python 3.13)
         working-directory: android
         run: |
@@ -255,6 +260,29 @@ jobs:
               print("::error::"+text.replace('%','%25').replace('\n','%0A'))
           PYLINT
 
+      - name: Enable emulator acceleration
+        run: sudo chmod 666 /dev/kvm
+
+      - name: Run real SAF provider and JNI regressions on Android emulator
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 29
+          arch: x86_64
+          profile: pixel_2
+          disable-animations: true
+          script: cd android && gradle connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=com.kilkproduct.ember.backend.SafModelImportTest --no-daemon --stacktrace
+
+      - name: Upload Android test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-test-results
+          path: |
+            android/app/build/test-results/
+            android/app/build/outputs/androidTest-results/
+            android/app/build/reports/androidTests/
+          if-no-files-found: warn
+
       - name: Measure baseline APK from exact pre-overhaul commit
         run: |
           git fetch origin 412f8c1c6a26440d1d1043e429a534d7e1fc5751
@@ -266,6 +294,7 @@ jobs:
 
       - name: Name the APKs and record measured package sizes
         run: |
+          cp android/app/build/outputs/apk/release/app-universal-release-unsigned.apk Ember-release-unsigned.apk
           cp android/app/build/outputs/apk/debug/app-universal-debug.apk Ember-debug.apk
           cp android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk Ember-arm64-v8a-debug.apk
           cp android/app/build/outputs/apk/debug/app-x86_64-debug.apk Ember-x86_64-debug.apk
@@ -331,6 +360,7 @@ jobs:
           name: Ember-debug
           path: |
             Ember-debug.apk
+            Ember-release-unsigned.apk
             Ember-arm64-v8a-debug.apk
             Ember-x86_64-debug.apk
             apk-metrics.json
