@@ -697,7 +697,7 @@ data class ImportProgress(
         get() = when (stage) {
             "opening" -> "Opening the file"
             "reading" -> "Reading records"
-            "committing" -> if(byteBasis=="decompressed") "Parsing decompressed records · total unknown" else "Writing documents · source bytes read"
+            "committing" -> if(byteBasis=="decompressed") "Parsing decompressed records · total unknown" else if(total==0) "Writing documents · source bytes read" else "Writing documents"
             "finalizing" -> "Finishing up"
             "paused" -> "Paused"
             "cancelled" -> "Stopped"
