@@ -33,7 +33,7 @@ jobs:
           cache: "pip"
 
       - name: Set up Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
@@ -103,7 +103,14 @@ jobs:
             grep -q " $f$" /tmp/apk-contents.txt || problems="$problems missing:$f"
           done
 
-          # 2. Verify packaged Python requirements archives exist for target ABIs
+          # 2. Verify our real Python backend package (ember/*) is compiled inside assets/chaquopy/app.imy
+          unzip -p Ember-debug.apk assets/chaquopy/app.imy > /tmp/app.imy
+          unzip -l /tmp/app.imy > /tmp/app-imy.txt
+          for pyc in ember/backend ember/model ember/trainer ember/tokenizer ember/corpus ember/ingest ember/dataset ember/optim ember/sampler ember/spec; do
+            grep -q "$pyc" /tmp/app-imy.txt || problems="$problems missing_py:$pyc"
+          done
+
+          # 3. Verify packaged Python requirements archives (numpy + zstandard) exist for target ABIs
           grep -q "assets/chaquopy/requirements-arm64-v8a" /tmp/apk-contents.txt || problems="$problems missing:requirements-arm64-v8a"
           grep -q "assets/chaquopy/requirements-x86_64" /tmp/apk-contents.txt || problems="$problems missing:requirements-x86_64"
 

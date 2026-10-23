@@ -70,7 +70,7 @@ class EmberV3ContractTest {
             )
 
         val parsed = EmberStatus.fromJson(statusJson)
-        assertTrue(parsed.ready)
+        assertEquals("python-numpy + native-cpp", parsed.backend)
         assertTrue(parsed.model.ready)
         assertEquals(150L, parsed.model.step)
         assertEquals("byte-bpe", parsed.model.tokenizerType)
