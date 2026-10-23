@@ -157,6 +157,42 @@ jobs:
           set -o pipefail
           gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
 
+      - name: Report Android unit test failures
+        if: failure()
+        run: |
+          # A bare "There were failing tests" from Gradle hides which assertion
+          # broke, so surface the JUnit XML as annotations and in the job summary.
+          python3 - <<'PY'
+          import glob, os, xml.etree.ElementTree as ET
+
+          paths = sorted(glob.glob("android/app/build/test-results/testDebugUnitTest/*.xml"))
+          if not paths:
+              print("::notice::No JUnit XML was produced — the failure is a compilation or task error, see the Gradle log.")
+              raise SystemExit(0)
+
+          failures = []
+          for path in paths:
+              root = ET.parse(path).getroot()
+              for case in root.iter("testcase"):
+                  for kind in ("failure", "error"):
+                      for node in case.findall(kind):
+                          msg = " ".join((node.get("message") or "").split())[:500]
+                          body = " | ".join((node.text or "").split())[:700]
+                          failures.append(f'{case.get("classname")}#{case.get("name")}: {msg} :: {body}')
+
+          for line in failures:
+              safe = line.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+              print(f"::error::UNIT TEST FAILED {safe}")
+
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as fh:
+                  fh.write("## Android unit test failures\n\n")
+                  for line in failures:
+                      fh.write(f"- `{line}`\n")
+          print(f"reported {len(failures)} failing unit test(s)")
+          PY
+
       - name: Summarize build errors
         if: failure()
         run: |
