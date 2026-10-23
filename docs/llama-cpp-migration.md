@@ -90,9 +90,9 @@ measurements, not Android performance claims.
 ## Files removed / retained
 
 Removed: `native/src/*`, `native/include/*`, old `native/CMakeLists.txt`,
-`NativeInference.kt`, old custom-native tests and ctypes bridge. The APK does not
-build `libember_infer.so`. NumPy training kernels remain; `ember/sampler.py` is a
-reference verifier only. Training checkpoints and source documents remain.
+`NativeInference.kt`, `ember/sampler.py`, old custom-native tests and ctypes bridge.
+The APK does not build `libember_infer.so`. NumPy training kernels remain as the
+numerical reference. Training checkpoints and source documents remain.
 
 Added: `native/llama` (C ABI + JNI + CMake), `ember/inference.py`,
 `ember/{gpt2_tokenizer,gguf_export}.py`, Kotlin inference interface and implementation,

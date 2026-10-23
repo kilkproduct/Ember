@@ -66,5 +66,5 @@ precision limits, tests and unverified device checks.
   inference files. Import/export diagnostics identify the mismatch explicitly.
 
 The removed `libember_infer` forward pass, tokenizer and sampler are not compiled
-or packaged. NumPy's training forward/backward implementation remains, plus a
-reference sampler **only for verification**, never ordinary chat.
+or packaged. NumPy's training forward/backward implementation remains as the
+numerical reference; the old custom generator and sampler are removed entirely.

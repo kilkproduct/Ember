@@ -7,7 +7,6 @@ from .model import GPT, ModelConfig, init_params, load_model, save_model
 from .optim import AdamW, LRSchedule, clip_grad_norm
 from .gguf_export import EMBER_MODEL_FORMAT, GgufExportError, export_gguf, validate_gguf_file
 from .inference import EngineConfig, GenParams, Generation, InferenceEngine, InferenceError, LlamaCppEngine, get_engine
-from .sampler import GenerationResult, SplitMix64, reference_generate
 from .tokenizer import BPETokenizer, train_bpe
 from .trainer import Trainer, estimate_vessel
 
@@ -32,10 +31,8 @@ __all__ = [
     "Document",
     "EmberBackend",
     "GPT",
-    "GenerationResult",
     "LRSchedule",
     "ModelConfig",
-    "SplitMix64",
     "TokenStream",
     "Trainer",
     "build_stream",
@@ -44,7 +41,6 @@ __all__ = [
     "estimate_vessel",
     "init_params",
     "load_model",
-    "reference_generate",
     "save_model",
     "train_bpe",
 ]

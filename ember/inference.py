@@ -6,10 +6,9 @@ NumPy/Python generation fallback in the production path: if the native engine
 is missing or a model cannot be loaded, the caller gets a structured, honest
 error instead of silently different behaviour.
 
-The old hand-written engine (custom `.emb` loader, hand-rolled attention and
-KV cache, custom sampler) has been removed; :mod:`ember.sampler` keeps only the
-*reference* implementation used by tests to verify that the GGUF export computes
-the same function as the trained NumPy model.
+The old hand-written engine and sampler have been removed. The NumPy training
+forward pass remains the numerical reference used by tests to verify that the
+GGUF export computes the same function as the trained weights.
 
 Lifecycle (mirrors the mission's 12 steps):
   1. locate the model file            :meth:`InferenceEngine.load_model`
