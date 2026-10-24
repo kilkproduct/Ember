@@ -296,8 +296,11 @@ class Trainer:
                 name="model-not-loaded",
             )
         mtime = path.stat().st_mtime
-        if not engine.is_loaded() or self._engine_model_path != str(path) or mtime != self._engine_model_mtime:
+        requested_config=vars(config or EngineConfig()).copy()
+        if (not engine.is_loaded() or self._engine_model_path != str(path) or mtime != self._engine_model_mtime
+                or getattr(self,"_engine_model_config",None)!=requested_config):
             engine.load_model(path, config)
+            self._engine_model_config=requested_config
             self._engine_model_path = str(path)
             self._engine_model_mtime = mtime
         return path
@@ -1147,7 +1150,44 @@ class Trainer:
         self._model_import_cancel.clear()
         tmp=None
         try:
-            engine.load_model(src, config or EngineConfig(),on_progress=lambda value:
+            # Prepare a private inode first, so native validation covers exactly
+            # the bytes published, never an externally mutable source followed
+            # by an unvalidated post-load copy. Staged Android imports remain
+            # same-volume hardlinks, with no second multi-GB copy/model load.
+            fd,temporary=tempfile.mkstemp(dir=self.library_dir,suffix=".partial")
+            os.close(fd);tmp=Path(temporary)
+            linked=False
+            if staged:
+                tmp.unlink()
+                try:
+                    os.link(src,tmp);linked=True
+                except OSError:
+                    pass # bounded private-copy fallback, validated BEFORE publication
+            if not linked:
+                expected=src.stat()
+                if shutil.disk_usage(self.library_dir).free<expected.st_size+16*1024*1024:
+                    raise OSError("Insufficient free storage for the copied model and safety reserve")
+                total=0;reported=0
+                with open(src,"rb") as incoming,open(tmp,"wb") as outgoing:
+                    before=os.fstat(incoming.fileno())
+                    while True:
+                        if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+                        chunk=incoming.read(1024*1024)
+                        if not chunk:break
+                        if shutil.disk_usage(self.library_dir).free<len(chunk)+16*1024*1024:
+                            raise OSError("Insufficient storage during private model copy")
+                        outgoing.write(chunk);total+=len(chunk)
+                        if total>expected.st_size:raise OSError("Model source grew during copy; select it again")
+                        if total-reported>=4*1024*1024:
+                            self._emit("model.importProgress",{"bytesCopied":total,"totalBytes":expected.st_size})
+                            reported=total
+                    outgoing.flush();os.fsync(outgoing.fileno())
+                    after=os.fstat(incoming.fileno())
+                if total!=expected.st_size or (before.st_size,before.st_mtime_ns,before.st_ino)!=(after.st_size,after.st_mtime_ns,after.st_ino):
+                    raise OSError("Incomplete or changed model source during copy; select it again")
+            info=validate_gguf_file(tmp)
+            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            engine.load_model(tmp, config or EngineConfig(),on_progress=lambda value:
                 self._emit("model.importProgress",{"loadProgress":value,"stage":"native-validation"}))
             if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
             self._emit("model.importProgress",{"stage":"first-token","loadProgress":1.0})
@@ -1168,29 +1208,7 @@ class Trainer:
                     dest=self.library_dir/(safe+(f"-{index}" if index else "")+".gguf")
                     if not dest.exists():break
                     index+=1
-                if staged:
-                    try:os.link(src,dest) # same internal volume: no second multi-GB copy
-                    except OSError:staged=False
-                if not staged:
-                    if shutil.disk_usage(self.library_dir).free<src.stat().st_size+16*1024*1024:
-                        raise OSError("Insufficient free storage for the copied model and safety reserve")
-                    fd,temporary=tempfile.mkstemp(dir=self.library_dir,suffix=".partial")
-                    tmp=Path(temporary)
-                    total=0;reported=0
-                    with open(src,"rb") as incoming,os.fdopen(fd,"wb") as outgoing:
-                        while True:
-                            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
-                            chunk=incoming.read(1024*1024)
-                            if not chunk:break
-                            outgoing.write(chunk);total+=len(chunk)
-                            if total-reported>=4*1024*1024:
-                                self._emit("model.importProgress",{"bytesCopied":total,"totalBytes":src.stat().st_size})
-                                reported=total
-                        outgoing.flush();os.fsync(outgoing.fileno())
-                    validate_gguf_file(tmp)
-                    # The trainer lock serializes model-library publication.
-                    os.replace(tmp,dest);tmp=None
-            info=validate_gguf_file(dest)
+                os.replace(tmp,dest);tmp=None
         finally:
             if tmp is not None:tmp.unlink(missing_ok=True)
             engine.unload() # never leave Python + JNI contexts resident together

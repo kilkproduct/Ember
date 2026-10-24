@@ -119,3 +119,31 @@ def test_invalid_common_hparams_fail_before_upstream_assertions(tmp_path,suffix,
     w.add_tensor('token_embd.weight',np.zeros((4,64),np.float32))
     path.write_bytes(w.build())
     with pytest.raises(GgufExportError,match='metadata-structure'):validate_gguf_file(path)
+
+
+def test_changed_session_configuration_is_not_ignored_for_same_model(tmp_path):
+    path=tmp_path/'graph.gguf';qwen_fixture(path)
+    b=EmberBackend(tmp_path/'app')
+    try:
+        b.dispatch('model.importGguf',{'path':str(path)})
+        b.trainer.ensure_engine_model(EngineConfig(n_ctx=256))
+        assert get_engine().model_info().n_ctx==256
+        b.trainer.ensure_engine_model(EngineConfig(n_ctx=512))
+        assert get_engine().model_info().n_ctx==512
+    finally:b.close()
+
+
+def test_native_validation_covers_the_published_private_inode(tmp_path,monkeypatch):
+    path=tmp_path/'source.gguf';qwen_fixture(path)
+    b=EmberBackend(tmp_path/'app');e=get_engine();load=e.load_model;seen=[]
+    def record(candidate,*args,**kwargs):
+        p=Path(candidate)
+        assert p.suffix=='.partial' and p.parent==b.trainer.library_dir
+        seen.append(p.stat().st_ino)
+        return load(candidate,*args,**kwargs)
+    try:
+        monkeypatch.setattr(e,'load_model',record)
+        result=b.dispatch('model.importGguf',{'path':str(path)})
+        assert seen==[Path(result['path']).stat().st_ino]
+        assert result['textInferenceVerified'] and not list(b.trainer.library_dir.glob('*.partial'))
+    finally:b.close()

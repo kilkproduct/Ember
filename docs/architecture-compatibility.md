@@ -75,7 +75,7 @@ Representative evidence:
    per-layer arrays and architecture-specific SSM/MoE/RoPE metadata; no dense
    tensor inventory is imposed on foreign models. Recognized quant layout is
    not a CPU kernel/model compatibility guarantee.
-3. Native upstream model load validates actual graph/tensors/quantization/tokenizer.
+3. A private temporary hardlink (or bounded copy fallback) is prepared before native validation; the validated inode is atomically renamed into the library only after success. Native upstream model load validates actual graph/tensors/quantization/tokenizer.
    Context allocation uses the requested context, microbatch, threads and mmap
    policy; errors retain upstream details. No fallback precision/context change.
 4. **The same live validation handle** tokenizes a fixed non-private diagnostic
@@ -121,11 +121,11 @@ first-token verification separately from model-load progress.
 
 ## Executed verification and reproducibility
 
-Host build: CMake Release, CPU, pinned source; **179 Python tests passed** (two
+Host build: CMake Release, CPU, pinned source; **181 Python tests passed** (two
 expected overflow warnings from the divergence-rejection test). Includes existing
 EMB4/training/logit parity/Parquet/private-staging/cancel/switch tests and new
 registry/quant layouts, real recurrent/MoE graphs, malformed metadata, wrong
-Qwen3.5 graph rejection, and first-token publication/cancel gating.
+Qwen3.5 graph rejection, first-token publication/cancel gating, same-model context reconfiguration and exact-private-inode validation.
 
 ```sh
 scripts/fetch-llama-cpp.sh
