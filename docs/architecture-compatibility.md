@@ -162,3 +162,19 @@ the delivered commit. Historical SAF emulator URI-grant setup remains failed;
 it is not claimed fixed. Instrumentation would require another APK and is not
 run under this task's universal-only APK restriction. Real SAF/provider/device
 acceptance and genuine hybrid-model performance remain outstanding.
+
+### Delivered CI result
+
+[Final application build 40044588500](https://github.com/kilkproduct/Ember/actions/runs/40044588500)
+**passed**, application commit `37cd5cceafcf6303d8a790deaee4adae4ea6262d`.
+Host/native/Python/HTTP/JVM tests, both Android ABI builds, signature verification
+and packaged-library/Python/capability-manifest checks all succeeded.
+
+**[Download the universal development-signed APK artifact](https://github.com/kilkproduct/Ember/actions/runs/40044588500/artifacts/12540922557)**
+(containing only `Ember-universal-signed.apk`; GitHub sign-in may be required).
+[CI evidence artifact](https://github.com/kilkproduct/Ember/actions/runs/40044588500/artifacts/12540364446).
+[Native sanitizer run](https://github.com/kilkproduct/Ember/actions/runs/40044195963)
+also passed on `8f4ebcf`; the delivered native source tree is identical.
+Machine-readable final build/signature/package provenance is in
+[`verification/architecture-android-build.json`](verification/architecture-android-build.json).
+This delivery record is documentation only; it does not alter the built APK.

@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "applicationCommit": "37cd5cceafcf6303d8a790deaee4adae4ea6262d",
+  "ciUrl": "https://github.com/kilkproduct/Ember/actions/runs/40044588500",
+  "conclusion": "success",
+  "verifiedSteps": [
+    "Set up job",
+    "Run actions/checkout@v4",
+    "Restore stable debug keystore",
+    "Set up Python 3.13",
+    "Set up Java 17",
+    "Set up Gradle 8.7",
+    "Install Python backend dependencies",
+    "Fetch pinned llama.cpp source (SHA-256 verified)",
+    "Build llama.cpp + Ember wrapper and test trained Llama GGUF inference",
+    "Verify generated capabilities and execute architecture report",
+    "Run Python backend & Python-to-C++ interoperability tests",
+    "End-to-end runtime smoke test through run.sh (HTTP \u2192 Python \u2192 native C++)",
+    "Test Android unit suite and assemble debug APK (NDK CMake + Chaquopy Python 3.13)",
+    "Verify and name the single universal signed APK",
+    "Verify APK native libraries, Python runtime, and packaged assets",
+    "Run actions/upload-artifact@v4",
+    "Upload test and compatibility evidence",
+    "Post Set up Gradle 8.7",
+    "Post Set up Java 17",
+    "Post Set up Python 3.13",
+    "Post Restore stable debug keystore",
+    "Post Run actions/checkout@v4",
+    "Complete job"
+  ],
+  "apk": {
+    "file": "Ember-universal-signed.apk",
+    "artifactUrl": "https://github.com/kilkproduct/Ember/actions/runs/40044588500/artifacts/12540922557",
+    "artifactArchiveBytes": 56442487,
+    "artifactArchiveDigest": "sha256:957e09d2b677f38466589b6f3d8554f3003b8391996e8c5646b265d7ac18152d",
+    "digestScope": "GitHub artifact ZIP, NOT the enclosed APK checksum",
+    "universal": true,
+    "abis": [
+      "arm64-v8a",
+      "x86_64"
+    ],
+    "signatureVerification": "apksigner verify --verbose --print-certs succeeded in CI",
+    "signing": "Cached debug/development keystore, NOT production signing"
+  },
+  "runtimePin": {
+    "project": "llama.cpp",
+    "repository": "https://github.com/ggml-org/llama.cpp",
+    "tag": "b11838",
+    "commit": "4231b23dc2c46661d01157aac5245bdcf03ce4b1",
+    "tarball_url": "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/b11838",
+    "sha256": "1395bfc5668ac43ff59dec7d4ee21e103ee6bb91ca8d10d704256ed8dd65e6b0",
+    "license": "MIT",
+    "license_file": "licenses/LICENSE-llama.cpp",
+    "destination": "third_party/llama.cpp",
+    "selected_because": [
+      "Compared b11836, b11838 and b11840; b11836 already implements qwen35/qwen35moe hybrid gated-delta graphs. Ember's whitelist, not missing upstream implementation, caused the reported rejection.",
+      "b11838 adds the ggml_time_us overflow fix and behavior-check CI without changing inference APIs, architecture graphs or Android CMake configuration. b11840 adds irrelevant Hexagon CEIL/UI dependency work, so the smaller published patch revision is selected.",
+      "CPU-only static llama/ggml build for arm64-v8a and x86_64 remains unchanged. Native model load/context/tokenizer/sampler/memory APIs require host and Android CI validation for this pin; real Qwen3.5 inference is a separate, currently unverified claim."
+    ]
+  },
+  "nativeSanitizers": {
+    "ciUrl": "https://github.com/kilkproduct/Ember/actions/runs/40044195963",
+    "commit": "8f4ebcf5ba1ed265c0abbe05d7c54fe0eb32236d",
+    "result": "success",
+    "scope": "ASan/UBSan/leak checks. Native source tree unchanged between this commit and the delivered application commit."
+  },
+  "physicalDeviceInference": "not-tested",
+  "genuineQwen35Inference": "not-tested",
+  "originalRequestedModel": "not-provided",
+  "safInstrumentation": "Not run: requires a second test APK. Historical URI-grant harness failure remains unresolved."
+}
