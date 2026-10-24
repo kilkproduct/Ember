@@ -86,6 +86,15 @@ def test_original_v2_writer_independent_reader_and_actual_native_inference(tmp_p
         e.load_model(path,EngineConfig(n_ctx=64))
         assert e.generate('Hello',GenParams(max_tokens=4,temperature=0,stop_on_eos=False)).new_tokens==4
     finally:e.close()
+    from ember.backend import EmberBackend
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    app=EmberBackend(tmp_path/'app')
+    try:
+        imported=app.dispatch('model.importGguf',{'path':str(path),'nCtx':64})
+        assert imported['ggufVersion']==2 and imported['textInferenceVerified']
+        assert hashlib.sha256(path.read_bytes()).hexdigest()==digest
+        assert hashlib.sha256(Path(imported['path']).read_bytes()).hexdigest()==digest
+    finally:app.close()
 
 
 @pytest.mark.parametrize('cut',[0,3,7,12,23,26,40,80,110,125])
@@ -163,3 +172,22 @@ def test_writer_conflicting_alignment_is_not_silently_emitted():
     from ember.gguf_export import GgufWriter
     w=GgufWriter(alignment=128);w.add_u32('general.alignment',32)
     with pytest.raises(GgufExportError,match='alignment'):w.build()
+
+@pytest.mark.parametrize('kind,v',[(0,255),(1,-1),(2,60000),(3,-30000),(4,2**32-1),(5,-2**31),
+    (6,1.25),(7,True),(8,'灯台'),(10,2**63+1),(11,-2**60),(12,1.125)])
+def test_writer_all_scalar_and_array_widths_independently(tmp_path,kind,v):
+    from ember.gguf_export import GgufWriter
+    w=GgufWriter('fixture');w.add_string('general.architecture','fixture')
+    w._add('test.scalar',kind,v);w.add_array('test.values',[v,v],kind)
+    w.add_tensor('weight',np.zeros(2,np.float32))
+    path=tmp_path/'typed';path.write_bytes(w.build())
+    ours=read_gguf_header(path);ref=gguf.GGUFReader(path)
+    assert ours.metadata['test.scalar']==v and ours.metadata['test.values']==[v,v]
+    assert int(ref.fields['test.scalar'].types[0])==kind
+    assert int(ref.fields['test.values'].types[1])==kind
+
+
+def test_unknown_layout_inspection_is_not_misreported_as_invalid_file(tmp_path):
+    data,_=wire_fixture(dtype=999);path=tmp_path/'unknown';path.write_bytes(data+b'\0'*8)
+    report=inspect_gguf_file(path)
+    assert report['compatibilityState']=='unsupported-tensor-type' and report['valid'] is None
