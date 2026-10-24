@@ -688,6 +688,10 @@ def _require_native_container(header):
 
 def inspect_gguf_file(path):
     """Inspection is deliberately independent of model admission/native readiness."""
+    if str(path).startswith(("content://","saf:","/proc/self/fd/")):
+        return {"path":str(path),"valid":None,"compatibilityState":"private-import-required",
+                "error":"Select this document again for bounded ContentResolver/private staging; the inspector never reopens a provider URI or legacy descriptor path",
+                "textInferenceVerified":False}
     try:
         h=read_gguf_header(path)
     except (GgufExportError,OSError) as exc:
@@ -780,6 +784,25 @@ def _inspect_imported_model(path,size,header):
         raise GgufExportError("metadata-structure: expert_used_count must select existing experts (scalar or per-layer array)")
     if any(len(t.dims)>caps["limits"]["tensorDimensions"] for t in header.tensors):
         raise GgufExportError("metadata-structure: tensor dimensions exceed compiled ggml maximum")
+    # Validate common scalar/array domains before entering native graph code.
+    # Zero attention heads can be meaningful for recurrent/hybrid layers; do
+    # not impose dense geometry on them or infer missing metadata.
+    heads=md.get(arch+".attention.head_count")
+    if heads is not None:
+        items=heads if isinstance(heads,list) else [heads]
+        if not items or any(not isinstance(v,int) or isinstance(v,bool) or v<0 for v in items):
+            raise GgufExportError("metadata-structure: invalid attention.head_count")
+        if entry["modelKind"] not in ("hybrid","recurrent") and any(v==0 for v in items):
+            raise GgufExportError("metadata-structure: non-recurrent attention heads must be positive")
+    groups=md.get(arch+".expert_group_count",0)
+    group_used=md.get(arch+".expert_group_used_count",0)
+    if not isinstance(groups,int) or groups<0 or (groups and (not experts or groups>=experts)):
+        raise GgufExportError("metadata-structure: expert groups must reference existing experts")
+    if groups>1 and (experts%groups or not isinstance(group_used,int) or not 0<group_used<groups):
+        raise GgufExportError("metadata-structure: invalid expert group routing")
+    for key in (arch+".attention.layer_norm_epsilon",arch+".attention.layer_norm_rms_epsilon"):
+        if key in md and (not isinstance(md[key],(int,float)) or not math.isfinite(md[key]) or md[key]<0):
+            raise GgufExportError("metadata-structure: invalid normalization epsilon")
     tokens=md.get("tokenizer.ggml.tokens",[])
     if not isinstance(tokens,list) or not tokens or not md.get("tokenizer.ggml.model"):
         raise GgufExportError("tokenizer-metadata: text inference requires vocabulary/tokenizer metadata; native loading has not succeeded")

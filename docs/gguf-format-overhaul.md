@@ -127,7 +127,7 @@ strict EMB4-to-Llama export is unchanged.
 
 ## Tests and build evidence
 
-**259 Python tests pass** locally, with two existing divergence-test overflow
+**267 Python tests pass** locally, with two existing divergence-test overflow
 warnings. Includes independent v2/v3/BE parsing, scalar/array types, future magic/
 versions, truncated/bomb metadata, invalid dimensions/types/offsets/alignment,
 64-bit sparse-file inspection, shard diagnosis, real v2 generation, added graph

@@ -160,3 +160,18 @@ def test_actual_native_template_failure_cannot_be_registered(tmp_path):
         assert not list(b.trainer.library_dir.iterdir())
         assert b.trainer._imported_gguf is None and not get_engine().is_loaded()
     finally:b.close()
+
+
+@pytest.mark.parametrize('key,value',[('attention.head_count',0),('attention.head_count',-1),
+    ('attention.head_count',[1,-1]),('expert_group_count',1),('attention.layer_norm_epsilon',float('nan'))])
+def test_invalid_common_domains_rejected_without_entering_native_graph(tmp_path,key,value):
+    from ember.gguf_export import GgufWriter,_VT_I32
+    import numpy as np
+    w=GgufWriter('qwen2');w.add_string('general.architecture','qwen2')
+    for suffix,v in [('context_length',256),('block_count',1),('embedding_length',64)]:w.add_u32('qwen2.'+suffix,v)
+    if isinstance(value,list):w.add_array('qwen2.'+key,value,_VT_I32)
+    elif isinstance(value,float):w.add_f32('qwen2.'+key,value)
+    else:w.add_i32('qwen2.'+key,value)
+    w.add_tensor('token_embd.weight',np.zeros((4,64),np.float32))
+    path=tmp_path/'invalid';path.write_bytes(w.build())
+    with pytest.raises(GgufExportError,match='metadata-structure'):validate_gguf_file(path)

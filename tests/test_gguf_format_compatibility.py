@@ -191,3 +191,11 @@ def test_unknown_layout_inspection_is_not_misreported_as_invalid_file(tmp_path):
     data,_=wire_fixture(dtype=999);path=tmp_path/'unknown';path.write_bytes(data+b'\0'*8)
     report=inspect_gguf_file(path)
     assert report['compatibilityState']=='unsupported-tensor-type' and report['valid'] is None
+
+
+@pytest.mark.parametrize('source',['content://provider/model','/proc/self/fd/121','saf:old'])
+def test_inspector_never_reopens_provider_or_stale_descriptor_paths(monkeypatch,source):
+    def forbidden(*args,**kwargs):raise AssertionError('provider/descriptor path reopened')
+    monkeypatch.setattr(Path,'open',forbidden)
+    monkeypatch.setattr(Path,'exists',forbidden)
+    assert inspect_gguf_file(source)['compatibilityState']=='private-import-required'
