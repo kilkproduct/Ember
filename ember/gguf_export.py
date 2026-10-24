@@ -214,11 +214,16 @@ class GgufWriter:
             out += self._pack_string(str(value))
         elif vtype == _VT_ARRAY:
             items = list(value)
-            if not items:
-                raise GgufExportError("GGUF metadata array must not be empty")
+            if not items and sub_type is None:
+                raise GgufExportError("empty GGUF array requires an explicit subtype")
             ltype = sub_type if sub_type is not None else _infer_type(items[0])
-            if not all(_infer_type(i) == ltype for i in items):
-                raise GgufExportError("all items in a GGUF array must share one type")
+            def matches(item):
+                if ltype in (_VT_U8,_VT_I8,_VT_U16,_VT_I16,_VT_U32,_VT_I32,_VT_U64,_VT_I64):
+                    return isinstance(item,int) and not isinstance(item,bool)
+                if ltype in (_VT_F32,_VT_F64):return isinstance(item,float)
+                return _infer_type(item)==ltype
+            if not all(matches(i) for i in items):
+                raise GgufExportError("all items in a GGUF array must share the declared type")
             out += struct.pack("<I", ltype)
             out += struct.pack("<Q", len(items))
             for item in items:
