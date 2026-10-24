@@ -1125,7 +1125,7 @@ class Trainer:
             out.append({**entry,"selected":self.corpus.get_kv("inference:selected_external")==entry["uri"],"valid":False})
         return out
 
-    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True, staged: bool = False) -> dict[str, Any]:
+    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True, staged: bool = False,config: EngineConfig | None = None) -> dict[str, Any]:
         """Copy a user-selected GGUF into the model library and validate it."""
         if str(source).startswith(("/proc/self/fd/", "content://", "saf:")):
             raise InferenceError("Selected documents must be stream-copied by Android into private model storage before import; descriptor/URI paths cannot be reopened.",
@@ -1147,9 +1147,17 @@ class Trainer:
         self._model_import_cancel.clear()
         tmp=None
         try:
-            engine.load_model(src, EngineConfig(),on_progress=lambda value:
+            engine.load_model(src, config or EngineConfig(),on_progress=lambda value:
                 self._emit("model.importProgress",{"loadProgress":value,"stage":"native-validation"}))
             if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            self._emit("model.importProgress",{"stage":"first-token","loadProgress":1.0})
+            try:
+                diagnostic=engine.generate("Hello",GenParams(max_tokens=1,temperature=0,stop_on_eos=False))
+            except InferenceError as exc:
+                raise InferenceError("first-token validation: "+str(exc),code=exc.code,name=exc.name) from exc
+            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            if diagnostic.new_tokens!=1:
+                raise InferenceError("first-token: native model/context loaded but text generation produced no token",code=-9,name="first-token-failed")
             target_name = (name or src.stem or "imported-model")
             if target_name.lower().endswith(".gguf"):target_name=target_name[:-5]
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
@@ -1192,7 +1200,8 @@ class Trainer:
             self._imported_gguf = dest
             self._engine_model_path = ""
             self._engine_model_mtime = -1.0
-        payload = {"imported": True, **info}
+        payload = {**info,"imported": True,"nativeValidated":True,"textInferenceVerified":True,
+                   "validationStage":"first-token-verified","compatibility":"native model/context/tokenizer and one-token inference verified; modalities unavailable"}
         payload["name"] = dest.stem          # library name wins over the metadata title
         payload["libraryName"] = dest.stem
         payload["path"] = str(dest)

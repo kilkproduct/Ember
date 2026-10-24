@@ -1,17 +1,16 @@
 {
   "project": "llama.cpp",
   "repository": "https://github.com/ggml-org/llama.cpp",
-  "tag": "b11836",
-  "commit": "f5027fb21307eb264aed483242603d68c87b0fe3",
-  "tarball_url": "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/b11836",
-  "sha256": "5fdae446417f5f6371b9cab097fa2404e1c0de632b00eb76213889b18153f64b",
+  "tag": "b11838",
+  "commit": "4231b23dc2c46661d01157aac5245bdcf03ce4b1",
+  "tarball_url": "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/b11838",
+  "sha256": "1395bfc5668ac43ff59dec7d4ee21e103ee6bb91ca8d10d704256ed8dd65e6b0",
   "license": "MIT",
   "license_file": "licenses/LICENSE-llama.cpp",
   "destination": "third_party/llama.cpp",
   "selected_because": [
-    "b11836 is the newest upstream release tag at the time of the migration (2026-10-23), so it is a published snapshot rather than an arbitrary master commit.",
-    "Its llama architecture (src/models/llama.cpp) supports the EMB4 bias-free RMSNorm, adjacent-pair RoPE, GQA, SwiGLU decoder and tied or untied output; tokenizer metadata independently supports Ember byte-level BPE.",
-    "Its Android build path is documented (docs/android.md) with the exact CMake options used by native/llama/CMakeLists.txt: GGML_NATIVE=OFF, GGML_OPENMP=OFF, GGML_LLAMAFILE=OFF, LLAMA_OPENSSL=OFF.",
-    "The C API used by native/llama (llama_model_load_from_file, llama_init_from_model, llama_batch_get_one, llama_decode, llama_sampler_chain_*, llama_tokenize/llama_detokenize, llama_memory_clear) is present and stable in this revision (include/llama.h, LLAMA_SESSION_VERSION 11)."
+    "Compared b11836, b11838 and b11840; b11836 already implements qwen35/qwen35moe hybrid gated-delta graphs. Ember's whitelist, not missing upstream implementation, caused the reported rejection.",
+    "b11838 adds the ggml_time_us overflow fix and behavior-check CI without changing inference APIs, architecture graphs or Android CMake configuration. b11840 adds irrelevant Hexagon CEIL/UI dependency work, so the smaller published patch revision is selected.",
+    "CPU-only static llama/ggml build for arm64-v8a and x86_64 remains unchanged. Native model load/context/tokenizer/sampler/memory APIs require host and Android CI validation for this pin; real Qwen3.5 inference is a separate, currently unverified claim."
   ]
 }

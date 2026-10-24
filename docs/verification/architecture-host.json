@@ -1,0 +1,4377 @@
+{
+  "android": {
+    "arm64-v8a": "See CI build/package evidence; no physical-device inference",
+    "x86_64": "See CI build/package evidence; SAF instrumentation not run (universal-only APK constraint)"
+  },
+  "architectures": [
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "clip",
+      "emberTextCandidate": false,
+      "limitation": "Auxiliary vision/audio model; Ember has no multimodal asset pipeline",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_clip",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "llama",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [
+        "F32",
+        "Q8_0"
+      ],
+      "textInferenceVerified": true,
+      "upstreamFactory": "llama_model_llama",
+      "upstreamRegistry": true,
+      "verificationScope": "complete synthetic graph; NOT pretrained"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "llama4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_llama4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "deci",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_deci",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "falcon",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_falcon",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "grok",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_grok",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gpt2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gpt2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gptj",
+      "emberTextCandidate": false,
+      "limitation": "No model factory implementation in this runtime",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": false,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": null,
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gptneox",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gptneox",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mpt",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_mpt",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "baichuan",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_baichuan",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "starcoder",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_starcoder",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "refact",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_refact",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "bert",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_bert",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "modern-bert",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_modern_bert",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "nomic-bert",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_nomic_bert",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "nomic-bert-moe",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_nomic_bert_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "neo-bert",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_neo_bert",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "jina-bert-v2",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_jina_bert_v2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "jina-bert-v3",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_jina_bert_v3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "eurobert",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_eurobert",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "bloom",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_bloom",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "stablelm",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_stablelm",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [
+        "F32",
+        "Q8_0"
+      ],
+      "textInferenceVerified": true,
+      "upstreamFactory": "llama_model_qwen2",
+      "upstreamRegistry": true,
+      "verificationScope": "complete synthetic graph; NOT pretrained"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen2moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen2moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen2vl",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen2vl",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "sensenova_u1",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_sensenova_u1",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [
+        "F32",
+        "Q8_0"
+      ],
+      "textInferenceVerified": true,
+      "upstreamFactory": "llama_model_qwen3",
+      "upstreamRegistry": true,
+      "verificationScope": "complete synthetic graph; NOT pretrained"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "flint",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_flint",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen3moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [
+        "F32",
+        "Q8_0"
+      ],
+      "textInferenceVerified": true,
+      "upstreamFactory": "llama_model_qwen3moe",
+      "upstreamRegistry": true,
+      "verificationScope": "complete synthetic graph; NOT pretrained"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen3next",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen3next",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen3vl",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen3vl",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen3vlmoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen3vlmoe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen35",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen35",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen35moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen35moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "clef",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_clef",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "vllm-decision2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_vllm_decision2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen4exp",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen4exp",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "phi2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_phi2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "phi3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_phi3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "phimoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_phimoe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "plamo",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_plamo",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "plamo2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_plamo2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "plamo3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_plamo3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "codeshell",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_codeshell",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "orion",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_orion",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "internlm2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_internlm2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "minicpm",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_minicpm",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "minicpm3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_minicpm3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma3n",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma3n",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma4-assistant",
+      "emberTextCandidate": false,
+      "limitation": "Speculative draft/target coupling is not implemented by Ember",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma4_assistant",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma-embedding",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma_embedding",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gemma-embedding2",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_gemma_embedding2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "starcoder2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_starcoder2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mamba",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "recurrent",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [
+        "F32",
+        "Q8_0"
+      ],
+      "textInferenceVerified": true,
+      "upstreamFactory": "llama_model_mamba",
+      "upstreamRegistry": true,
+      "verificationScope": "complete synthetic graph; NOT pretrained"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mamba2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "recurrent",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_mamba2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "maple",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_maple",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "jamba",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_jamba",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "falcon-h1",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_falcon_h1",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "xverse",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_xverse",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "command-r",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_command_r",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "cohere2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_cohere2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "cohere2moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_cohere2moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "dbrx",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_dbrx",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "olmo",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_olmo",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "olmo2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_olmo2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "olmoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_olmoe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "muse-glimmer",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_muse_glimmer",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "muse-spark",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_muse_spark",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "openelm",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_openelm",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "arctic",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_arctic",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "deepseek",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_deepseek",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "deepseek2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_deepseek2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "deepseek2-ocr",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_deepseek2ocr",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "deepseek32",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_deepseek32",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "deepseek4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_deepseek4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "chatglm",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_chatglm",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "glm4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_glm4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "glm4moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_glm4_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "glm-dsa",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_glm_dsa",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "bitnet",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_bitnet",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "t5",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "encoder-decoder",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_t5",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "t5encoder",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_t5encoder",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "jais",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_jais",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "jais2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_jais2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "nemotron",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_nemotron",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "nemotron_h",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_nemotron_h",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "nemotron_h_moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_nemotron_h_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "exaone",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_exaone",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "exaone4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_exaone4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "exaone-moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_exaone_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "rwkv6",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "recurrent",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_rwkv6",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "rwkv6qwen2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "recurrent",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_rwkv6qwen2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "rwkv7",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "recurrent",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_rwkv7",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "arwkv7",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "recurrent",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_arwkv7",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "granite",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_granite",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "granitemoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_granite_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "granitehybrid",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_granite_hybrid",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "graniteswitch",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_granite_switch",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "granite_swa",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_granite_swa",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "chameleon",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_chameleon",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "wavtokenizer-dec",
+      "emberTextCandidate": false,
+      "limitation": "Auxiliary vision/audio model; Ember has no multimodal asset pipeline",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_wavtokenizer_dec",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "plm",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_plm",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "bailingmoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_bailingmoe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "bailingmoe2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_bailingmoe2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "bailingmoe3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_bailingmoe3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "dots1",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_dots1",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "dots3note",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_dots3note",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "arcee",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_arcee",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "afmoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_afmoe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "laguna",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_laguna",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "ernie4_5",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_ernie4_5",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "ernie4_5-moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_ernie4_5_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "hunyuan-moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_hunyuan_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "hunyuan-dense",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_hunyuan_dense",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "hunyuan_vl",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_hunyuan_vl",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "hy_v3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_hy_v3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "hy_v4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_hy_v4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "smollm3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_smollm3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "gpt-oss",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_openai_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "lfm2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_lfm2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "lfm2moe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_lfm2moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "dream",
+      "emberTextCandidate": false,
+      "limitation": "Diffusion/denoising generation is not implemented by Ember",
+      "modelKind": "diffusion",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_dream",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "smallthinker",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_smallthinker",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "llada",
+      "emberTextCandidate": false,
+      "limitation": "Diffusion/denoising generation is not implemented by Ember",
+      "modelKind": "diffusion",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_llada",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "llada-moe",
+      "emberTextCandidate": false,
+      "limitation": "Diffusion/denoising generation is not implemented by Ember",
+      "modelKind": "diffusion",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_llada_moe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "seed_oss",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_seed_oss",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "grovemoe",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_grovemoe",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "apertus",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_apertus",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "minimax-01",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_minimax_01",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "hrm_text",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_hrm_text",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "minimax-m2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_minimax_m2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "minimax-m3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_minimax_m3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "cogvlm",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_cogvlm",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "rnd1",
+      "emberTextCandidate": false,
+      "limitation": "Diffusion/denoising generation is not implemented by Ember",
+      "modelKind": "diffusion",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_rnd1",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "pangu-embedded",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_pangu_embed",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mistral3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_mistral3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "eagle3",
+      "emberTextCandidate": false,
+      "limitation": "Speculative draft/target coupling is not implemented by Ember",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_eagle3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "dflash",
+      "emberTextCandidate": false,
+      "limitation": "Speculative draft/target coupling is not implemented by Ember",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_dflash",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mistral4",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_mistral4",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "paddleocr",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_paddleocr",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mimo2",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_mimo2",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "step35",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_step35",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "spark2_5",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_spark2_5",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "llama-embed",
+      "emberTextCandidate": false,
+      "limitation": "Encoder/embedding-only model; Ember exposes text generation, not embedding retrieval",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_llama_embed",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "maincoder",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_maincoder",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "maion-coder",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_maion_coder",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "kimi-linear",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_kimi_linear",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "kimi-k3",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_kimi_k3",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "glm5-next",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "hybrid",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_glm5_next",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "talkie",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_talkie",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "mellum",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_mellum",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "nanbeige",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_nanbeige",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "qwen3tts",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_qwen3tts",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "pockettts",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_pockettts",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "k2-horizon",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_k2_horizon",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "beam",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_beam",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "kolibri1",
+      "emberTextCandidate": true,
+      "limitation": null,
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": true,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": true,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": "llama_model_kolibri1",
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    },
+    {
+      "abiBuildEvidence": "See CI for this commit; registry membership is not a device test",
+      "androidAbis": [
+        "arm64-v8a",
+        "x86_64"
+      ],
+      "architecture": "(unknown)",
+      "emberTextCandidate": false,
+      "limitation": "No model factory implementation in this runtime",
+      "modelKind": "upstream-defined",
+      "moeGraphAvailable": false,
+      "multimodal": {
+        "audio": false,
+        "image": false,
+        "note": "Text candidate only; projectors/auxiliary modality pipelines are not provided",
+        "video": false
+      },
+      "nativeLoaderImplemented": false,
+      "testedQuantizations": [],
+      "textInferenceVerified": false,
+      "upstreamFactory": null,
+      "upstreamRegistry": true,
+      "verificationScope": "Not executed; factory/registry evidence only"
+    }
+  ],
+  "backend": "llama.cpp",
+  "commit": "4231b23dc2c46661d01157aac5245bdcf03ce4b1",
+  "cpuOnly": true,
+  "executedAtUtc": "2026-10-24T00:15:02.163546+00:00",
+  "fixtures": [
+    {
+      "architecture": "llama",
+      "bytes": 592128,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 7858.31,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "6cb32c2da32e9a1e3008815c929d4f6210ecd6e23d5e1541702f038bf73f8d20",
+      "source": "scripts/make_test_gguf.py (SHA256 fd226a13f85523d680daf5a42f321dab85026d3d5a1cc0010d1b792652eaa835)",
+      "tensorTypes": [
+        "F32"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "llama",
+      "bytes": 231168,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 8373.21,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "cb0015c9d2180e7257673a9430133c372b2cec90ce936d9fb5385c838814093b",
+      "source": "scripts/make_test_gguf.py (SHA256 fd226a13f85523d680daf5a42f321dab85026d3d5a1cc0010d1b792652eaa835)",
+      "tensorTypes": [
+        "F32",
+        "Q8_0"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "qwen2",
+      "bytes": 330048,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 8913.81,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "3628f677ac78288a97195a59409520c62639a2a444a5cf2e591170210a0fa741",
+      "source": "tests/test_qwen_compatibility.py (SHA256 dcccb71178905ce00d736d309018a5aff8f2c6194f7bceb90971cc90e055eee1)",
+      "tensorTypes": [
+        "F32"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "qwen2",
+      "bytes": 93568,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 10650.7,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "e2e6b26a493fa9a210bf90e9c12823e66e6060ac49b1380e8b6b6fee0770f5a0",
+      "source": "tests/test_qwen_compatibility.py (SHA256 dcccb71178905ce00d736d309018a5aff8f2c6194f7bceb90971cc90e055eee1)",
+      "tensorTypes": [
+        "F32",
+        "Q8_0"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "qwen3",
+      "bytes": 329760,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 9321.86,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "9191f3804f3da6cb785179c05f732bd032ebac608bc848cbdbcbe9dd34072629",
+      "source": "tests/test_qwen_compatibility.py (SHA256 dcccb71178905ce00d736d309018a5aff8f2c6194f7bceb90971cc90e055eee1)",
+      "tensorTypes": [
+        "F32"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "qwen3",
+      "bytes": 93280,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 9585.18,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "3b4e56bf3516ffc7c6d0095e984b0b0b66bf4d420787bafb0c777d6c9aa75638",
+      "source": "tests/test_qwen_compatibility.py (SHA256 dcccb71178905ce00d736d309018a5aff8f2c6194f7bceb90971cc90e055eee1)",
+      "tensorTypes": [
+        "F32",
+        "Q8_0"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "mamba",
+      "bytes": 87680,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 11112.9,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "65ae8cb0d1aa6ca099006528c911013c177c00bd9a4be0ca8a510b93d2f6ad67",
+      "source": "tests/architecture_fixtures.py (SHA256 99baa08380659c419e18ee8eeaaf640581a96d0520ea8f191699bd4e0bb2066b)",
+      "tensorTypes": [
+        "F32"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "mamba",
+      "bytes": 33920,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 10706.6,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "ed1f6c5948e0e66422451f268a7898924781c0d26f80da8a5c3ed684da270945",
+      "source": "tests/architecture_fixtures.py (SHA256 99baa08380659c419e18ee8eeaaf640581a96d0520ea8f191699bd4e0bb2066b)",
+      "tensorTypes": [
+        "F32",
+        "Q8_0"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "qwen3moe",
+      "bytes": 330752,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 10221.3,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "021d0ddf5f84e69b1726048dff4b246c000262a340ae14ba248d182c98b663e3",
+      "source": "tests/architecture_fixtures.py (SHA256 99baa08380659c419e18ee8eeaaf640581a96d0520ea8f191699bd4e0bb2066b)",
+      "tensorTypes": [
+        "F32"
+      ],
+      "tokenizerRoundTrip": true
+    },
+    {
+      "architecture": "qwen3moe",
+      "bytes": 93536,
+      "contextAllocated": true,
+      "contextEffective": 256,
+      "contextRequested": 256,
+      "continuedTokens": 4,
+      "firstToken": true,
+      "hostTokensPerSecond": 8480.61,
+      "license": "repository fixture code; not a downloaded weight license",
+      "nativeLoad": true,
+      "physicalDeviceTested": false,
+      "scope": "complete synthetic graph; NOT pretrained",
+      "sha256": "1edbcae30cf2b7bfcac27297fb8e12a4de32feba724509083387f3c5461ef4f6",
+      "source": "tests/architecture_fixtures.py (SHA256 99baa08380659c419e18ee8eeaaf640581a96d0520ea8f191699bd4e0bb2066b)",
+      "tensorTypes": [
+        "F32",
+        "Q8_0"
+      ],
+      "tokenizerRoundTrip": true
+    }
+  ],
+  "genuineQwen35": {
+    "investigation": "QwenLM/Qwen3.5 redirects to Qwen3.8; no GitHub release assets. Official weights linked on Hugging Face/ModelScope, outside sandbox permitted hosts. No model checksum or weight license asserted.",
+    "license": null,
+    "sha256": null,
+    "source": "https://github.com/QwenLM/Qwen3.8/blob/2ea10dc725823bf7c3e21ce8557cbe15245132ae/README.md",
+    "status": "not-tested",
+    "weightsObtained": false
+  },
+  "host": {
+    "machine": "x86_64",
+    "python": "3.11.2",
+    "system": "Linux"
+  },
+  "limits": {
+    "maxExperts": 1024,
+    "maxLayers": 512,
+    "tensorDimensions": 4
+  },
+  "originalRequestedFile": {
+    "available": false,
+    "name": "1a91b7eee80749ae824f504efc8155f2.gguf",
+    "sha256": null
+  },
+  "quantizationPolicy": "Recognized tensor layout is not verified CPU kernel/model support; native loading and generation remain authoritative",
+  "schemaVersion": 1,
+  "scope": "Host CPU graph execution; synthetic fixtures do NOT establish genuine/pretrained family or Android device readiness",
+  "success": true,
+  "tag": "b11838",
+  "tensorTypes": {
+    "0": {
+      "block": 1,
+      "bytes": 4,
+      "name": "F32"
+    },
+    "1": {
+      "block": 1,
+      "bytes": 2,
+      "name": "F16"
+    },
+    "10": {
+      "block": 256,
+      "bytes": 84,
+      "name": "Q2_K"
+    },
+    "11": {
+      "block": 256,
+      "bytes": 110,
+      "name": "Q3_K"
+    },
+    "12": {
+      "block": 256,
+      "bytes": 144,
+      "name": "Q4_K"
+    },
+    "13": {
+      "block": 256,
+      "bytes": 176,
+      "name": "Q5_K"
+    },
+    "14": {
+      "block": 256,
+      "bytes": 210,
+      "name": "Q6_K"
+    },
+    "15": {
+      "block": 256,
+      "bytes": 292,
+      "name": "Q8_K"
+    },
+    "16": {
+      "block": 256,
+      "bytes": 66,
+      "name": "IQ2_XXS"
+    },
+    "17": {
+      "block": 256,
+      "bytes": 74,
+      "name": "IQ2_XS"
+    },
+    "18": {
+      "block": 256,
+      "bytes": 98,
+      "name": "IQ3_XXS"
+    },
+    "19": {
+      "block": 256,
+      "bytes": 50,
+      "name": "IQ1_S"
+    },
+    "2": {
+      "block": 32,
+      "bytes": 18,
+      "name": "Q4_0"
+    },
+    "20": {
+      "block": 32,
+      "bytes": 18,
+      "name": "IQ4_NL"
+    },
+    "21": {
+      "block": 256,
+      "bytes": 110,
+      "name": "IQ3_S"
+    },
+    "22": {
+      "block": 256,
+      "bytes": 82,
+      "name": "IQ2_S"
+    },
+    "23": {
+      "block": 256,
+      "bytes": 136,
+      "name": "IQ4_XS"
+    },
+    "24": {
+      "block": 1,
+      "bytes": 1,
+      "name": "I8"
+    },
+    "25": {
+      "block": 1,
+      "bytes": 2,
+      "name": "I16"
+    },
+    "26": {
+      "block": 1,
+      "bytes": 4,
+      "name": "I32"
+    },
+    "27": {
+      "block": 1,
+      "bytes": 8,
+      "name": "I64"
+    },
+    "28": {
+      "block": 1,
+      "bytes": 8,
+      "name": "F64"
+    },
+    "29": {
+      "block": 256,
+      "bytes": 56,
+      "name": "IQ1_M"
+    },
+    "3": {
+      "block": 32,
+      "bytes": 20,
+      "name": "Q4_1"
+    },
+    "30": {
+      "block": 1,
+      "bytes": 2,
+      "name": "BF16"
+    },
+    "34": {
+      "block": 256,
+      "bytes": 54,
+      "name": "TQ1_0"
+    },
+    "35": {
+      "block": 256,
+      "bytes": 66,
+      "name": "TQ2_0"
+    },
+    "39": {
+      "block": 32,
+      "bytes": 17,
+      "name": "MXFP4"
+    },
+    "40": {
+      "block": 64,
+      "bytes": 36,
+      "name": "NVFP4"
+    },
+    "41": {
+      "block": 128,
+      "bytes": 18,
+      "name": "Q1_0"
+    },
+    "42": {
+      "block": 64,
+      "bytes": 18,
+      "name": "Q2_0"
+    },
+    "6": {
+      "block": 32,
+      "bytes": 22,
+      "name": "Q5_0"
+    },
+    "7": {
+      "block": 32,
+      "bytes": 24,
+      "name": "Q5_1"
+    },
+    "8": {
+      "block": 32,
+      "bytes": 34,
+      "name": "Q8_0"
+    },
+    "9": {
+      "block": 32,
+      "bytes": 36,
+      "name": "Q8_1"
+    }
+  },
+  "tokenizerPolicy": "Upstream loads unchanged tokenizer/vocabulary/control IDs; actual prompt tokenization is verified per import",
+  "training": "Ember EMB4 training/export remains independent (Llama graph only)"
+}

@@ -108,6 +108,12 @@ class LlamaInference {
 
     private external fun nativeLogs(): ByteArray
     private external fun nativeBackendInfo(): ByteArray
+    private external fun nativeCapabilities(): ByteArray
+
+    fun capabilities(): JSONObject {
+        ensureLibraryLoaded()
+        return parse(nativeCapabilities())
+    }
 
     private fun ensureHandleLocked(): Long {
         ensureLibraryLoaded()

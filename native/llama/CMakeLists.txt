@@ -68,13 +68,32 @@ endif()
 
 add_subdirectory("${EMBER_LLAMA_CPP_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/llama.cpp" EXCLUDE_FROM_ALL)
 
+# Generate capability evidence from the source actually compiled, never a
+# manually maintained model whitelist. Fail closed if upstream layout changes.
+find_package(Python3 COMPONENTS Interpreter REQUIRED)
+file(GLOB EMBER_CAP_MODEL_SOURCES CONFIGURE_DEPENDS "${EMBER_LLAMA_CPP_DIR}/src/models/*.cpp")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/generate-runtime-capabilities.py"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../third_party/llama.cpp.version"
+    "${EMBER_LLAMA_CPP_DIR}/src/llama-arch.cpp" "${EMBER_LLAMA_CPP_DIR}/src/llama-model.cpp"
+    "${EMBER_LLAMA_CPP_DIR}/src/llama-hparams.h" "${EMBER_LLAMA_CPP_DIR}/ggml/include/ggml.h"
+    "${EMBER_LLAMA_CPP_DIR}/gguf-py/gguf/constants.py" ${EMBER_CAP_MODEL_SOURCES})
+execute_process(COMMAND "${Python3_EXECUTABLE}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../scripts/generate-runtime-capabilities.py"
+    --source "${EMBER_LLAMA_CPP_DIR}"
+    --header "${CMAKE_CURRENT_BINARY_DIR}/generated/runtime_capabilities.h"
+    RESULT_VARIABLE EMBER_CAP_RESULT)
+if(NOT EMBER_CAP_RESULT EQUAL 0)
+    message(FATAL_ERROR "Could not generate runtime architecture capabilities")
+endif()
+
 add_library(ember_llama SHARED
     src/ember_llama.cpp
 )
 
 target_include_directories(ember_llama
     PUBLIC  ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE ${EMBER_LLAMA_CPP_DIR}/include
+    PRIVATE ${EMBER_LLAMA_CPP_DIR}/include ${CMAKE_CURRENT_BINARY_DIR}/generated
 )
 
 target_link_libraries(ember_llama PRIVATE llama)

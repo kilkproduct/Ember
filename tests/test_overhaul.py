@@ -179,7 +179,7 @@ def test_stream_rejects_unbounded_single_line(tmp_path):
     with pytest.raises(ValueError,match='safety limit'):mgr.commit('oversized')
 
 
-def test_native_invalid_resources_and_clamped_context_warning(tmp_path):
+def test_native_invalid_resources_and_preserved_context_warning(tmp_path):
     tok=train_bpe(['A real fixture passage. '*5],300)
     cfg=ModelConfig(n_layer=1,n_head=2,n_embd=32,block_size=32,vocab_size=tok.vocab_size)
     path=tmp_path/'resources.gguf';export_gguf(path,cfg,Llama(cfg,seed=4).params,tok)
@@ -189,7 +189,8 @@ def test_native_invalid_resources_and_clamped_context_warning(tmp_path):
         with pytest.raises(InferenceError):e.load_model(path,EngineConfig(n_ctx=9000))
         e.load_model(path,EngineConfig(n_ctx=2048,n_batch=64,n_ubatch=16,n_threads=2))
         result=e.generate('A real',GenParams(max_tokens=1,temperature=0))
-        assert 'clamped' in result.warning.lower()
+        assert e.model_info().n_ctx==2048
+        assert 'exceeds training context' in result.warning.lower()
     finally:e.close()
 
 

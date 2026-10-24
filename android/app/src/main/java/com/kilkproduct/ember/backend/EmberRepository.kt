@@ -460,7 +460,9 @@ class EmberRepository private constructor(
         val data = event.data
         when (event.name) {
             "model.importProgress" -> if(data!=null) {
-                val detail = if (data.has("loadProgress")) {
+                val detail = if (data.optString("stage") == "first-token") {
+                    "Checking tokenizer, prompt evaluation and first generated token…"
+                } else if (data.has("loadProgress")) {
                     "Native model validation ${(data.optDouble("loadProgress", 0.0) * 100).toInt()}%"
                 } else "Library copy ${Formats.bytes(data.longOr("bytesCopied"))} / ${Formats.bytes(data.longOr("totalBytes"))}"
                 _state.update {it.copy(modelImportDetail=detail)}
@@ -1672,10 +1674,10 @@ class EmberRepository private constructor(
                 stagedModel=staged
                 val result=engine.call("model.importGguf",JSONObject()
                     .put("path",staged.file.absolutePath).put("modelStagingId",staged.id)
-                    .put("name",name).put("select",true),timeoutMs=600_000)
+                    .put("name",name).put("select",true).put("nCtx",state.value.contextLength),timeoutMs=600_000)
                 addNotice(
                     NoticeLevel.SUCCESS,
-                    "Model imported",
+                    "Text model verified and imported",
                     "${result.stringOr("name", name)} · ${result.stringOr("arch", "?")} · " +
                         "ctx ${result.intOr("contextLength")} · vocab ${result.intOr("vocabSize")} · " +
                         Formats.bytes(result.longOr("bytes")),
@@ -1693,7 +1695,6 @@ class EmberRepository private constructor(
                             nCtx = result.intOr("contextLength"),
                             modelBytes = result.longOr("bytes"),
                         ),
-                        contextLength = result.intOr("contextLength").coerceIn(64,512),
                         modelSource = "imported",
                         inferenceError = null,
                     )
@@ -1730,7 +1731,6 @@ class EmberRepository private constructor(
                 _state.update {
                     it.copy(
                         modelSource = if (path.isNullOrBlank()) "trained" else "imported",
-                        contextLength = result.intOr("contextLength").takeIf { c -> c > 0 } ?: it.contextLength,
                         libraryModels = result.arrayOrEmpty("models").objects().map(LibraryModel::fromJson)
                             .ifEmpty { it.libraryModels },
                         inferenceError = null,

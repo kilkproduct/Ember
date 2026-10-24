@@ -318,7 +318,7 @@ fun VoiceScreen(
                         max = 4096.0,
                         modifier = Modifier.weight(1f),
                         enabled = !generating,
-                        helper = "Requested session context; cannot exceed native training context. Oldest prompt tokens are dropped with a warning when full.",
+                        helper = "Requested context is preserved. Beyond-training extrapolation is unverified; learned-position models may reject it. Oldest prompt tokens are dropped with a warning when full.",
                     )
                     NumberStepper(
                         label = "Top-k",

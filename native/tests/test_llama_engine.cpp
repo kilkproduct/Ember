@@ -122,6 +122,9 @@ void test_failure_paths_without_a_model() {
     assert(ember_llama_logs(logs.data(), logs.size()) == EMBER_LLAMA_OK);
     assert(logs[0] == '[');
     assert(ember_llama_backend_info() != nullptr);
+    const std::string capabilities(ember_llama_capabilities());
+    assert(contains(capabilities,"qwen35"));
+    assert(contains(capabilities,"nativeLoaderImplemented"));
 
     ember_llama_destroy(engine);
     // Destroying twice / null handles must be safe.
@@ -218,11 +221,10 @@ void test_model_lifecycle_and_generation(const std::string& model_path) {
     const std::string info_json(info.data());
     assert(contains(info_json, "\"arch\":\"llama\""));
     assert(contains(info_json, "\"loaded\":true"));
-    // The fixture is trained with a 64-token context; asking for 128 must be
-    // clamped down, because a learned-positional model would otherwise index
-    // position rows past the end of position_embd.weight.
+    // Llama uses RoPE, not learned position rows. Preserve the requested 128
+    // tokens; do not silently shrink it to the fixture's 64-token training size.
     assert(contains(info_json, "\"nCtxTrain\":64"));
-    assert(contains(info_json, "\"nCtx\":64"));
+    assert(contains(info_json, "\"nCtx\":128"));
     assert(contains(info_json, "\"vocabSize\":"));
     assert(contains(info_json, "\"eosTokenId\":"));
     assert(contains(info_json, "\"suppressedTokens\":"));

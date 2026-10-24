@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import mmap
+import math
 import os
 import struct
 import time
@@ -32,9 +33,8 @@ FILE_TYPE_MOSTLY_Q8_0 = 7
 
 ARCH_LLAMA = "llama"
 
-#: Explicit format boundary. Anything that is not a GGUF file carrying this key
-#: (or an upstream GGUF gpt2 model) is reported to the user as incompatible
-#: rather than being silently treated as loadable.
+#: Identifies Ember's strict training/export contract. Foreign GGUFs instead
+#: receive graph-neutral structure inspection and authoritative native validation.
 EMBER_MODEL_FORMAT = "gguf-llama-v2"
 EMBER_FORMAT_KEY = "ember.format_version"
 
@@ -557,11 +557,8 @@ def _dtype_nbytes(dtype: int, dims: Sequence[int]) -> int:
         numel *= int(d)
     # Pinned upstream gguf/constants.py GGML_QUANT_SIZES. No runtime dependency
     # on gguf-py in the APK; unsupported/new types fail closed.
-    sizes = {0:(1,4),1:(1,2),2:(32,18),3:(32,20),6:(32,22),7:(32,24),8:(32,34),9:(32,36),
-        10:(256,84),11:(256,110),12:(256,144),13:(256,176),14:(256,210),15:(256,292),
-        16:(256,66),17:(256,74),18:(256,98),19:(256,50),20:(32,18),21:(256,110),
-        22:(256,82),23:(256,136),24:(1,1),25:(1,2),26:(1,4),27:(1,8),28:(1,8),
-        29:(256,56),30:(1,2),34:(256,54),35:(256,66),39:(32,17),40:(64,36),41:(128,18),42:(64,18)}
+    layouts=_runtime_manifest()["tensorTypes"]
+    sizes={int(k):(v["block"],v["bytes"]) for k,v in layouts.items()}
     if dtype not in sizes: raise GgufExportError(f"unsupported GGUF tensor dtype {dtype}")
     block,size=sizes[dtype]
     if not dims or any(d<=0 for d in dims) or dims[0]%block or numel%block:
@@ -714,6 +711,73 @@ def describe_incompatible_bytes(head: bytes, *, name: str = "model") -> str:
     return f"{name}: not a GGUF file (bad magic {head[:4]!r})"
 
 
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def _runtime_manifest():
+    # Tensor layouts are generated from upstream GGUF constants; architecture
+    # decisions use the loaded native binary whenever it is available.
+    return json.loads(Path(__file__).with_name("runtime_capabilities.json").read_text())
+
+
+def _inspect_imported_model(path,size,header):
+    from .inference import get_engine
+    engine=get_engine()
+    native=engine.available()
+    caps=engine.capabilities() if native else _runtime_manifest()
+    entry=next((r for r in caps["architectures"] if r["architecture"]==header.arch),None)
+    if not entry or not entry["nativeLoaderImplemented"]:
+        raise GgufExportError(f"architecture-recognition: {path.name}: architecture {header.arch!r} has no upstream loader in llama.cpp {caps['tag']} ({caps['commit']})")
+    if not entry["emberTextCandidate"]:
+        raise GgufExportError(f"generation-interface: architecture {header.arch!r}: {entry['limitation']}")
+    if not header.tensors:
+        raise GgufExportError(f"architecture {header.arch!r}: GGUF has no tensors; metadata inspection is not native validation")
+    md=header.metadata;arch=header.arch
+    for suffix in ("block_count","embedding_length","context_length"):
+        value=md.get(arch+"."+suffix)
+        if not isinstance(value,int) or isinstance(value,bool) or value<=0:
+            raise GgufExportError(f"metadata-structure: architecture {arch!r} requires positive integer {arch}.{suffix}")
+    if md[arch+".block_count"]>caps["limits"]["maxLayers"]:
+        raise GgufExportError(f"metadata-structure: block_count exceeds compiled upstream maximum {caps['limits']['maxLayers']}")
+    experts=md.get(arch+".expert_count",0)
+    if not isinstance(experts,int) or experts<0 or experts>caps["limits"]["maxExperts"]:
+        raise GgufExportError("metadata-structure: expert_count outside compiled upstream bounds")
+    used=md.get(arch+".expert_used_count",0)
+    used=used if isinstance(used,list) else [used]
+    if any(not isinstance(v,int) or v<0 or v>experts for v in used) or (experts>1 and not any(used)):
+        raise GgufExportError("metadata-structure: expert_used_count must select existing experts (scalar or per-layer array)")
+    if any(len(t.dims)>caps["limits"]["tensorDimensions"] for t in header.tensors):
+        raise GgufExportError("metadata-structure: tensor dimensions exceed compiled ggml maximum")
+    tokens=md.get("tokenizer.ggml.tokens",[])
+    if not isinstance(tokens,list) or not tokens or not md.get("tokenizer.ggml.model"):
+        raise GgufExportError("tokenizer-metadata: text inference requires vocabulary/tokenizer metadata; native loading has not succeeded")
+    def scalar(key,default=0):
+        value=md.get(arch+"."+key,default)
+        return int(value) if isinstance(value,(int,float)) and not isinstance(value,bool) else default
+    result={"path":str(path),"bytes":size,"format":"gguf","ggufVersion":header.version,
+        "arch":arch,"emberFormat":"","legacy":True,"name":str(md.get("general.name",path.stem)),
+        "contextLength":scalar("context_length"),"embeddingLength":scalar("embedding_length"),
+        "blockCount":scalar("block_count"),"headCount":scalar("attention.head_count"),
+        "headCountKv":scalar("attention.head_count_kv",scalar("attention.head_count")),
+        "feedForwardLength":scalar("feed_forward_length"),"vocabSize":len(tokens),
+        "tensorCount":len(header.tensors),"quantizedTensors":[t.name for t in header.tensors if t.dtype!=GGML_F32],
+        "tensorTypes":sorted({str(t.dtype) for t in header.tensors}),
+        "bosTokenId":int(md.get("tokenizer.ggml.bos_token_id",-1)),
+        "eosTokenId":int(md.get("tokenizer.ggml.eos_token_id",-1)),
+        "tokenizerModel":str(md.get("tokenizer.ggml.model","")),"tokenizerPre":str(md.get("tokenizer.ggml.pre","")),
+        "chatTemplate":str(md.get("tokenizer.chat_template","")),"parameters":sum(math.prod(t.dims) for t in header.tensors),
+        "fileType":int(md.get("general.file_type",0)),"family":arch,
+        "hyperparameters":{k:v for k,v in md.items() if k.startswith(arch+".")},
+        "runtime":{k:caps[k] for k in ("tag","commit")},"runtimeCapabilitiesAvailable":native,
+        "modelKind":entry["modelKind"],"multimodal":entry["multimodal"],
+        "estimatedWeightBytes":sum(t.nbytes for t in header.tensors),
+        "estimatedKvBytesPerToken":None,"estimatedMemory2048":None,
+        "memoryEstimateNote":"Weight bytes only. Hybrid/recurrent/MoE/context working sets are allocated/validated by upstream; architecture support is not a mobile RAM guarantee.",
+        "compatibility":"structural preflight only; native load/context/tokenizer/first-token checks pending",
+        "validationStage":"metadata-parsed","nativeValidated":False,"textInferenceVerified":False,"valid":True}
+    return result
+
+
 def _validate_gguf_file(path: str | Path) -> dict[str, Any]:
     """Full structural validation of a candidate model file.
 
@@ -736,11 +800,10 @@ def _validate_gguf_file(path: str | Path) -> dict[str, Any]:
         raise GgufExportError(f"{p.name} is only {size} bytes — too small to be a language model")
 
     header = read_gguf_header(p)
-    if header.arch not in ("llama", "qwen2", "qwen3"):
-        raise GgufExportError(
-            f"{p.name}: architecture {header.arch!r} is not supported by this Ember build "
-            f"(supported dense architectures: llama, qwen2 [including Qwen2.5], qwen3)"
-        )
+    if EMBER_FORMAT_KEY not in header.metadata:
+        return _inspect_imported_model(p,size,header)
+    if header.arch != "llama":
+        raise GgufExportError("Ember training exports must use the Llama graph; pretrained inference is a separate path")
 
     md = header.metadata
     arch=header.arch

@@ -21,6 +21,9 @@ dev = [
 [tool.setuptools.packages.find]
 include = ["ember*"]
 
+[tool.setuptools.package-data]
+ember = ["runtime_capabilities.json"]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
