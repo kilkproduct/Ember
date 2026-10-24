@@ -93,7 +93,7 @@ with original errors retained.
 
 ## Inspector and readiness
 
-Chat → Model library → **Details** opens a native Compose inspector. RPC
+Import shows the native Compose metadata inspector before native validation, including for files which cannot be registered. Chat → Model library → **Details** reopens it for registered files. RPC
 `model.inspect` reads metadata without loading the weights or requiring an
 architecture allowlist: name, architecture, version/endian, bytes, stored tensor
 elements (not invented active/tied parameter counts), declared geometry/context,

@@ -1685,6 +1685,10 @@ class EmberRepository private constructor(
                         }).also { stagedModel=it }
                 }
                 stagedModel=staged
+                // Inspection also remains visible for unsupported/invalid files
+                // which must never receive a persistent model registration.
+                val inspection=engine.call("model.inspect",JSONObject().put("path",staged.file.absolutePath),timeoutMs=60_000)
+                _state.update { it.copy(modelInspection=inspection) }
                 val result=engine.call("model.importGguf",JSONObject()
                     .put("path",staged.file.absolutePath).put("modelStagingId",staged.id)
                     .put("name",name).put("select",true).put("nCtx",state.value.contextLength),timeoutMs=600_000)
