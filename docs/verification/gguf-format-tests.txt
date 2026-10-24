@@ -1,0 +1,200 @@
+.......................................................................F [ 29%]
+FF...................................................................... [ 58%]
+........................................................................ [ 87%]
+..............................                                           [100%]
+=================================== FAILURES ===================================
+________ test_writer_alignment_count_empty_arrays_and_exact_payload[32] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-user/pytest-6/test_writer_alignment_count_em0')
+alignment = 32
+
+    @pytest.mark.parametrize('alignment',[32,128,8192])
+    def test_writer_alignment_count_empty_arrays_and_exact_payload(tmp_path,alignment):
+        from ember.gguf_export import GgufWriter
+        w=GgufWriter('fixture',alignment)
+        w.add_string('general.architecture','fixture');w.add_array('test.empty',[],4)
+        array=np.arange(32,dtype=np.float32).reshape(2,16)
+        w.add_tensor('weight',array)
+>       first=w.build();assert w.build()==first
+              ^^^^^^^^^
+
+tests/test_gguf_format_compatibility.py:153: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ember/gguf_export.py:248: in build
+    kv += self._pack_val(entry.value, entry.vtype, add_vtype=True, sub_type=entry.sub_type)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <ember.gguf_export.GgufWriter object at 0x7faa30d2abd0>, value = []
+vtype = 9, add_vtype = True, sub_type = 4
+
+    def _pack_val(self, value: Any, vtype: int, add_vtype: bool, sub_type: int | None = None) -> bytes:
+        out = bytearray()
+        if add_vtype:
+            out += struct.pack("<I", vtype)
+        if vtype == _VT_U8:
+            out += struct.pack("B", int(value))
+        elif vtype == _VT_I8:
+            out += struct.pack("b", int(value))
+        elif vtype == _VT_U16:
+            out += struct.pack("<H", int(value))
+        elif vtype == _VT_I16:
+            out += struct.pack("<h", int(value))
+        elif vtype == _VT_U32:
+            out += struct.pack("<I", int(value))
+        elif vtype == _VT_I32:
+            out += struct.pack("<i", int(value))
+        elif vtype == _VT_U64:
+            out += struct.pack("<Q", int(value))
+        elif vtype == _VT_I64:
+            out += struct.pack("<q", int(value))
+        elif vtype == _VT_F32:
+            out += struct.pack("<f", float(value))
+        elif vtype == _VT_F64:
+            out += struct.pack("<d", float(value))
+        elif vtype == _VT_BOOL:
+            out += struct.pack("?", bool(value))
+        elif vtype == _VT_STRING:
+            out += self._pack_string(str(value))
+        elif vtype == _VT_ARRAY:
+            items = list(value)
+            if not items:
+>               raise GgufExportError("GGUF metadata array must not be empty")
+E               ember.gguf_export.GgufExportError: GGUF metadata array must not be empty
+
+ember/gguf_export.py:218: GgufExportError
+_______ test_writer_alignment_count_empty_arrays_and_exact_payload[128] ________
+
+tmp_path = PosixPath('/tmp/pytest-of-user/pytest-6/test_writer_alignment_count_em1')
+alignment = 128
+
+    @pytest.mark.parametrize('alignment',[32,128,8192])
+    def test_writer_alignment_count_empty_arrays_and_exact_payload(tmp_path,alignment):
+        from ember.gguf_export import GgufWriter
+        w=GgufWriter('fixture',alignment)
+        w.add_string('general.architecture','fixture');w.add_array('test.empty',[],4)
+        array=np.arange(32,dtype=np.float32).reshape(2,16)
+        w.add_tensor('weight',array)
+>       first=w.build();assert w.build()==first
+              ^^^^^^^^^
+
+tests/test_gguf_format_compatibility.py:153: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ember/gguf_export.py:248: in build
+    kv += self._pack_val(entry.value, entry.vtype, add_vtype=True, sub_type=entry.sub_type)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <ember.gguf_export.GgufWriter object at 0x7faa3365b150>, value = []
+vtype = 9, add_vtype = True, sub_type = 4
+
+    def _pack_val(self, value: Any, vtype: int, add_vtype: bool, sub_type: int | None = None) -> bytes:
+        out = bytearray()
+        if add_vtype:
+            out += struct.pack("<I", vtype)
+        if vtype == _VT_U8:
+            out += struct.pack("B", int(value))
+        elif vtype == _VT_I8:
+            out += struct.pack("b", int(value))
+        elif vtype == _VT_U16:
+            out += struct.pack("<H", int(value))
+        elif vtype == _VT_I16:
+            out += struct.pack("<h", int(value))
+        elif vtype == _VT_U32:
+            out += struct.pack("<I", int(value))
+        elif vtype == _VT_I32:
+            out += struct.pack("<i", int(value))
+        elif vtype == _VT_U64:
+            out += struct.pack("<Q", int(value))
+        elif vtype == _VT_I64:
+            out += struct.pack("<q", int(value))
+        elif vtype == _VT_F32:
+            out += struct.pack("<f", float(value))
+        elif vtype == _VT_F64:
+            out += struct.pack("<d", float(value))
+        elif vtype == _VT_BOOL:
+            out += struct.pack("?", bool(value))
+        elif vtype == _VT_STRING:
+            out += self._pack_string(str(value))
+        elif vtype == _VT_ARRAY:
+            items = list(value)
+            if not items:
+>               raise GgufExportError("GGUF metadata array must not be empty")
+E               ember.gguf_export.GgufExportError: GGUF metadata array must not be empty
+
+ember/gguf_export.py:218: GgufExportError
+_______ test_writer_alignment_count_empty_arrays_and_exact_payload[8192] _______
+
+tmp_path = PosixPath('/tmp/pytest-of-user/pytest-6/test_writer_alignment_count_em2')
+alignment = 8192
+
+    @pytest.mark.parametrize('alignment',[32,128,8192])
+    def test_writer_alignment_count_empty_arrays_and_exact_payload(tmp_path,alignment):
+        from ember.gguf_export import GgufWriter
+        w=GgufWriter('fixture',alignment)
+        w.add_string('general.architecture','fixture');w.add_array('test.empty',[],4)
+        array=np.arange(32,dtype=np.float32).reshape(2,16)
+        w.add_tensor('weight',array)
+>       first=w.build();assert w.build()==first
+              ^^^^^^^^^
+
+tests/test_gguf_format_compatibility.py:153: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+ember/gguf_export.py:248: in build
+    kv += self._pack_val(entry.value, entry.vtype, add_vtype=True, sub_type=entry.sub_type)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+self = <ember.gguf_export.GgufWriter object at 0x7faa336bbdd0>, value = []
+vtype = 9, add_vtype = True, sub_type = 4
+
+    def _pack_val(self, value: Any, vtype: int, add_vtype: bool, sub_type: int | None = None) -> bytes:
+        out = bytearray()
+        if add_vtype:
+            out += struct.pack("<I", vtype)
+        if vtype == _VT_U8:
+            out += struct.pack("B", int(value))
+        elif vtype == _VT_I8:
+            out += struct.pack("b", int(value))
+        elif vtype == _VT_U16:
+            out += struct.pack("<H", int(value))
+        elif vtype == _VT_I16:
+            out += struct.pack("<h", int(value))
+        elif vtype == _VT_U32:
+            out += struct.pack("<I", int(value))
+        elif vtype == _VT_I32:
+            out += struct.pack("<i", int(value))
+        elif vtype == _VT_U64:
+            out += struct.pack("<Q", int(value))
+        elif vtype == _VT_I64:
+            out += struct.pack("<q", int(value))
+        elif vtype == _VT_F32:
+            out += struct.pack("<f", float(value))
+        elif vtype == _VT_F64:
+            out += struct.pack("<d", float(value))
+        elif vtype == _VT_BOOL:
+            out += struct.pack("?", bool(value))
+        elif vtype == _VT_STRING:
+            out += self._pack_string(str(value))
+        elif vtype == _VT_ARRAY:
+            items = list(value)
+            if not items:
+>               raise GgufExportError("GGUF metadata array must not be empty")
+E               ember.gguf_export.GgufExportError: GGUF metadata array must not be empty
+
+ember/gguf_export.py:218: GgufExportError
+=============================== warnings summary ===============================
+tests/test_learning_verification.py::test_diverging_run_is_refused_instead_of_writing_nan_weights
+  /home/user/Ember/.venv/lib/python3.11/site-packages/numpy/_core/_methods.py:132: RuntimeWarning: overflow encountered in reduce
+    ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
+
+tests/test_learning_verification.py::test_diverging_run_is_refused_instead_of_writing_nan_weights
+  /home/user/Ember/ember/autodiff.py:68: RuntimeWarning: overflow encountered in multiply
+    r = (np.mean(x.data*x.data, axis=-1, keepdims=True)+eps)**-0.5
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_gguf_format_compatibility.py::test_writer_alignment_count_empty_arrays_and_exact_payload[32]
+FAILED tests/test_gguf_format_compatibility.py::test_writer_alignment_count_empty_arrays_and_exact_payload[128]
+FAILED tests/test_gguf_format_compatibility.py::test_writer_alignment_count_empty_arrays_and_exact_payload[8192]
+3 failed, 243 passed, 2 warnings in 11.50s

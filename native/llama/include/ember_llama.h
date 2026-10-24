@@ -138,6 +138,8 @@ EMBER_API int ember_llama_logs(char* out_json, size_t max_bytes);
 
 /* llama.cpp build/system description, for the app's diagnostics screen. */
 EMBER_API const char* ember_llama_backend_info(void);
+/* JSON evidence generated from the compiled upstream registry + model factory. */
+EMBER_API const char* ember_llama_capabilities(void);
 
 #ifdef __cplusplus
 }

@@ -217,8 +217,6 @@ class Corpus:
         cleaned = clean_document_text(text, strip_html=strip_html)
         if not cleaned:
             raise ValueError("Document text is empty after cleaning.")
-        if len(cleaned) > MAX_DOC_CHARS:
-            cleaned = cleaned[:MAX_DOC_CHARS]
 
         safe_title = (str(title or "").strip()[:240]) or "untitled"
         safe_source = (str(source or "manual").strip()[:80]) or "manual"
@@ -297,6 +295,7 @@ class Corpus:
         accepted = 0
         merged = 0
         skipped = 0
+        duplicates = 0
         now = time.time()
         with self._lock:
             cur = self._conn.cursor()
@@ -307,8 +306,6 @@ class Corpus:
                     if not cleaned:
                         skipped += 1
                         continue
-                    if len(cleaned) > MAX_DOC_CHARS:
-                        cleaned = cleaned[:MAX_DOC_CHARS]
                     title = (str(raw.get("title") or "").strip()[:240]) or cleaned[:60].splitlines()[0][:60] or "untitled"
                     source = (str(raw.get("source") or "import").strip()[:80]) or "import"
                     url = str(raw.get("url") or "").strip()[:1024]
@@ -334,6 +331,7 @@ class Corpus:
                         row = cur.execute("SELECT id FROM documents WHERE chash = ? LIMIT 1", (chash,)).fetchone()
                         if row is not None:
                             merged += 1
+                            duplicates += 1
                             continue
 
                     doc_id = str(raw.get("id") or chash[:12])
@@ -351,7 +349,7 @@ class Corpus:
             except Exception:
                 self._conn.rollback()
                 raise
-        return {"accepted": accepted, "merged": merged, "skipped": skipped}
+        return {"accepted": accepted, "merged": merged, "skipped": skipped, "duplicates": duplicates}
 
     def remove(self, doc_id: str) -> bool:
         with self._lock:

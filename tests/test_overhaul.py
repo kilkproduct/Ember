@@ -158,11 +158,11 @@ def test_external_descriptor_selection_and_restart_does_not_reuse_stale_fd(tmp_p
     try:
         with path.open('rb') as f:
             fd=f'/proc/self/fd/{f.fileno()}'
-            backend.dispatch('model.registerExternal',{'path':fd,'uri':'content://fixture/1','name':'fixture'})
-            result=backend.dispatch('model.select',{'path':fd})
-            assert result['selected']==fd
-            assert backend.trainer.inference_model_path.as_posix()==fd
-            assert backend.dispatch('model.list')['models'][-1]['storage']=='external'
+            with pytest.raises(InferenceError,match='private model staging'):
+                backend.dispatch('model.registerExternal',{'path':fd,'uri':'content://fixture/1','name':'fixture'})
+            with pytest.raises(InferenceError,match='stream-copied'):
+                backend.dispatch('model.importGguf',{'path':fd,'name':'fixture'})
+        assert backend.trainer._imported_gguf is None
     finally:backend.close()
     backend=EmberBackend(tmp_path/'app')
     try:assert backend.trainer._imported_gguf is None
@@ -179,7 +179,7 @@ def test_stream_rejects_unbounded_single_line(tmp_path):
     with pytest.raises(ValueError,match='safety limit'):mgr.commit('oversized')
 
 
-def test_native_invalid_resources_and_clamped_context_warning(tmp_path):
+def test_native_invalid_resources_and_preserved_context_warning(tmp_path):
     tok=train_bpe(['A real fixture passage. '*5],300)
     cfg=ModelConfig(n_layer=1,n_head=2,n_embd=32,block_size=32,vocab_size=tok.vocab_size)
     path=tmp_path/'resources.gguf';export_gguf(path,cfg,Llama(cfg,seed=4).params,tok)
@@ -189,7 +189,8 @@ def test_native_invalid_resources_and_clamped_context_warning(tmp_path):
         with pytest.raises(InferenceError):e.load_model(path,EngineConfig(n_ctx=9000))
         e.load_model(path,EngineConfig(n_ctx=2048,n_batch=64,n_ubatch=16,n_threads=2))
         result=e.generate('A real',GenParams(max_tokens=1,temperature=0))
-        assert 'clamped' in result.warning.lower()
+        assert e.model_info().n_ctx==2048
+        assert 'exceeds training context' in result.warning.lower()
     finally:e.close()
 
 

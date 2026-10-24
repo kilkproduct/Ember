@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import mmap
+import math
 import os
 import struct
 import time
@@ -32,9 +33,8 @@ FILE_TYPE_MOSTLY_Q8_0 = 7
 
 ARCH_LLAMA = "llama"
 
-#: Explicit format boundary. Anything that is not a GGUF file carrying this key
-#: (or an upstream GGUF gpt2 model) is reported to the user as incompatible
-#: rather than being silently treated as loadable.
+#: Identifies Ember's strict training/export contract. Foreign GGUFs instead
+#: receive graph-neutral structure inspection and authoritative native validation.
 EMBER_MODEL_FORMAT = "gguf-llama-v2"
 EMBER_FORMAT_KEY = "ember.format_version"
 
@@ -48,7 +48,10 @@ _Q8_0_BLOCK_BYTES = 34  # 32 x int8 + 1 x float16 scale
 
 
 class GgufExportError(ValueError):
-    """Raised when a checkpoint cannot be represented as a valid GGUF model."""
+    """GGUF admission/inspection failure with a truthful compatibility state."""
+    def __init__(self,message,*,state="invalid-file"):
+        super().__init__(message)
+        self.compatibility_state=state
 
 
 # ---------------------------------------------------------------------------
@@ -147,8 +150,8 @@ class GgufWriter:
         self._add(key, _VT_STRING, str(value))
 
     def add_array(self, key: str, values: Sequence[Any], sub_type: int) -> None:
-        if len(values) == 0:
-            raise GgufExportError(f"GGUF metadata array {key!r} must not be empty")
+        if sub_type not in range(13):
+            raise GgufExportError(f"unsupported GGUF array subtype {sub_type}")
         self._add(key, _VT_ARRAY, list(values), sub_type)
 
     # -- tensors --------------------------------------------------------
@@ -230,13 +233,17 @@ class GgufWriter:
         header += struct.pack("<I", GGUF_MAGIC)
         header += struct.pack("<I", GGUF_VERSION)
         header += struct.pack("<Q", len(self.tensors))
-        header += struct.pack("<Q", len(self.kv))
-        if self.alignment != GGUF_DEFAULT_ALIGNMENT:
-            header += self._pack_string("general.alignment")
-            header += self._pack_val(self.alignment, _VT_U32, add_vtype=True)
+        entries=list(self.kv)
+        alignment_entry=next((e for e in entries if e.key=="general.alignment"),None)
+        if alignment_entry is not None:
+            if alignment_entry.vtype!=_VT_U32 or alignment_entry.value!=self.alignment:
+                raise GgufExportError("writer general.alignment must be UINT32 and match tensor padding alignment")
+        elif self.alignment!=GGUF_DEFAULT_ALIGNMENT:
+            entries.insert(0,_Kv("general.alignment",_VT_U32,self.alignment))
+        header += struct.pack("<Q", len(entries))
 
         kv = bytearray()
-        for entry in self.kv:
+        for entry in entries:
             kv += self._pack_string(entry.key)
             kv += self._pack_val(entry.value, entry.vtype, add_vtype=True, sub_type=entry.sub_type)
 
@@ -549,6 +556,7 @@ class GgufHeader:
     tensors: list[GgufTensorMeta]
     alignment: int
     data_start: int
+    byte_order: str = "little"
 
 
 def _dtype_nbytes(dtype: int, dims: Sequence[int]) -> int:
@@ -557,138 +565,157 @@ def _dtype_nbytes(dtype: int, dims: Sequence[int]) -> int:
         numel *= int(d)
     # Pinned upstream gguf/constants.py GGML_QUANT_SIZES. No runtime dependency
     # on gguf-py in the APK; unsupported/new types fail closed.
-    sizes = {0:(1,4),1:(1,2),2:(32,18),3:(32,20),6:(32,22),7:(32,24),8:(32,34),9:(32,36),
-        10:(256,84),11:(256,110),12:(256,144),13:(256,176),14:(256,210),15:(256,292),
-        16:(256,66),17:(256,74),18:(256,98),19:(256,50),20:(32,18),21:(256,110),
-        22:(256,82),23:(256,136),24:(1,1),25:(1,2),26:(1,4),27:(1,8),28:(1,8),
-        29:(256,56),30:(1,2),34:(256,54),35:(256,66),39:(32,17),40:(64,36),41:(128,18),42:(64,18)}
-    if dtype not in sizes: raise GgufExportError(f"unsupported GGUF tensor dtype {dtype}")
+    layouts=_runtime_manifest()["tensorTypes"]
+    sizes={int(k):(v["block"],v["bytes"]) for k,v in layouts.items()}
+    if dtype not in sizes: raise GgufExportError(f"unsupported GGUF tensor dtype {dtype}",state="unsupported-tensor-type")
     block,size=sizes[dtype]
     if not dims or any(d<=0 for d in dims) or dims[0]%block or numel%block:
         raise GgufExportError(f"tensor dtype {dtype} has invalid block alignment/dimensions {dims}")
     return numel//block*size
 
 
-def read_gguf_header(path: str | Path, *, max_bytes: int = 64 * 1024 * 1024) -> GgufHeader:
-    """Parse a GGUF header (metadata + tensor table) without loading weights."""
-    p = Path(path)
-    if not p.exists():
-        raise GgufExportError(f"model file does not exist: {p}")
-    size = p.stat().st_size
-    if size < 24:
-        raise GgufExportError(f"{p.name} is too small to be a GGUF model ({size} bytes)")
-    with open(p, "rb") as fh:
-        head = mmap.mmap(fh.fileno(), length=min(size,max_bytes), access=mmap.ACCESS_READ)
+def read_gguf_header(path: str | Path) -> GgufHeader:
+    """Bounded inspection of v2 LE and v3 LE/BE. Never reads tensor payloads.
 
+    Both supported versions use uint64 counts/string lengths/dimensions/offsets;
+    v1 (which used different widths) is deliberately not accepted. v3 introduces
+    portable endian identification. Native inference's endian support is separate.
+    """
+    p=Path(path)
+    if not p.exists():raise GgufExportError(f'model file does not exist: {p}')
+    with p.open('rb') as fh:
+        size=os.fstat(fh.fileno()).st_size
+        if size<24:raise GgufExportError('truncated GGUF header (requires 24 bytes)')
+        head=mmap.mmap(fh.fileno(),length=0,access=mmap.ACCESS_READ)
     try:
-        magic = struct.unpack_from("<I", head, 0)[0]
-        if magic != GGUF_MAGIC:
-            raise GgufExportError(describe_incompatible_bytes(head, name=p.name))
-        version = struct.unpack_from("<I", head, 4)[0]
-        if version != GGUF_VERSION:
-            raise GgufExportError(f"unsupported GGUF version {version} (this build writes version {GGUF_VERSION})")
-        n_tensors = struct.unpack_from("<Q", head, 8)[0]
-        n_kv = struct.unpack_from("<Q", head, 16)[0]
-        if n_tensors > 100000 or n_kv > 100000:
-            raise GgufExportError(f"implausible GGUF header counts (tensors={n_tensors}, kv={n_kv})")
-    
-        off = 24
-    
-        def read_str() -> str:
+        if head[:4]!=b'GGUF':raise GgufExportError(describe_incompatible_bytes(head,name=p.name))
+        le=struct.unpack_from('<I',head,4)[0]
+        be=struct.unpack_from('>I',head,4)[0]
+        if le in (2,3):version,order=le,'<'
+        elif be==3:version,order=3,'>'
+        elif be==2:raise GgufExportError('unsupported GGUF v2 big-endian variant; v2 LE and v3 LE/BE inspection are supported')
+        else:raise GgufExportError(f'unsupported GGUF version {le}; reader supports v2 LE and v3 LE/BE (writer emits v3 LE)',state='unsupported-version')
+        off=8
+        string_bytes=0
+        values=0
+        # Bound Python object expansion independently of mapped file size. These
+        # are inspection budgets, not arbitrary weight/model-size restrictions.
+        max_string_bytes=128*1024*1024
+        max_values=2_000_000
+        def take(fmt):
             nonlocal off
-            (ln,) = struct.unpack_from("<Q", head, off)
-            off += 8
-            if off + ln > len(head):
-                raise GgufExportError("truncated GGUF string")
-            raw = head[off : off + ln]
-            off += ln
-            return raw.decode("utf-8", errors="replace")
-    
-        def read_val(vtype: int, depth: int = 0) -> Any:
-            nonlocal off
-            if depth>4:raise GgufExportError("GGUF metadata array nesting exceeds safety limit")
-            fmt, sz = {
-                _VT_U8: ("B", 1), _VT_I8: ("b", 1), _VT_U16: ("<H", 2), _VT_I16: ("<h", 2),
-                _VT_U32: ("<I", 4), _VT_I32: ("<i", 4), _VT_U64: ("<Q", 8), _VT_I64: ("<q", 8),
-                _VT_F32: ("<f", 4), _VT_F64: ("<d", 8),
-            }.get(vtype, (None, 0))
-            if fmt:
-                if off + sz > len(head):
-                    raise GgufExportError("truncated GGUF metadata value")
-                val = struct.unpack_from(fmt, head, off)[0]
-                off += sz
-                return val
-            if vtype == _VT_BOOL:
-                val = struct.unpack_from("?", head, off)[0]
-                off += 1
-                return bool(val)
-            if vtype == _VT_STRING:
-                return read_str()
-            if vtype == _VT_ARRAY:
-                (ltype,) = struct.unpack_from("<I", head, off)
-                off += 4
-                (count,) = struct.unpack_from("<Q", head, off)
-                off += 8
-                if count > 5_000_000:
-                    raise GgufExportError(f"implausible GGUF array length {count}")
-                return [read_val(ltype,depth+1) for _ in range(count)]
-            raise GgufExportError(f"unsupported GGUF metadata type {vtype}")
-    
-        metadata: dict[str, Any] = {}
+            width=struct.calcsize(order+fmt)
+            if width>size-off:raise GgufExportError('truncated GGUF metadata/tensor descriptor')
+            value=struct.unpack_from(order+fmt,head,off)[0];off+=width
+            return value
+        def string(limit=None):
+            nonlocal off,string_bytes
+            count=take('Q')
+            if count>size-off:raise GgufExportError('truncated GGUF string')
+            if limit is not None and count>limit:raise GgufExportError('GGUF key/tensor name exceeds specification length')
+            if count>max_string_bytes-string_bytes:raise GgufExportError('GGUF inspection string budget exceeded (128 MiB); native load not attempted')
+            string_bytes+=count
+            raw=head[off:off+count];off+=count
+            return raw.decode('utf-8')
+        scalar={0:'B',1:'b',2:'H',3:'h',4:'I',5:'i',6:'f',7:'B',10:'Q',11:'q',12:'d'}
+        def value(kind,depth=0):
+            nonlocal values
+            values+=1
+            if values>max_values:raise GgufExportError('GGUF inspection decoded-value budget exceeded')
+            if kind in scalar:
+                result=take(scalar[kind])
+                return bool(result) if kind==7 else result
+            if kind==8:return string()
+            if kind!=9:raise GgufExportError(f'unsupported GGUF metadata type {kind}')
+            if depth>=4:raise GgufExportError('GGUF metadata array nesting exceeds safety limit')
+            subtype=take('I');count=take('Q')
+            if subtype not in (*scalar,8,9):raise GgufExportError(f'unsupported GGUF array metadata type {subtype}')
+            minimum=struct.calcsize(scalar[subtype]) if subtype in scalar else 8 if subtype==8 else 12
+            if count>(size-off)//minimum:raise GgufExportError('truncated GGUF array: element count exceeds remaining bytes')
+            if count>max_values-values:raise GgufExportError('GGUF inspection array/value budget exceeded')
+            return [value(subtype,depth+1) for _ in range(count)]
+        n_tensors=take('Q');n_kv=take('Q')
+        if n_tensors>100000 or n_kv>100000 or n_kv>(size-off)//13 or n_tensors>(size-off)//32:
+            raise GgufExportError('implausible GGUF header counts or truncated descriptor table')
+        metadata={};metadata_types={}
         for _ in range(n_kv):
-            key = read_str()
-            (vtype,) = struct.unpack_from("<I", head, off)
-            off += 4
-            if key in metadata:raise GgufExportError("duplicate GGUF metadata key: "+key)
-            metadata[key] = read_val(vtype)
-    
-        tensors: list[GgufTensorMeta] = []
+            key=string(65535)
+            if not key or not key.isascii():raise GgufExportError('invalid GGUF metadata key')
+            if key in metadata:raise GgufExportError('duplicate GGUF metadata key: '+key)
+            kind=take('I');metadata_types[key]=kind;metadata[key]=value(kind)
+        tensors=[];names=set()
+        max_dims=_runtime_manifest()['limits']['tensorDimensions']
         for _ in range(n_tensors):
-            name = read_str()
-            (n_dims,) = struct.unpack_from("<I", head, off)
-            off += 4
-            if n_dims < 1 or n_dims > 8:
-                raise GgufExportError(f"tensor {name!r} has implausible dimension count {n_dims}")
-            dims = []
-            for _ in range(n_dims):
-                (d,) = struct.unpack_from("<Q", head, off)
-                off += 8
-                dims.append(int(d))
-            (dtype,) = struct.unpack_from("<I", head, off)
-            off += 4
-            (toffset,) = struct.unpack_from("<Q", head, off)
-            off += 8
-            nbytes = _dtype_nbytes(dtype, dims)
-            tensors.append(GgufTensorMeta(name=name, dims=tuple(dims), dtype=dtype, offset=toffset, nbytes=nbytes))
-    
-        if len({t.name for t in tensors}) != len(tensors):
-            raise GgufExportError("duplicate GGUF tensors")
-        alignment = int(metadata.get("general.alignment", GGUF_DEFAULT_ALIGNMENT))
-        if alignment < 1 or alignment > 4096 or alignment & (alignment-1):
-            raise GgufExportError("invalid GGUF alignment")
-        data_start = _ggml_pad(off, alignment)
-        last_end = max((t.offset + t.nbytes for t in tensors), default=0)
-        if data_start + last_end > size:
-            raise GgufExportError(
-                f"{p.name} is truncated: header claims {data_start + last_end} bytes but the file is {size}"
-            )
+            name=string(64)
+            if not name or name in names:raise GgufExportError('duplicate or empty GGUF tensor name')
+            names.add(name)
+            ndim=take('I')
+            if not 1<=ndim<=max_dims:raise GgufExportError(f'tensor {name!r}: invalid dimension count {ndim}')
+            dims=tuple(take('Q') for _ in range(ndim))
+            if any(d==0 or d>2**63-1 for d in dims) or math.prod(dims)>2**63-1:
+                raise GgufExportError('invalid GGUF tensor dimensions or element-count overflow')
+            dtype=take('I');relative=take('Q');nbytes=_dtype_nbytes(dtype,dims)
+            tensors.append(GgufTensorMeta(name,dims,dtype,relative,nbytes))
+        alignment=metadata.get('general.alignment',GGUF_DEFAULT_ALIGNMENT)
+        if ('general.alignment' in metadata and metadata_types['general.alignment']!=_VT_U32) or not isinstance(alignment,int) or alignment<=0 or alignment&(alignment-1):
+            raise GgufExportError('invalid GGUF alignment (must be UINT32, nonzero power of two)')
+        start=_ggml_pad(off,alignment)
         end=0
         for tensor in sorted(tensors,key=lambda t:t.offset):
-            if tensor.offset%alignment or tensor.offset<end:raise GgufExportError("overlapping or unaligned GGUF tensors")
+            if tensor.offset%alignment or tensor.offset<end:raise GgufExportError('overlapping or unaligned GGUF tensors')
+            if start>size or tensor.offset>size-start or tensor.nbytes>size-start-tensor.offset:
+                raise GgufExportError('truncated GGUF tensor data or out-of-range offset')
             end=tensor.offset+tensor.nbytes
-        return GgufHeader(
-            version=version,
-            arch=str(metadata.get("general.architecture", "")),
-            metadata=metadata,
-            tensors=tensors,
-            alignment=alignment,
-            data_start=data_start,
-        )
-    except (struct.error, UnicodeDecodeError) as exc:
-        raise GgufExportError("Truncated or malformed GGUF metadata/header") from exc
-    finally:
-        head.close()
+        return GgufHeader(version,str(metadata.get('general.architecture','')),metadata,tensors,alignment,start,'little' if order=='<' else 'big')
+    except (struct.error,UnicodeDecodeError,OverflowError) as exc:
+        raise GgufExportError('Truncated or malformed GGUF metadata/header: '+str(exc)) from exc
+    finally:head.close()
 
+
+def _require_native_container(header):
+    if header.byte_order!='little':
+        raise GgufExportError('unsupported-byte-order: valid v3 big-endian metadata is inspectable, but pinned llama.cpp CPU inference on Android requires little-endian weights; source is never rewritten')
+    shards=header.metadata.get('split.count',1)
+    if not isinstance(shards,int) or shards<1:raise GgufExportError('invalid split.count metadata')
+    if shards>1:
+        raise GgufExportError(f'missing-shards/unsupported-arrangement: model declares {shards} GGUF shards (part {header.metadata.get("split.no",0)}). Upstream supports adjacent named shards, but Android single-document private staging does not import shard sets. Select a complete single-file GGUF; no shards were merged or rewritten')
+
+
+def inspect_gguf_file(path):
+    """Inspection is deliberately independent of model admission/native readiness."""
+    try:
+        h=read_gguf_header(path)
+    except (GgufExportError,OSError) as exc:
+        state=getattr(exc,'compatibility_state','invalid-file')
+        return {'path':str(path),'valid':False if state=='invalid-file' else None,'compatibilityState':state,'error':str(exc),'textInferenceVerified':False}
+    from .inference import get_engine
+    engine=get_engine()
+    md=h.metadata;caps=engine.capabilities() if engine.available() else _runtime_manifest()
+    row=next((r for r in caps['architectures'] if r['architecture']==h.arch),None)
+    state='native-validation-pending';limitation='Model load/context/tokenizer/first-token verification has not run'
+    try:_require_native_container(h)
+    except GgufExportError as exc:
+        state='unsupported-byte-order' if h.byte_order=='big' else 'missing-shards';limitation=str(exc)
+    if state=='native-validation-pending' and (not row or not row['nativeLoaderImplemented']):state='unsupported-architecture';limitation='No factory in pinned upstream runtime'
+    elif state=='native-validation-pending' and not row['emberTextCandidate']:state='unsupported-interface';limitation=row['limitation']
+    def declared(suffix):return md.get(h.arch+'.'+suffix)
+    counts={}
+    for t in h.tensors:
+        name=caps['tensorTypes'][str(t.dtype)]['name'];counts[name]=counts.get(name,0)+1
+    return {'path':str(path),'valid':True,'compatibilityState':state,'limitation':limitation,
+        'name':md.get('general.name',Path(path).stem),'arch':h.arch,'ggufVersion':h.version,'byteOrder':h.byte_order,
+        'bytes':Path(path).stat().st_size,'parameters':sum(math.prod(t.dims) for t in h.tensors),
+        'parameterCountScope':'Stored tensor elements; tied/omitted weights and active MoE parameters are not inferred',
+        'tensorCount':len(h.tensors),'tensorTypes':counts,'alignment':h.alignment,'tensorDataStart':h.data_start,
+        'contextLength':declared('context_length'),'blockCount':declared('block_count'),'embeddingLength':declared('embedding_length'),
+        'headCount':declared('attention.head_count'),'headCountKv':declared('attention.head_count_kv'),
+        'vocabSize':len(md.get('tokenizer.ggml.tokens',[])) if isinstance(md.get('tokenizer.ggml.tokens',[]),list) else None,
+        'tokenizerModel':md.get('tokenizer.ggml.model'),'tokenizerPre':md.get('tokenizer.ggml.pre'),
+        'hasChatTemplate':bool(md.get('tokenizer.chat_template')),'splitCount':md.get('split.count',1),
+        'declaredMetadataNotVerified':True,'textInferenceVerified':False,'nativeValidated':False,
+        'modalities':{'textCandidate':bool(row and row['emberTextCandidate']),'image':False,'audio':False,'video':False},
+        'backend':{'name':'llama.cpp','tag':caps['tag'],'commit':caps['commit'],'device':'CPU'},
+        'memoryNote':'Tensor bytes are not total resident memory; graph state/KV/runtime working sets require native allocation'}
 
 
 def describe_incompatible_bytes(head: bytes, *, name: str = "model") -> str:
@@ -709,6 +736,73 @@ def describe_incompatible_bytes(head: bytes, *, name: str = "model") -> str:
     if len(head) >= 2 and head[:2] == b"\x1f\x8b":
         return f"{name}: this is a gzip stream, not a GGUF model."
     return f"{name}: not a GGUF file (bad magic {head[:4]!r})"
+
+
+from functools import lru_cache
+
+@lru_cache(maxsize=1)
+def _runtime_manifest():
+    # Tensor layouts are generated from upstream GGUF constants; architecture
+    # decisions use the loaded native binary whenever it is available.
+    return json.loads(Path(__file__).with_name("runtime_capabilities.json").read_text())
+
+
+def _inspect_imported_model(path,size,header):
+    from .inference import get_engine
+    engine=get_engine()
+    native=engine.available()
+    caps=engine.capabilities() if native else _runtime_manifest()
+    entry=next((r for r in caps["architectures"] if r["architecture"]==header.arch),None)
+    if not entry or not entry["nativeLoaderImplemented"]:
+        raise GgufExportError(f"architecture-recognition: {path.name}: architecture {header.arch!r} has no upstream loader in llama.cpp {caps['tag']} ({caps['commit']})")
+    if not entry["emberTextCandidate"]:
+        raise GgufExportError(f"generation-interface: architecture {header.arch!r}: {entry['limitation']}")
+    if not header.tensors:
+        raise GgufExportError(f"architecture {header.arch!r}: GGUF has no tensors; metadata inspection is not native validation")
+    md=header.metadata;arch=header.arch
+    for suffix in ("block_count","embedding_length","context_length"):
+        value=md.get(arch+"."+suffix)
+        if not isinstance(value,int) or isinstance(value,bool) or value<=0:
+            raise GgufExportError(f"metadata-structure: architecture {arch!r} requires positive integer {arch}.{suffix}")
+    if md[arch+".block_count"]>caps["limits"]["maxLayers"]:
+        raise GgufExportError(f"metadata-structure: block_count exceeds compiled upstream maximum {caps['limits']['maxLayers']}")
+    experts=md.get(arch+".expert_count",0)
+    if not isinstance(experts,int) or experts<0 or experts>caps["limits"]["maxExperts"]:
+        raise GgufExportError("metadata-structure: expert_count outside compiled upstream bounds")
+    used=md.get(arch+".expert_used_count",0)
+    used=used if isinstance(used,list) else [used]
+    if any(not isinstance(v,int) or v<0 or v>experts for v in used) or (experts>1 and not any(used)):
+        raise GgufExportError("metadata-structure: expert_used_count must select existing experts (scalar or per-layer array)")
+    if any(len(t.dims)>caps["limits"]["tensorDimensions"] for t in header.tensors):
+        raise GgufExportError("metadata-structure: tensor dimensions exceed compiled ggml maximum")
+    tokens=md.get("tokenizer.ggml.tokens",[])
+    if not isinstance(tokens,list) or not tokens or not md.get("tokenizer.ggml.model"):
+        raise GgufExportError("tokenizer-metadata: text inference requires vocabulary/tokenizer metadata; native loading has not succeeded")
+    def scalar(key,default=0):
+        value=md.get(arch+"."+key,default)
+        return int(value) if isinstance(value,(int,float)) and not isinstance(value,bool) else default
+    result={"path":str(path),"bytes":size,"format":"gguf","ggufVersion":header.version,"byteOrder":header.byte_order,
+        "arch":arch,"emberFormat":"","legacy":True,"name":str(md.get("general.name",path.stem)),
+        "contextLength":scalar("context_length"),"embeddingLength":scalar("embedding_length"),
+        "blockCount":scalar("block_count"),"headCount":scalar("attention.head_count"),
+        "headCountKv":scalar("attention.head_count_kv",scalar("attention.head_count")),
+        "feedForwardLength":scalar("feed_forward_length"),"vocabSize":len(tokens),
+        "tensorCount":len(header.tensors),"quantizedTensors":[t.name for t in header.tensors if t.dtype!=GGML_F32],
+        "tensorTypes":sorted({str(t.dtype) for t in header.tensors}),
+        "bosTokenId":int(md.get("tokenizer.ggml.bos_token_id",-1)),
+        "eosTokenId":int(md.get("tokenizer.ggml.eos_token_id",-1)),
+        "tokenizerModel":str(md.get("tokenizer.ggml.model","")),"tokenizerPre":str(md.get("tokenizer.ggml.pre","")),
+        "chatTemplate":str(md.get("tokenizer.chat_template","")),"parameters":sum(math.prod(t.dims) for t in header.tensors),
+        "fileType":int(md.get("general.file_type",0)),"family":arch,
+        "hyperparameters":{k:v for k,v in md.items() if k.startswith(arch+".")},
+        "runtime":{k:caps[k] for k in ("tag","commit")},"runtimeCapabilitiesAvailable":native,
+        "modelKind":entry["modelKind"],"multimodal":entry["multimodal"],
+        "estimatedWeightBytes":sum(t.nbytes for t in header.tensors),
+        "estimatedKvBytesPerToken":None,"estimatedMemory2048":None,
+        "memoryEstimateNote":"Weight bytes only. Hybrid/recurrent/MoE/context working sets are allocated/validated by upstream; architecture support is not a mobile RAM guarantee.",
+        "compatibility":"structural preflight only; native load/context/tokenizer/first-token checks pending",
+        "validationStage":"metadata-parsed","nativeValidated":False,"textInferenceVerified":False,"valid":True}
+    return result
 
 
 def _validate_gguf_file(path: str | Path) -> dict[str, Any]:
@@ -733,11 +827,11 @@ def _validate_gguf_file(path: str | Path) -> dict[str, Any]:
         raise GgufExportError(f"{p.name} is only {size} bytes — too small to be a language model")
 
     header = read_gguf_header(p)
-    if header.arch not in ("llama", "qwen2", "qwen3"):
-        raise GgufExportError(
-            f"{p.name}: architecture {header.arch!r} is not supported by this Ember build "
-            f"(supported dense architectures: llama, qwen2 [including Qwen2.5], qwen3)"
-        )
+    _require_native_container(header)
+    if EMBER_FORMAT_KEY not in header.metadata:
+        return _inspect_imported_model(p,size,header)
+    if header.arch != "llama":
+        raise GgufExportError("Ember training exports must use the Llama graph; pretrained inference is a separate path")
 
     md = header.metadata
     arch=header.arch

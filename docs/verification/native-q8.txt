@@ -1,0 +1,5 @@
+  failure paths: ok
+  non-GGUF rejection: ok
+  truncated-file rejection: ok
+  model lifecycle + generation: ok
+All llama.cpp native inference tests passed.

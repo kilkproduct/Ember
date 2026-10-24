@@ -53,7 +53,7 @@ jobs:
       - name: Install Python backend dependencies
         run: |
           python3 -m pip install --upgrade pip
-          python3 -m pip install -r requirements.txt
+          python3 -m pip install -r requirements.txt pyarrow==23.0.1
 
       - name: Fetch pinned llama.cpp source (SHA-256 verified)
         run: scripts/fetch-llama-cpp.sh
@@ -71,13 +71,18 @@ jobs:
           ./native/build-llama/test_llama_engine /tmp/test-q8.gguf /tmp/not-gguf.emb
           echo "EMBER_LLAMA_LIB=$EMBER_LLAMA_LIB" >> "$GITHUB_ENV"
 
+      - name: Verify generated capabilities and execute architecture report
+        run: |
+          python3 scripts/generate-runtime-capabilities.py --json ember/runtime_capabilities.json --check
+          python3 scripts/verify-runtime-architectures.py --output docs/verification/architecture-host.json
+
       - name: Run Python backend & Python-to-C++ interoperability tests
         run: |
           set -o pipefail
           # Covers ember/* unit + integration tests, Python↔C++ tokenizer/logit/
           # decoding parity, the Android (Kotlin) JSON wire contract, and the
           # browser client contract (module exports, element ids, RPC methods).
-          pytest -v tests/ 2>&1 | tee /tmp/pytest.log
+          pytest -v tests/ --junitxml=/tmp/gguf-test-results.xml 2>&1 | tee /tmp/pytest.log
 
       - name: Report Python test failures
         if: failure()
@@ -195,7 +200,7 @@ jobs:
         working-directory: android
         run: |
           set -o pipefail
-          gradle testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
+          gradle testDebugUnitTest assembleDebug --no-daemon --stacktrace 2>&1 | tee /tmp/gradle.log
 
       - name: Report Android unit test failures
         if: failure()
@@ -255,30 +260,20 @@ jobs:
               print("::error::"+text.replace('%','%25').replace('\n','%0A'))
           PYLINT
 
-      - name: Measure baseline APK from exact pre-overhaul commit
+      - name: Verify and name the single universal signed APK
         run: |
-          git fetch origin 412f8c1c6a26440d1d1043e429a534d7e1fc5751
-          mkdir -p /tmp/ember-baseline
-          git archive 412f8c1c6a26440d1d1043e429a534d7e1fc5751 | tar -x -C /tmp/ember-baseline
-          ln -s "$PWD/third_party/llama.cpp" /tmp/ember-baseline/third_party/llama.cpp
-          gradle -p /tmp/ember-baseline/android assembleDebug --no-daemon
-          python scripts/apk_metrics.py /tmp/ember-baseline/android/app/build/outputs/apk/debug/app-debug.apk > baseline-apk-metrics.json
-
-      - name: Name the APKs and record measured package sizes
-        run: |
-          cp android/app/build/outputs/apk/debug/app-universal-debug.apk Ember-debug.apk
-          cp android/app/build/outputs/apk/debug/app-arm64-v8a-debug.apk Ember-arm64-v8a-debug.apk
-          cp android/app/build/outputs/apk/debug/app-x86_64-debug.apk Ember-x86_64-debug.apk
-          python scripts/apk_metrics.py Ember-debug.apk Ember-arm64-v8a-debug.apk Ember-x86_64-debug.apk > apk-metrics.json
-          python - <<'PYMETRICS'
-          import json
-          for r in json.load(open('baseline-apk-metrics.json')) + json.load(open('apk-metrics.json')):
-              print(f"::notice::{r['apk']}: APK {r['bytes']} bytes, native libraries {r['nativeBytes']} bytes")
-          PYMETRICS
+          set -euo pipefail
+          test "$(find android/app/build/outputs/apk -name '*.apk' | wc -l)" -eq 1
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
+          cp "$APK" Ember-universal-signed.apk
+          python scripts/apk_metrics.py Ember-universal-signed.apk > apk-metrics.json
+          echo "::notice::Universal arm64-v8a + x86_64 APK is development/debug signed using the cached stable debug keystore; NOT a production release."
 
       - name: Verify APK native libraries, Python runtime, and packaged assets
         run: |
-          unzip -l Ember-debug.apk > /tmp/apk-contents.txt
+          unzip -l Ember-universal-signed.apk > /tmp/apk-contents.txt
           problems=""
 
           # 1. Verify compiled C++ NDK inference engine + Chaquopy CPython runtime across ABIs
@@ -295,8 +290,9 @@ jobs:
           done
 
           # 2. Verify our real Python backend package (ember/*) is compiled inside assets/chaquopy/app.imy
-          unzip -p Ember-debug.apk assets/chaquopy/app.imy > /tmp/app.imy
+          unzip -p Ember-universal-signed.apk assets/chaquopy/app.imy > /tmp/app.imy
           unzip -l /tmp/app.imy > /tmp/app-imy.txt
+          grep -q "ember/runtime_capabilities.json" /tmp/app-imy.txt || problems="$problems missing:runtime_capabilities.json"
           for pyc in ember/backend ember/model ember/trainer ember/tokenizer ember/corpus ember/ingest ember/dataset ember/optim ember/inference ember/gguf_export ember/gpt2_tokenizer ember/spec; do
             grep -q "$pyc" /tmp/app-imy.txt || problems="$problems missing_py:$pyc"
           done
@@ -316,7 +312,7 @@ jobs:
             grep -q " $f$" /tmp/apk-contents.txt && problems="$problems obsolete_packaged:$f"
           done
 
-          size=$(du -h Ember-debug.apk | cut -f1)
+          size=$(du -h Ember-universal-signed.apk | cut -f1)
           so_count=$(grep -c " lib/.*\.so$" /tmp/apk-contents.txt || true)
           echo "::notice::APK $size · $so_count native .so libraries · $([ -z "$problems" ] && echo verified-ok || echo "$problems")"
           if [ -n "$problems" ]; then
@@ -328,12 +324,23 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Ember-debug
-          path: |
-            Ember-debug.apk
-            Ember-arm64-v8a-debug.apk
-            Ember-x86_64-debug.apk
-            apk-metrics.json
-            baseline-apk-metrics.json
+          name: Ember-universal-signed
+          path: Ember-universal-signed.apk
           if-no-files-found: error
           retention-days: 30
+
+      # Instrumentation requires a second (test) APK, deliberately not built
+      # under the universal-only artifact requirement. The historical SAF
+      # emulator grant-harness failure remains unverified, not reported as fixed.
+      - name: Upload test and compatibility evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-test-results
+          path: |
+            android/app/build/test-results/
+            docs/verification/architecture-host.json
+            /tmp/pytest.log
+            /tmp/gguf-test-results.xml
+            apk-metrics.json
+          if-no-files-found: warn

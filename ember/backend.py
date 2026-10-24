@@ -15,7 +15,7 @@ import numpy as np
 
 from .corpus import Corpus
 from .forager import Forager
-from .gguf_export import EMBER_MODEL_FORMAT, GgufExportError, validate_gguf_file
+from .gguf_export import EMBER_MODEL_FORMAT, GgufExportError, validate_gguf_file, inspect_gguf_file
 from .ingest import ImportManager
 from .inference import EngineConfig, InferenceError, get_engine
 from .model import FORMAT_MAGIC
@@ -243,6 +243,9 @@ class EmberBackend:
         if method == "ping":
             return {"pong": True, "ready": True, "at": int(time.time() * 1000)}
 
+        if method == "runtime.capabilities":
+            return get_engine().capabilities()
+
         if method == "runtime.info":
             engine = get_engine()
             return {
@@ -254,6 +257,7 @@ class EmberBackend:
                 "inferenceBackend": "llama.cpp",
                 "nativeAvailable": engine.available(),
                 "nativeInfo": engine.backend_info(),
+                "capabilitiesMethod": "runtime.capabilities",
                 "nativeError": engine.load_error,
                 "modelFormat": EMBER_MODEL_FORMAT,
                 "app": "ember-v3",
@@ -439,6 +443,7 @@ class EmberBackend:
                 subreddit=str(p.get("subreddit") or ""),
             )
             try:
+                self.trainer.require_selected_source_available()
                 if self.trainer._imported_gguf is None:
                     self.trainer.sync_gguf()
                 gguf_path = self.trainer.inference_model_path
@@ -529,6 +534,9 @@ class EmberBackend:
             return {"cancelled": True}
 
         # -- Native model management (llama.cpp / GGUF) -------------------
+        if method == "model.inspect":
+            return inspect_gguf_file(str(p.get("path") or self.trainer.inference_model_path or ""))
+
         if method == "model.info":
             engine = get_engine()
             payload: dict[str, Any] = {"inference": self.trainer.inference_status()}
@@ -536,7 +544,7 @@ class EmberBackend:
                 payload["model"] = engine.model_info().to_dict()
             if str(p.get("path") or ""):
                 try:
-                    payload["file"] = validate_gguf_file(str(p["path"]))
+                    payload["file"] = inspect_gguf_file(str(p["path"]))
                 except Exception as exc:
                     payload["file"] = {"valid": False, "error": str(exc)}
             return payload
@@ -565,6 +573,9 @@ class EmberBackend:
         if method == "model.unregisterExternal":
             return self.trainer.unregister_external_model(str(p["uri"]))
 
+        if method == "model.restoreExternalRegistration":
+            return self.trainer.restore_external_registration(str(p["uri"]),str(p.get("name","External model")))
+
         if method == "model.registerExternal":
             return self.trainer.register_external_model(str(p["path"]),str(p["uri"]),str(p.get("name","External model")),bool(p.get("select",True)))
 
@@ -574,7 +585,14 @@ class EmberBackend:
                 raise ValueError("Missing staged model path for import.")
             source=Path(src)
             staged=bool(p.get("token")) and source.parent.resolve()==(self.data_dir.parent/"imports").resolve() and source.name.startswith(str(p["token"])+".")
-            return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False,staged=staged)
+            model_id=str(p.get("modelStagingId") or "")
+            if model_id:
+                if not (len(model_id)==32 and model_id.isalnum() and source.parent.resolve()==(self.data_dir.parent/"model_staging").resolve() and source.name==model_id+".gguf"):
+                    raise ValueError("Invalid private model staging identity/path")
+                staged=True
+            return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False,staged=staged,
+                config=EngineConfig(n_ctx=int(p.get("nCtx",EngineConfig.n_ctx)),n_batch=int(p.get("nBatch",256)),
+                    n_ubatch=int(p.get("nUbatch",64)),n_threads=int(p.get("nThreads",0)),use_mmap=p.get("useMmap") is not False))
 
         if method == "model.exportGguf":
             if not self.trainer.ready:

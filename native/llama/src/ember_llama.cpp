@@ -11,6 +11,7 @@
 #include "ember_llama.h"
 
 #include "llama.h"
+#include "runtime_capabilities.h"
 #include "gguf.h"
 #include <fstream>
 #include <limits>
@@ -62,15 +63,17 @@ uint64_t admission_bytes(const char* path, int requested_ctx, int batch) {
         return fallback;
     };
     const auto arch=str("general.architecture");
-    if(arch!="llama" && arch!="qwen2" && arch!="qwen3")return 0;
+    uint64_t weights=0;
+    for(int64_t i=0;i<gguf_get_n_tensors(g.get());++i)weights+=gguf_get_tensor_size(g.get(),i);
+    // Foreign model state/working sets are graph-specific, especially SSM/MoE.
+    // Only the known Ember export graph has a pre-allocation KV estimate.
+    if(str("ember.format_version").empty())return weights+96ULL*1024*1024;
     const auto c=integer(arch+".embedding_length",0),heads=integer(arch+".attention.head_count",0);
     const auto layers=integer(arch+".block_count",0),kv=integer(arch+".attention.head_count_kv",heads);
     if(!c || !heads || !layers || c>65536 || heads>1024 || layers>1024 || kv>1024)return 0;
     const auto kd=integer(arch+".attention.key_length",c/heads),vd=integer(arch+".attention.value_length",kd);
     if(kd>65536 || vd>65536)return 0;
-    const auto ctx=std::min(uint64_t(requested_ctx),integer(arch+".context_length",requested_ctx));
-    uint64_t weights=0;
-    for(int64_t i=0;i<gguf_get_n_tensors(g.get());++i)weights+=gguf_get_tensor_size(g.get(),i);
+    const auto ctx=uint64_t(requested_ctx);
     // F32 K/V, intermediate tensors/logits, graph, tokenizer and runtime reserve.
     return weights+ctx*layers*kv*(kd+vd)*4+uint64_t(batch)*c*layers*16+96ULL*1024*1024;
 }
@@ -85,12 +88,19 @@ bool g_backend_ok = false;
 std::mutex g_log_mu;
 std::deque<std::string> g_logs;
 constexpr size_t kMaxLogs = 60;
+// Error details from the upstream loader on the calling thread. Keep the
+// actual tensor/tokenizer/backend failure, not just a generic wrapper error.
+thread_local std::string g_load_errors;
 
 void llama_log_sink(enum ggml_log_level level, const char* text, void* /*user*/) {
     if (!text) return;
     std::string line(text);
     while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
     if (line.empty()) return;
+    if (level == GGML_LOG_LEVEL_ERROR) {
+        g_load_errors += line + "\n";
+        if (g_load_errors.size() > 8192) g_load_errors.erase(0, g_load_errors.size()-8192);
+    }
     std::lock_guard<std::mutex> lock(g_log_mu);
     g_logs.emplace_back(line);
     if (g_logs.size() > kMaxLogs) {
@@ -365,6 +375,7 @@ EMBER_API int ember_llama_load(
     engine->cancel.store(false, std::memory_order_relaxed);
     release_locked(engine);
     engine->clear_error();
+    g_load_errors.clear();
 
     // Validate the file exists before handing it to llama.cpp so the message is
     // honest and local ("file missing") instead of a generic load failure.
@@ -410,7 +421,7 @@ EMBER_API int ember_llama_load(
     const uint64_t available=available_memory_bytes();
     if(required && available && required>available*8/10) {
         engine->set_error(EMBER_LLAMA_ERR_OUT_OF_MEMORY,
-            "Model + F32 KV/context working-set estimate " + std::to_string(required/(1024*1024)) +
+            "Conservative memory admission (foreign: weights + reserve only; Ember exports: F32 KV/working set) " + std::to_string(required/(1024*1024)) +
             " MiB exceeds 80% of currently available system memory (" + std::to_string(available/(1024*1024)) +
             " MiB). Choose a smaller quantized model, context or batch.");
         return engine->code;
@@ -436,15 +447,31 @@ EMBER_API int ember_llama_load(
             engine->set_error(EMBER_LLAMA_ERR_MODEL_INVALID,
                               std::string("llama.cpp could not load this local model") +
                               ". The file may be corrupt, truncated, quantized in an unsupported way, "
-                              "or use an architecture this build does not include.");
+                              "or use an architecture this build does not include. Upstream: " + g_load_errors);
         }
         return engine->code;
     }
 
+    const auto loaded_arch=model_meta(model,"general.architecture");
+    for (const auto & entry:kEmberArchInterfaces) {
+        if (loaded_arch==entry.name && !entry.text) {
+            engine->set_error(EMBER_LLAMA_ERR_MODEL_INCOMPAT,std::string("generation-interface: ")+entry.reason);
+            return engine->code;
+        }
+    }
     const llama_vocab* vocab = llama_model_get_vocab(model);
+    if (!vocab || llama_vocab_n_tokens(vocab)<=0) {
+        engine->set_error(EMBER_LLAMA_ERR_TOKENIZE,"tokenizer-initialization: upstream returned no text vocabulary");
+        return engine->code;
+    }
+    if (!llama_model_has_decoder(model) || llama_model_is_diffusion(model)) {
+        engine->set_error(EMBER_LLAMA_ERR_MODEL_INCOMPAT,"generation-interface: encoder-only/diffusion model cannot use Ember's autoregressive text API");
+        return engine->code;
+    }
     const int32_t n_ctx_train = llama_model_n_ctx_train(model);
-    if (n_ctx_train > 0 && cfg.n_ctx > n_ctx_train) {
-        cfg.n_ctx = n_ctx_train;  // never exceed the trained context
+    if (loaded_arch=="gpt2" && n_ctx_train>0 && cfg.n_ctx>n_ctx_train) {
+        engine->set_error(EMBER_LLAMA_ERR_ARGS,"context-configuration: requested context exceeds GPT-2 learned positional embeddings; explicitly select context <= "+std::to_string(n_ctx_train));
+        return engine->code;
     }
 
     llama_context_params cp = llama_context_default_params();
@@ -458,6 +485,10 @@ EMBER_API int ember_llama_load(
     cp.n_ubatch = static_cast<uint32_t>(cfg.n_ubatch);
     cp.n_threads = cfg.n_threads;
     cp.n_threads_batch = cfg.n_threads;
+    cp.abort_callback=[](void* data)->bool {
+        return static_cast<ember_llama_t*>(data)->cancel.load(std::memory_order_relaxed);
+    };
+    cp.abort_callback_data=engine;
 
     std::unique_ptr<llama_context, decltype(&llama_free)> ctx_owner(
         llama_init_from_model(model, cp), llama_free);
@@ -465,7 +496,7 @@ EMBER_API int ember_llama_load(
     if (!ctx) {
         engine->set_error(EMBER_LLAMA_ERR_CONTEXT,
                           "Could not allocate a generation context for n_ctx=" + std::to_string(cfg.n_ctx) +
-                          ". Try a shorter context length — the model plus KV cache does not fit in memory.");
+                          ". Upstream context initialization: " + g_load_errors);
         return engine->code;
     }
 
@@ -486,11 +517,9 @@ EMBER_API int ember_llama_load(
     engine->ctx = ctx_owner.release();
     engine->vocab = vocab;
     engine->cfg = cfg;
-    // llama_n_ctx() can be rounded up past the trained context. For a learned
-    // positional embedding model (gpt2) that would index rows beyond
-    // position_embd, so the generation limit is clamped to what was trained.
-    const int32_t runtime_ctx = static_cast<int32_t>(llama_n_ctx(ctx));
-    engine->n_ctx = (n_ctx_train > 0) ? std::min(runtime_ctx, n_ctx_train) : runtime_ctx;
+    // Upstream may pad allocations up. The user's requested logical limit is
+    // preserved, never silently reduced to the training context.
+    engine->n_ctx = cfg.n_ctx;
     engine->n_batch = cfg.n_batch;
     engine->suppress = std::move(suppress);
     engine->model_path = model_path;
@@ -565,12 +594,17 @@ EMBER_API int ember_llama_model_info(const ember_llama_t* engine, char* json_out
         << ",\"arch\":" << "\"" << json_escape(model_meta(engine->model, "general.architecture")) << "\""
         << ",\"name\":" << "\"" << json_escape(model_meta(engine->model, "general.name")) << "\""
         << ",\"emberFormat\":" << "\"" << json_escape(model_meta(engine->model, "ember.format_version")) << "\""
+        << ",\"hasEncoder\":" << (llama_model_has_encoder(engine->model)?"true":"false")
+        << ",\"recurrent\":" << (llama_model_is_recurrent(engine->model)?"true":"false")
+        << ",\"hybrid\":" << (llama_model_is_hybrid(engine->model)?"true":"false")
+        << ",\"textOnly\":true"
         << ",\"vocabSize\":" << llama_vocab_n_tokens(engine->vocab)
         << ",\"parameters\":" << llama_model_n_params(engine->model)
         << ",\"microBatch\":" << engine->cfg.n_ubatch
         << ",\"hasChatTemplate\":" << (llama_model_chat_template(engine->model,nullptr) ? "true":"false")
         << ",\"nCtxTrain\":" << llama_model_n_ctx_train(engine->model)
         << ",\"nCtx\":" << engine->n_ctx
+        << ",\"allocatedCtx\":" << llama_n_ctx(engine->ctx)
         << ",\"nBatch\":" << engine->n_batch
         << ",\"nThreads\":" << engine->cfg.n_threads
         << ",\"nGpuLayers\":" << engine->cfg.n_gpu_layers
@@ -720,7 +754,8 @@ EMBER_API int ember_llama_generate(
 
     const auto t_start = std::chrono::steady_clock::now();
     std::string warning;
-    if (engine->requested_ctx != engine->n_ctx) warning="Requested context was clamped to the model's native training limit. ";
+    if (llama_model_n_ctx_train(engine->model)>0 && engine->n_ctx>llama_model_n_ctx_train(engine->model))
+        warning="Requested context exceeds training context; configuration preserved, extrapolation quality is not verified. ";
     std::string stopped_by = "length";
     int result_code = EMBER_LLAMA_OK;
 
@@ -789,6 +824,27 @@ EMBER_API int ember_llama_generate(
     double prompt_ms = 0.0;
     const auto t_prompt = std::chrono::steady_clock::now();
     size_t decoded = 0;
+    if (llama_model_has_encoder(engine->model)) {
+        if (model_meta(engine->model,"general.architecture") != "t5") {
+            engine->set_error(EMBER_LLAMA_ERR_MODEL_INCOMPAT,"prompt-preparation: this encoder/draft model requires a target/auxiliary pipeline not implemented by Ember");
+            write_error_json(json_out,max_json,engine->code,engine->err);
+            return engine->code;
+        }
+        if (prompt_ids.size()>size_t(engine->n_batch)) {
+            engine->set_error(EMBER_LLAMA_ERR_ARGS,"encoder-prompt: input exceeds configured batch; increase batch or shorten encoder input");
+            write_error_json(json_out,max_json,engine->code,engine->err);
+            return engine->code;
+        }
+        const auto encoded=llama_encode(engine->ctx,llama_batch_get_one(prompt_ids.data(),int(prompt_ids.size())));
+        auto start=llama_model_decoder_start_token(engine->model);
+        if (start==LLAMA_TOKEN_NULL) start=llama_vocab_bos(engine->vocab);
+        if (encoded!=0 || start==LLAMA_TOKEN_NULL) {
+            engine->set_error(EMBER_LLAMA_ERR_DECODE,"encoder-prompt: llama_encode failed or no decoder start token. Upstream: "+g_load_errors);
+            write_error_json(json_out,max_json,engine->code,engine->err);
+            return engine->code;
+        }
+        prompt_ids.assign(1,start);
+    }
     while (decoded < prompt_ids.size()) {
         if (engine->cancel.load(std::memory_order_relaxed)) {
             stopped_by = "cancelled";
@@ -798,6 +854,9 @@ EMBER_API int ember_llama_generate(
         const size_t chunk = std::min<size_t>(static_cast<size_t>(engine->n_batch), prompt_ids.size() - decoded);
         llama_batch batch = llama_batch_get_one(prompt_ids.data() + decoded, static_cast<int32_t>(chunk));
         const int32_t rc = llama_decode(engine->ctx, batch);
+        if (rc == 2 && engine->cancel.load(std::memory_order_relaxed)) {
+            stopped_by="cancelled";result_code=EMBER_LLAMA_ERR_CANCELLED;break;
+        }
         if (rc != 0) {
             std::ostringstream msg;
             msg << "Prompt evaluation failed (llama_decode returned " << rc << ").";
@@ -898,6 +957,11 @@ EMBER_API int ember_llama_generate(
                 }
             }
 
+            if (engine->cancel.load(std::memory_order_relaxed)) {
+                stopped_by="cancelled";
+                result_code=EMBER_LLAMA_ERR_CANCELLED;
+                break;
+            }
             // Stop before decoding a token we will never sample from.
             if (i + 1 >= p.max_tokens) break;
 
@@ -906,6 +970,9 @@ EMBER_API int ember_llama_generate(
             if (n_past >= n_ctx - 1) { n_past = n_ctx; continue; }
             llama_batch step = llama_batch_get_one(&generated.back(), 1);
             const int32_t rc = llama_decode(engine->ctx, step);
+            if (rc == 2 && engine->cancel.load(std::memory_order_relaxed)) {
+                stopped_by="cancelled";result_code=EMBER_LLAMA_ERR_CANCELLED;break;
+            }
             if (rc != 0) {
                 engine->set_error(EMBER_LLAMA_ERR_DECODE,
                                   "Token evaluation failed (llama_decode returned " + std::to_string(rc) + ").");
@@ -1020,6 +1087,10 @@ EMBER_API int ember_llama_logs(char* out_json, size_t max_bytes) {
     std::memcpy(out_json, payload.data(), payload.size());
     out_json[payload.size()] = '\0';
     return EMBER_LLAMA_OK;
+}
+
+EMBER_API const char* ember_llama_capabilities(void) {
+    return kEmberRuntimeCapabilities;
 }
 
 EMBER_API const char* ember_llama_backend_info(void) {

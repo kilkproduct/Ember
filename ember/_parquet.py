@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import gzip
 import io
+import mmap
+from itertools import zip_longest
 import struct
 from typing import Iterator
 
@@ -114,7 +116,7 @@ def decompress_snappy(data: bytes) -> bytes:
 
 class _ThriftReader:
     def __init__(self, buf: memoryview | bytes, offset: int = 0) -> None:
-        self.buf = memoryview(buf)
+        self.buf = buf
         self.pos = offset
 
     def read_u8(self) -> int:
@@ -256,145 +258,183 @@ def _read_plain_byte_arrays(buf: bytes, count: int) -> list[str]:
     out: list[str] = []
     for _ in range(count):
         if pos + 4 > n:
-            break
+            raise ValueError("Truncated Parquet BYTE_ARRAY length")
         ln = struct.unpack_from("<I", buf, pos)[0]
         pos += 4
         if pos + ln > n:
             raise ValueError("Truncated Parquet BYTE_ARRAY value")
-        out.append(buf[pos : pos + ln].decode("utf-8", errors="replace"))
+        out.append(buf[pos : pos + ln].decode("utf-8", errors="strict"))
         pos += ln
     return out
 
 
-def iter_parquet_rows(data: bytes) -> tuple[list[str], Iterator[dict[str, str]]]:
-    """Read string columns from a Parquet byte buffer without PyArrow when possible,
-    using PyArrow if available for exotic encodings and falling back to our pure
-    Python reader anywhere (including Android)."""
-    if len(data) < 12 or data[:4] != b"PAR1" or data[-4:] != b"PAR1":
-        raise ValueError("Invalid or truncated Parquet file (missing PAR1 magic bytes).")
+class ParquetFile:
+    """Seekable, projected page-at-a-time reader for flat UTF-8 Parquet columns.
 
-    # Fast path if pyarrow happens to be installed on desktop/CI — wait: validate
-    # identical output with pure-Python fallback so Android path is always exercised too!
-    footer_len = struct.unpack_from("<I", data, len(data) - 8)[0]
-    footer_start = len(data) - 8 - footer_len
-    if footer_start < 4:
-        raise ValueError("Truncated Parquet footer.")
+    mmap reserves address space, not a Python byte array. Each column iterator
+    retains at most its dictionary and one decoded page, never a row group.
+    Unsupported schemas/encodings fail explicitly instead of yielding blank text.
+    The caller must close the row iterator before closing this file.
+    """
+    def __init__(self, path=None, *, data=None, columns=None):
+        self._mapped = path is not None
+        if self._mapped:
+            with open(path, "rb") as source:
+                if source.seek(0, 2) < 12:
+                    raise ValueError("Invalid or truncated Parquet file")
+                self.data = mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ)
+        else:
+            self.data = data
+        self.bytes_read = 0
+        self.row_groups_processed = 0
+        try:
+            d = self.data
+            if len(d) < 12 or d[:4] != b"PAR1" or d[-4:] != b"PAR1":
+                raise ValueError("Invalid or truncated Parquet file (missing PAR1 magic bytes).")
+            footer_len = struct.unpack_from("<I", d, len(d)-8)[0]
+            self.footer_start = len(d)-8-footer_len
+            if self.footer_start < 4:
+                raise ValueError("Truncated Parquet footer")
+            # Decode footer only; do not copy the file into an intermediate container.
+            meta = _ThriftReader(d[self.footer_start:len(d)-8]).read_struct()
+            self.bytes_read = footer_len + 12
+            self.row_groups = meta.get(4, [])
+            self.num_rows = int(meta.get(3, 0))
+            if self.num_rows < 0 or any(int(rg.get(3, 0)) < 0 for rg in self.row_groups) or sum(int(rg.get(3, 0)) for rg in self.row_groups) != self.num_rows:
+                raise ValueError("Parquet footer row count does not match its row groups")
+            schema = meta.get(2, [])
+            self.columns = []
+            for idx, elem in enumerate(schema[1:]):
+                if elem.get(5, 0) or elem.get(3, 0) == 2:
+                    raise ValueError("Unsupported nested/repeated Parquet schema; flat scalar columns are required")
+                name = elem.get(4, b"")
+                name = name.decode("utf-8") if isinstance(name, bytes) else str(name)
+                if elem.get(1) == 6 and (columns is None or name in columns):
+                    self.columns.append((idx, name, int(elem.get(3, 0) == 1)))
+            self.column_names = [name for _, name, _ in self.columns]
+        except BaseException:
+            self.close()
+            raise
 
-    meta = _ThriftReader(data, footer_start).read_struct()
-    schema_elems: list[dict] = meta.get(2, [])  # type: ignore[assignment]
-    row_groups: list[dict] = meta.get(4, [])  # type: ignore[assignment]
+    def close(self):
+        if self._mapped and not self.data.closed:
+            self.data.close()
 
-    # Leaf columns in schema (skip root group element 0)
-    # Parquet Type: 6 = BYTE_ARRAY, 7 = FIXED_LEN_BYTE_ARRAY
-    leaf_cols: list[tuple[int, str, int, int]] = []  # (col_idx, name, ptype, max_def_level)
-    col_idx = 0
-    for elem in schema_elems[1:]:
-        if 5 in elem and elem[5]:  # num_children > 0 -> group node
-            continue
-        name = elem[4].decode("utf-8", errors="replace") if isinstance(elem.get(4), bytes) else str(elem.get(4, f"col_{col_idx}"))
-        ptype = int(elem.get(1, -1))
-        repetition = int(elem.get(3, 0))  # 0=REQUIRED, 1=OPTIONAL, 2=REPEATED
-        max_def = 1 if repetition == 1 else 0
-        leaf_cols.append((col_idx, name, ptype, max_def))
-        col_idx += 1
+    def __enter__(self):
+        return self
 
-    str_cols = [(idx, name, max_def) for idx, name, ptype, max_def in leaf_cols if ptype == 6]
-    col_names = [name for _, name, _ in str_cols]
-    if not str_cols:
-        return [], iter(())
+    def __exit__(self, *args):
+        self.close()
 
-    def _rows() -> Iterator[dict[str, str]]:
-        for rg in row_groups:
-            chunks: list[dict] = rg.get(1, [])  # type: ignore[assignment]
-            col_values: dict[str, list[str]] = {}
-            n_rows = int(rg.get(3, 0))
-            for idx, name, max_def in str_cols:
-                chunk = chunks[idx]
-                cmeta: dict = chunk.get(3, {})  # ColumnMetaData
-                codec = int(cmeta.get(4, 0))
-                total_vals = int(cmeta.get(5, n_rows))
-                data_off = int(cmeta.get(9, 0))
-                dict_off = cmeta.get(11)
-                pos = int(dict_off) if dict_off is not None and int(dict_off) > 0 else data_off
+    def _column(self, rg, idx, max_def):
+        d = self.data
+        chunk = rg.get(1, [])[idx]
+        if chunk.get(1):
+            raise ValueError("External Parquet column files are unsupported")
+        md = chunk.get(3, {})
+        codec = int(md.get(4, 0))
+        count = int(md.get(5, 0))
+        if count != int(rg.get(3, 0)):
+            raise ValueError("Parquet column/row count mismatch")
+        pos = int(md.get(11) or md.get(9, 0))
+        dictionary = None
+        emitted = 0
+        while emitted < count:
+            if not 4 <= pos < self.footer_start:
+                raise ValueError("Truncated Parquet column")
+            tr = _ThriftReader(d, pos)
+            ph = tr.read_struct()
+            header_size = tr.pos-pos
+            pos = tr.pos
+            size = int(ph.get(3, -1))
+            if size < 0 or pos+size > self.footer_start:
+                raise ValueError("Truncated Parquet column page")
+            raw = d[pos:pos+size]
+            pos += size
+            self.bytes_read += size + header_size
+            kind = int(ph.get(1, -1))
+            if kind == 2:
+                dh = ph.get(7, {})
+                if dh.get(2, 0) != 0:
+                    raise ValueError("Unsupported Parquet dictionary encoding")
+                dictionary = _read_plain_byte_arrays(_decompress_page(raw, codec), int(dh.get(1, 0)))
+                continue
+            if kind == 1:  # optional index page
+                continue
+            if kind not in (0, 3):
+                raise ValueError(f"Unsupported Parquet page type {kind}")
+            dh = ph.get(5 if kind == 0 else 8, {})
+            num = int(dh.get(1, 0))
+            if num <= 0 or emitted+num > count:
+                raise ValueError("Invalid Parquet page value count")
+            levels = None
+            if kind == 0:
+                page = _decompress_page(raw, codec)
+                offset = 0
+                encoding = int(dh.get(2, -1))
+                if max_def:
+                    if dh.get(3) != 3:
+                        raise ValueError("Unsupported Parquet definition-level encoding")
+                    length = struct.unpack_from("<I", page)[0]
+                    if 4+length > len(page):
+                        raise ValueError("Truncated Parquet definition levels")
+                    levels, _ = _decode_rle_hybrid(page[4:4+length], 1, num)
+                    offset = 4+length
+                body = page[offset:]
+            else:
+                # V2 levels are NOT compressed, unlike the value payload.
+                defs, reps = int(dh.get(5, 0)), int(dh.get(6, 0))
+                if reps or defs < 0 or defs > len(raw):
+                    raise ValueError("Invalid flat Parquet V2 levels")
+                if max_def:
+                    levels, _ = _decode_rle_hybrid(raw[:defs], 1, num)
+                body = raw[defs:]
+                if dh.get(7, True):
+                    body = _decompress_page(body, codec)
+                encoding = int(dh.get(4, -1))
+            if levels is not None and len(levels) != num:
+                raise ValueError("Truncated Parquet definition levels")
+            non_null = sum(v == max_def for v in levels) if levels is not None else num
+            if encoding == 0:
+                vals = _read_plain_byte_arrays(body, non_null)
+            elif encoding in (2, 8) and dictionary is not None:
+                if non_null:
+                    ids, _ = _decode_rle_hybrid(body[1:], body[0], non_null)
+                    if len(ids) != non_null or any(i >= len(dictionary) for i in ids):
+                        raise ValueError("Invalid Parquet dictionary index")
+                    vals = [dictionary[i] for i in ids]
+                else:
+                    vals = []
+            else:
+                raise ValueError(f"Unsupported Parquet value encoding {encoding}")
+            if len(vals) != non_null:
+                raise ValueError("Truncated Parquet values")
+            it = iter(vals)
+            for level in levels if levels is not None else range(num):
+                yield next(it) if levels is None or level == max_def else None
+            emitted += num
 
-                dictionary: list[str] | None = None
-                values: list[str] = []
-                while len(values) < total_vals and pos < footer_start:
-                    tr = _ThriftReader(data, pos)
-                    phdr = tr.read_struct()
-                    pos = tr.pos
-                    ptype = int(phdr.get(1, 0))
-                    comp_size = int(phdr.get(3, 0))
-                    if pos + comp_size > len(data):
-                        raise ValueError("Truncated Parquet column page")
-                    raw_page = data[pos : pos + comp_size]
-                    pos += comp_size
-                    page = _decompress_page(raw_page, codec)
+    def rows(self):
+        if not self.columns:
+            return
+        sentinel = object()
+        for rg in self.row_groups:
+            columns = [self._column(rg, idx, max_def) for idx, _, max_def in self.columns]
+            try:
+                n = 0
+                for values in zip_longest(*columns, fillvalue=sentinel):
+                    if any(v is sentinel for v in values):
+                        raise ValueError("Parquet columns have inconsistent row counts")
+                    n += 1
+                    yield dict(zip(self.column_names, values))
+                if n != int(rg.get(3, 0)):
+                    raise ValueError("Parquet row group count mismatch")
+                self.row_groups_processed += 1
+            finally:
+                for column in columns:
+                    column.close()
 
-                    if ptype == 2:  # DICTIONARY_PAGE
-                        dh = phdr.get(7, {})
-                        num_dict = int(dh.get(1, 0))
-                        dictionary = _read_plain_byte_arrays(page, num_dict)
-                    elif ptype == 0:  # DATA_PAGE v1
-                        dh = phdr.get(5, {})
-                        num_v = int(dh.get(1, 0))
-                        encoding = int(dh.get(2, 0))
-                        ppos = 0
-                        def_levels: list[int] | None = None
-                        if max_def > 0:
-                            rle_len = struct.unpack_from("<I", page, ppos)[0]
-                            ppos += 4
-                            def_levels, _ = _decode_rle_hybrid(page[ppos : ppos + rle_len], 1, num_v)
-                            ppos += rle_len
-                        non_null = sum(1 for d in def_levels if d == max_def) if def_levels is not None else num_v
-                        if encoding == 0:  # PLAIN
-                            non_null_vals = _read_plain_byte_arrays(page[ppos:], non_null)
-                        elif encoding in (2, 8) and dictionary is not None:  # PLAIN_DICTIONARY / RLE_DICTIONARY
-                            bw = page[ppos]
-                            ppos += 1
-                            idxs, _ = _decode_rle_hybrid(page[ppos:], bw, non_null)
-                            non_null_vals = [dictionary[i] if 0 <= i < len(dictionary) else "" for i in idxs]
-                        else:
-                            non_null_vals = [""] * non_null
-                        if def_levels is not None:
-                            it = iter(non_null_vals)
-                            for dl in def_levels:
-                                values.append(next(it, "") if dl == max_def else "")
-                        else:
-                            values.extend(non_null_vals)
-                    elif ptype == 3:  # DATA_PAGE_V2
-                        dh = phdr.get(8, {})
-                        num_v = int(dh.get(1, 0))
-                        num_nulls = int(dh.get(2, 0))
-                        encoding = int(dh.get(4, 0))
-                        def_bytes = int(dh.get(5, 0))
-                        rep_bytes = int(dh.get(6, 0))
-                        is_compressed = bool(dh.get(7, True))
-                        ppos = rep_bytes
-                        def_levels = None
-                        if def_bytes > 0 and max_def > 0:
-                            def_levels, _ = _decode_rle_hybrid(raw_page[ppos : ppos + def_bytes], 1, num_v)
-                        ppos += def_bytes
-                        body_bytes = _decompress_page(raw_page[ppos:], codec) if is_compressed else raw_page[ppos:]
-                        non_null = num_v - num_nulls
-                        if encoding == 0:
-                            non_null_vals = _read_plain_byte_arrays(body_bytes, non_null)
-                        elif encoding in (2, 8) and dictionary is not None:
-                            bw = body_bytes[0]
-                            idxs, _ = _decode_rle_hybrid(body_bytes[1:], bw, non_null)
-                            non_null_vals = [dictionary[i] if 0 <= i < len(dictionary) else "" for i in idxs]
-                        else:
-                            non_null_vals = [""] * non_null
-                        if def_levels is not None:
-                            it = iter(non_null_vals)
-                            for dl in def_levels:
-                                values.append(next(it, "") if dl == max_def else "")
-                        else:
-                            values.extend(non_null_vals)
-                col_values[name] = values
 
-            for r in range(n_rows):
-                row_dict = {name: (col_values[name][r] if r < len(col_values[name]) else "") for name in col_names}
-                yield row_dict
-
-    return col_names, _rows()
+def iter_parquet_rows(data: bytes):
+    reader = ParquetFile(data=data)
+    return reader.column_names, reader.rows()

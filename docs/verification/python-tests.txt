@@ -1,0 +1,14 @@
+........................................................................ [ 44%]
+........................................................................ [ 88%]
+...................                                                      [100%]
+=============================== warnings summary ===============================
+tests/test_learning_verification.py::test_diverging_run_is_refused_instead_of_writing_nan_weights
+  /home/user/Ember/.venv/lib/python3.11/site-packages/numpy/_core/_methods.py:132: RuntimeWarning: overflow encountered in reduce
+    ret = umr_sum(arr, axis, dtype, out, keepdims, where=where)
+
+tests/test_learning_verification.py::test_diverging_run_is_refused_instead_of_writing_nan_weights
+  /home/user/Ember/ember/autodiff.py:68: RuntimeWarning: overflow encountered in multiply
+    r = (np.mean(x.data*x.data, axis=-1, keepdims=True)+eps)**-0.5
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+163 passed, 2 warnings in 9.99s

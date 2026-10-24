@@ -1,0 +1,10 @@
+{
+  "pass": true,
+  "actualNativeFailure": true,
+  "mocked": false,
+  "error": "first-token validation: This embedded chat template is not supported by pinned llama.cpp's built-in formatter.",
+  "errorName": "model-incompatible",
+  "libraryUnchanged": true,
+  "partialCleaned": true,
+  "engineUnloaded": true
+}

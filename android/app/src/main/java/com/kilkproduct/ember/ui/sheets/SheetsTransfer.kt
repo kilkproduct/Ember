@@ -96,7 +96,15 @@ fun ImportSheet(
         }
 
         if (ui.importBusy && preview == null) {
-            LoadingRow("Copying the selected file into private storage and inspecting it…")
+            if (progress != null) {
+                ProgressBlock(
+                    fraction = Float.NaN,
+                    label = progress.stageLabel,
+                    detail = progressLine(progress),
+                    onCancel = onCancelRun,
+                    cancelLabel = "Stop",
+                )
+            } else LoadingRow("Copying the selected file into private storage and inspecting it…")
             return@SheetFrame
         }
 
@@ -248,7 +256,14 @@ private fun progressLine(progress: ImportProgress): String {
     if (progress.merged > 0) parts += "${Formats.integer(progress.merged)} merged"
     if (progress.skipped > 0) parts += "${Formats.integer(progress.skipped)} skipped"
     if (progress.failed > 0) parts += "${Formats.integer(progress.failed)} failed"
-    if(progress.byteBasis=="decompressed") {
+    if (progress.duplicates > 0) parts += "${Formats.integer(progress.duplicates)} content duplicates"
+    if (progress.rejected > 0) parts += "${Formats.integer(progress.rejected)} rejected"
+    if (progress.rowGroups > 0) parts += "${progress.rowGroupsProcessed}/${progress.rowGroups} row groups"
+    if (progress.documentsPerSecond > 0) parts += "${progress.documentsPerSecond.toInt()} rows/s"
+    if (progress.elapsedMs > 0) parts += "${progress.elapsedMs / 1000}s elapsed"
+    if(progress.byteBasis.startsWith("projected")) {
+        parts += "${Formats.bytes(progress.bytesRead)} projected pages/footer read"
+    } else if(progress.byteBasis=="decompressed") {
         parts += "${Formats.bytes(progress.bytesRead)} decompressed · ${Formats.bytes(progress.sourceBytes)} compressed source"
     } else if (progress.sourceBytes > 0) {
         parts += "${Formats.bytes(progress.bytesRead)} of ${Formats.bytes(progress.sourceBytes)} source bytes read"

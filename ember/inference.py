@@ -74,11 +74,19 @@ class ModelInfo:
     eos_token_id: int = -1
     pad_token_id: int = -1
     suppressed_tokens: int = 0
+    has_encoder: bool = False
+    recurrent: bool = False
+    hybrid: bool = False
+    allocated_ctx: int = 0
 
     @classmethod
     def from_json(cls, payload: dict) -> "ModelInfo":
         return cls(
             loaded=bool(payload.get("loaded", False)),
+            has_encoder=bool(payload.get("hasEncoder",False)),
+            recurrent=bool(payload.get("recurrent",False)),
+            hybrid=bool(payload.get("hybrid",False)),
+            allocated_ctx=int(payload.get("allocatedCtx",0)),
             path=str(payload.get("path", "")),
             arch=str(payload.get("arch", "")),
             name=str(payload.get("name", "")),
@@ -101,6 +109,8 @@ class ModelInfo:
     def to_dict(self) -> dict:
         return {
             "loaded": self.loaded,
+            "hasEncoder":self.has_encoder,"recurrent":self.recurrent,"hybrid":self.hybrid,
+            "allocatedCtx":self.allocated_ctx,"textOnly":True,
             "path": self.path,
             "arch": self.arch,
             "name": self.name,
@@ -329,7 +339,12 @@ class LlamaCppEngine(InferenceEngine):
                 self._load_error = f"could not load {self._lib_path}: {exc}"
             else:
                 self._lib = lib
-                self._bind(lib)
+                try:
+                    self._bind(lib)
+                except AttributeError as exc:
+                    self._lib=None
+                    self._load_error="Native ABI mismatch: rebuild/install the matching Ember library/APK. "+str(exc)
+                    return
                 handle = lib.ember_llama_create()
                 if not handle:
                     self._lib = None
@@ -343,7 +358,14 @@ class LlamaCppEngine(InferenceEngine):
             )
 
     # -- ctypes plumbing -------------------------------------------------
+    def capabilities(self) -> dict:
+        if not self.available():
+            raise InferenceError(self.load_error or "native capabilities unavailable",code=-2,name="backend-not-initialized")
+        return json.loads(self._lib.ember_llama_capabilities().decode("utf-8"))
+
     def _bind(self, lib) -> None:
+        lib.ember_llama_capabilities.argtypes = []
+        lib.ember_llama_capabilities.restype = ctypes.c_char_p
         lib.ember_llama_create.argtypes = []
         lib.ember_llama_create.restype = ctypes.c_void_p
         lib.ember_llama_destroy.argtypes = [ctypes.c_void_p]
@@ -415,6 +437,17 @@ class LlamaCppEngine(InferenceEngine):
     ) -> ModelInfo:
         if not self.available():
             raise InferenceError(self._load_error or "native engine unavailable", code=-2, name="backend-not-initialized")
+        from .gguf_export import validate_gguf_file
+        try:
+            preflight=validate_gguf_file(path)
+        except (ValueError,OSError) as exc:
+            missing="does not exist" in str(exc) or isinstance(exc,FileNotFoundError)
+            raise InferenceError(("file-access: Model file not found. " if missing else "metadata-preflight: ")+str(exc),
+                                 code=-4 if missing else -5,name="model-not-found" if missing else "model-invalid") from exc
+        entries={row["architecture"]:row for row in self.capabilities()["architectures"]}
+        entry=entries.get(preflight["arch"])
+        if not entry or not entry["nativeLoaderImplemented"] or not entry["emberTextCandidate"]:
+            raise InferenceError("architecture-recognition: "+(entry or {}).get("limitation", "no upstream native loader for "+preflight["arch"]),code=-6,name="model-incompatible")
         cfg = config or EngineConfig()
         if not (1 <= cfg.n_ctx <= 8192 and 1 <= cfg.n_batch <= 2048 and 0 <= cfg.n_threads <= 8):
             raise InferenceError("Context, batch or thread count is out of range.", code=-1, name="invalid-arguments")

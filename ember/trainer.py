@@ -235,6 +235,8 @@ class Trainer:
         """Model file inference should use: an imported GGUF wins over the trained one."""
         if self._imported_gguf is not None:
             return self._imported_gguf if self._imported_gguf.exists() else None
+        if self.corpus.get_kv("inference:selected_external"):
+            return None  # Never substitute a trained model for an unavailable SAF selection.
         path = self.active_gguf_path
         return path if path.exists() else None
 
@@ -275,6 +277,7 @@ class Trainer:
         Raises a structured :class:`~ember.inference.InferenceError` (never a
         silent fallback) when there is no usable model.
         """
+        self.require_selected_source_available()
         engine = get_engine()
         if not engine.available():
             raise InferenceError(
@@ -293,8 +296,11 @@ class Trainer:
                 name="model-not-loaded",
             )
         mtime = path.stat().st_mtime
-        if not engine.is_loaded() or self._engine_model_path != str(path) or mtime != self._engine_model_mtime:
+        requested_config=vars(config or EngineConfig()).copy()
+        if (not engine.is_loaded() or self._engine_model_path != str(path) or mtime != self._engine_model_mtime
+                or getattr(self,"_engine_model_config",None)!=requested_config):
             engine.load_model(path, config)
+            self._engine_model_config=requested_config
             self._engine_model_path = str(path)
             self._engine_model_mtime = mtime
         return path
@@ -1031,23 +1037,27 @@ class Trainer:
     # GGUF model library (user-imported models)
     # ------------------------------------------------------------------
     def register_external_model(self,path,uri,name,select=True):
-        # Android owns a seekable ParcelFileDescriptor for this process lifetime.
-        # URI permission, reopening after restart and revocation are Android duties.
-        if not str(path).startswith("/proc/self/fd/"): raise ValueError("external models require an Android-owned file descriptor")
-        info=validate_gguf_file(path)
-        entry={**info,"name":name,"libraryName":name,"storage":"external","uri":uri,"path":path}
+        raise InferenceError("SAF descriptor paths cannot be reopened safely. Import the document through Android's private model staging flow.",
+                             code=-4,name="model-source-unavailable")
+
+    def restore_external_registration(self,uri,name):
+        # Preserve old registrations and selection without touching the source or
+        # inventing a valid filesystem path. A user can explicitly forget/reimport.
+        entry={"name":name,"libraryName":name,"storage":"external","uri":uri,
+               "path":uri,"valid":False,"requiresPrivateImport":True,
+               "error":"Re-import this document to create a durable private model copy."}
         self.external_models[uri]=entry
-        if select or self.corpus.get_kv("inference:selected_external")==uri:
-            self._imported_gguf=Path(path)
-            self.corpus.set_kv("inference:selected_external",uri)
-            self.corpus.set_kv("inference:selected_model",path)
-            self._engine_model_path=""
-        return {**entry,"imported":True,"selected":self._imported_gguf==Path(path)}
+        return {**entry,"selected":self.corpus.get_kv("inference:selected_external")==uri}
+
+    def require_selected_source_available(self):
+        if self._imported_gguf is None and self.corpus.get_kv("inference:selected_external"):
+            raise InferenceError("The selected legacy SAF model needs a private copy. Import the original document again; the source and registration have been preserved.",
+                                 code=-4,name="model-source-unavailable")
 
     def unregister_external_model(self,uri):
         with self._lock:
             entry=self.external_models.pop(uri,None)
-            if entry and self._imported_gguf==Path(entry["path"]):
+            if entry and (self._imported_gguf==Path(entry["path"]) or self.corpus.get_kv("inference:selected_external")==uri):
                 self._imported_gguf=None;self._engine_model_path=""
                 self.corpus.set_kv("inference:selected_external",None)
                 self.corpus.set_kv("inference:selected_model",None)
@@ -1090,7 +1100,7 @@ class Trainer:
                 "path": str(active),
                 "bytes": active.stat().st_size,
                 "mtime": int(active.stat().st_mtime * 1000),
-                "selected": self._imported_gguf is None,
+                "selected": self._imported_gguf is None and not self.corpus.get_kv("inference:selected_external"),
                 "valid": None,
                 "error": None,
                 "trained": True,
@@ -1115,11 +1125,14 @@ class Trainer:
                 entry["error"] = str(exc)
             out.insert(0, entry)
         for entry in self.external_models.values():
-            out.append({**entry,"selected":self._imported_gguf==Path(entry["path"]),"valid":Path(entry["path"]).exists()})
+            out.append({**entry,"selected":self.corpus.get_kv("inference:selected_external")==entry["uri"],"valid":False})
         return out
 
-    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True, staged: bool = False) -> dict[str, Any]:
+    def import_gguf(self, source: str | Path, *, name: str | None = None, select: bool = True, staged: bool = False,config: EngineConfig | None = None) -> dict[str, Any]:
         """Copy a user-selected GGUF into the model library and validate it."""
+        if str(source).startswith(("/proc/self/fd/", "content://", "saf:")):
+            raise InferenceError("Selected documents must be stream-copied by Android into private model storage before import; descriptor/URI paths cannot be reopened.",
+                                 code=-4,name="model-source-unavailable")
         src = Path(source)
         if not src.exists():
             raise InferenceError(f"Model file not found: {src}", code=-4, name="model-not-found")
@@ -1137,8 +1150,54 @@ class Trainer:
         self._model_import_cancel.clear()
         tmp=None
         try:
-            engine.load_model(src, EngineConfig())
+            # Prepare a private inode first, so native validation covers exactly
+            # the bytes published, never an externally mutable source followed
+            # by an unvalidated post-load copy. Staged Android imports remain
+            # same-volume hardlinks, with no second multi-GB copy/model load.
+            fd,temporary=tempfile.mkstemp(dir=self.library_dir,suffix=".partial")
+            os.close(fd);tmp=Path(temporary)
+            linked=False
+            if staged:
+                tmp.unlink()
+                try:
+                    os.link(src,tmp);linked=True
+                except OSError:
+                    pass # bounded private-copy fallback, validated BEFORE publication
+            if not linked:
+                expected=src.stat()
+                if shutil.disk_usage(self.library_dir).free<expected.st_size+16*1024*1024:
+                    raise OSError("Insufficient free storage for the copied model and safety reserve")
+                total=0;reported=0
+                with open(src,"rb") as incoming,open(tmp,"wb") as outgoing:
+                    before=os.fstat(incoming.fileno())
+                    while True:
+                        if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+                        chunk=incoming.read(1024*1024)
+                        if not chunk:break
+                        if shutil.disk_usage(self.library_dir).free<len(chunk)+16*1024*1024:
+                            raise OSError("Insufficient storage during private model copy")
+                        outgoing.write(chunk);total+=len(chunk)
+                        if total>expected.st_size:raise OSError("Model source grew during copy; select it again")
+                        if total-reported>=4*1024*1024:
+                            self._emit("model.importProgress",{"bytesCopied":total,"totalBytes":expected.st_size})
+                            reported=total
+                    outgoing.flush();os.fsync(outgoing.fileno())
+                    after=os.fstat(incoming.fileno())
+                if total!=expected.st_size or (before.st_size,before.st_mtime_ns,before.st_ino)!=(after.st_size,after.st_mtime_ns,after.st_ino):
+                    raise OSError("Incomplete or changed model source during copy; select it again")
+            info=validate_gguf_file(tmp)
             if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            engine.load_model(tmp, config or EngineConfig(),on_progress=lambda value:
+                self._emit("model.importProgress",{"loadProgress":value,"stage":"native-validation"}))
+            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            self._emit("model.importProgress",{"stage":"first-token","loadProgress":1.0})
+            try:
+                diagnostic=engine.generate("Hello",GenParams(max_tokens=1,temperature=0,stop_on_eos=False))
+            except InferenceError as exc:
+                raise InferenceError("first-token validation: "+str(exc),code=exc.code,name=exc.name) from exc
+            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
+            if diagnostic.new_tokens!=1:
+                raise InferenceError("first-token: native model/context loaded but text generation produced no token",code=-9,name="first-token-failed")
             target_name = (name or src.stem or "imported-model")
             if target_name.lower().endswith(".gguf"):target_name=target_name[:-5]
             safe = "".join(c if c.isalnum() or c in "-_." else "_" for c in target_name)[:80] or "imported-model"
@@ -1149,29 +1208,7 @@ class Trainer:
                     dest=self.library_dir/(safe+(f"-{index}" if index else "")+".gguf")
                     if not dest.exists():break
                     index+=1
-                if staged:
-                    try:os.link(src,dest) # same internal volume: no second multi-GB copy
-                    except OSError:staged=False
-                if not staged:
-                    if shutil.disk_usage(self.library_dir).free<src.stat().st_size+16*1024*1024:
-                        raise OSError("Insufficient free storage for the copied model and safety reserve")
-                    fd,temporary=tempfile.mkstemp(dir=self.library_dir,suffix=".partial")
-                    tmp=Path(temporary)
-                    total=0;reported=0
-                    with open(src,"rb") as incoming,os.fdopen(fd,"wb") as outgoing:
-                        while True:
-                            if self._model_import_cancel.is_set():raise InterruptedError("Model import cancelled")
-                            chunk=incoming.read(1024*1024)
-                            if not chunk:break
-                            outgoing.write(chunk);total+=len(chunk)
-                            if total-reported>=4*1024*1024:
-                                self._emit("model.importProgress",{"bytesCopied":total,"totalBytes":src.stat().st_size})
-                                reported=total
-                        outgoing.flush();os.fsync(outgoing.fileno())
-                    validate_gguf_file(tmp)
-                    # The trainer lock serializes model-library publication.
-                    os.replace(tmp,dest);tmp=None
-            info=validate_gguf_file(dest)
+                os.replace(tmp,dest);tmp=None
         finally:
             if tmp is not None:tmp.unlink(missing_ok=True)
             engine.unload() # never leave Python + JNI contexts resident together
@@ -1181,7 +1218,8 @@ class Trainer:
             self._imported_gguf = dest
             self._engine_model_path = ""
             self._engine_model_mtime = -1.0
-        payload = {"imported": True, **info}
+        payload = {**info,"imported": True,"nativeValidated":True,"textInferenceVerified":True,
+                   "validationStage":"first-token-verified","compatibility":"native model/context/tokenizer and one-token inference verified; modalities unavailable"}
         payload["name"] = dest.stem          # library name wins over the metadata title
         payload["libraryName"] = dest.stem
         payload["path"] = str(dest)

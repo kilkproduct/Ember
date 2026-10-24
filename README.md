@@ -7,11 +7,19 @@ Ember is a native Kotlin/Jetpack Compose Android language foundry. Python/NumPy
 corpus. **Every production generation uses llama.cpp** from local GGUF weights.
 There is no cloud inference, Python generator fallback, or server process in the APK.
 
+## GGUF format and inspection
+
+GGUF **v2/v3 little-endian** parsing and native generation are tested. v3
+big-endian metadata can be inspected but is explicitly unsupported for inference
+by the pinned C++ reader on Android. Model library **Details** shows declared
+metadata and compatibility separately from actual native readiness.
+See [the v2/v3 overhaul and current test evidence](docs/gguf-format-overhaul.md).
+
 ## On Android
 
-1. Install the `Ember-debug.apk` from **Actions → Build APK → Ember-debug**.
+1. Install `Ember-universal-signed.apk` from **Actions → Build APK → Ember-universal-signed** (development signed, not a production release).
 2. Either add text in Data, **Cast** in Vessel, and **Fire** to train; or use
-   **Chat → Model library → Import GGUF** to register a seekable external model without copying it (or use a cancellable private copy when required).
+   **Chat → Model library → Import GGUF**. Android streams the selected document into persistent private storage; native load and one-token generation must succeed before registration.
 3. In Chat select the model, choose the context/sampling settings, and Generate.
    Output streams as tokens arrive. **Stop** retains partial output.
 4. **Unload** releases native model memory; files remain on disk. The next Generate
@@ -20,13 +28,15 @@ There is no cloud inference, Python generator fallback, or server process in the
    seven projection matrices per transformer block. Checkpoints/corpus exports remain
    separate: a GGUF file is for inference, not a backup of your training corpus.
 
-This build admits dense **`llama`, `qwen2` (Qwen2/Qwen2.5) and `qwen3` GGUF**.
-Imported tokenizers/control IDs/templates remain model-native; the own-training
-50,000-vocabulary limit never resizes imported vocabularies. Dense Qwen F32/Q8_0
-random graph fixtures are tested, **not official pretrained checkpoints or every
-Qwen variant/quantization**. MoE/VL/hybrid/embedding variants and arbitrary Jinja
-templates are not claimed. Read the [compatibility matrix](docs/overhaul.md).
-A `.gguf` extension or structural registration alone is not native readiness.
+GGUF architecture recognition now comes from the **compiled upstream registry and
+model factory**, not Ember's old Llama/Qwen2/Qwen3 whitelist. Qwen3.5/Qwen3.5-MoE
+hybrid graphs exist in this runtime; they are **not verified with genuine weights**.
+Complete synthetic native **Llama, Qwen2/Qwen3, Mamba recurrent and Qwen3-MoE**
+graphs are exercised in F32/mixed Q8_0. That is not proof every pretrained family,
+quantization, tokenizer or phone will work. Upstream loading/context/tokenizer
+and first-token validation gate each import; metadata inspection alone is not
+readiness. No image/audio/video/projector pipeline or arbitrary Jinja engine is
+provided. See the [compatibility overhaul and full evidence matrix](docs/architecture-compatibility.md).
 Own training still uses Ember's classic GPT-2 byte BPE and unscaled Llama-style
 RoPE; that is a small trainable decoder, not Meta pretrained weights.
 
@@ -37,7 +47,7 @@ GitHub sync; these are not used as a fallback for local inference.
 ## Reproducible native dependency
 
 Upstream: <https://github.com/ggml-org/llama.cpp>, MIT.
-Pinned release **b11836**, commit `f5027fb21307eb264aed483242603d68c87b0fe3`.
+Pinned release **b11838**, commit `4231b23dc2c46661d01157aac5245bdcf03ce4b1`.
 [`third_party/llama.cpp.version`](third_party/llama.cpp.version) records the source
 URL, SHA-256 and selection rationale. No prebuilt native binaries are downloaded.
 

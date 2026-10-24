@@ -1,0 +1,12 @@
+{
+  "writerCommit": "e394084166baac09e8ee9a08a4686f907f7e5291",
+  "writerSha256": "0f2d600e97b42a913520bc37576a42e9f5c5b5c0c9301f32e7453c0f61bccbd5",
+  "writerUnmodified": true,
+  "version": 2,
+  "byteOrder": "little",
+  "bytes": 106912,
+  "fixtureSha256": "559928f5f28f66cf49fc2eaae56f7dc792e460008f3b69c687fd818eb3608853",
+  "scope": "Independent original v2 writer, deterministic complete synthetic Llama graph, NOT pretrained",
+  "independentReader": "gguf 0.19.0 GGUFReader (verified in tests)",
+  "headerPatched": false
+}

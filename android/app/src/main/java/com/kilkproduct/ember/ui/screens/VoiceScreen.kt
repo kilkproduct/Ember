@@ -1,6 +1,9 @@
 package com.kilkproduct.ember.ui.screens
 
 import android.content.Intent
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
@@ -67,6 +70,31 @@ fun VoiceScreen(
     val teachForm = vm.teachForm
     var showSettings by rememberSaveable { mutableStateOf(false) }
     val teachBusy = Ops.LESSON_ADD in ui.busy
+
+    ui.modelInspection?.let { details ->
+        AlertDialog(
+            onDismissRequest={vm.repo.dismissModelInspection()},
+            title={Text("GGUF model inspector")},
+            confirmButton={TextButton(onClick={vm.repo.dismissModelInspection()}) {Text("Close")}},
+            text={Column(Modifier.verticalScroll(rememberScrollState()),verticalArrangement=Arrangement.spacedBy(8.dp)) {
+                Text("Declared file metadata is not proof of working inference.",style=MaterialTheme.typography.bodySmall)
+                listOf("name" to "Name", "arch" to "Architecture", "ggufVersion" to "GGUF version",
+                    "byteOrder" to "Byte order", "bytes" to "File bytes", "parameters" to "Stored tensor elements",
+                    "blockCount" to "Layers", "embeddingLength" to "Embedding width", "headCount" to "Heads",
+                    "headCountKv" to "KV heads", "contextLength" to "Declared context", "vocabSize" to "Vocabulary",
+                    "tokenizerModel" to "Tokenizer", "tokenizerPre" to "Pre-tokenizer", "tensorCount" to "Tensors",
+                    "tensorTypes" to "Tensor formats/counts", "modalities" to "Input interfaces", "backend" to "Backend / CPU",
+                    "compatibilityState" to "Compatibility", "limitation" to "Limitations", "error" to "File error",
+                    "parameterCountScope" to "Parameter-count scope", "memoryNote" to "Memory estimate scope"
+                ).forEach { (key,label) ->
+                    if(details.has(key) && !details.isNull(key)) {
+                        Text(label,style=MaterialTheme.typography.labelMedium)
+                        Text(details.opt(key).toString(),style=MaterialTheme.typography.bodySmall)
+                    }
+                }
+            }}
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -318,7 +346,7 @@ fun VoiceScreen(
                         max = 4096.0,
                         modifier = Modifier.weight(1f),
                         enabled = !generating,
-                        helper = "Requested session context; cannot exceed native training context. Oldest prompt tokens are dropped with a warning when full.",
+                        helper = "Requested context is preserved. Beyond-training extrapolation is unverified; learned-position models may reject it. Oldest prompt tokens are dropped with a warning when full.",
                     )
                     NumberStepper(
                         label = "Top-k",
@@ -471,6 +499,7 @@ fun VoiceScreen(
                                     },
                                 )
                             }
+                            TextButton(onClick={vm.repo.inspectModel(entry.path)},enabled=!ui.modelBusy) {Text("Details")}
                             if(entry.storage=="external")TextButton(onClick={vm.repo.forgetExternalModel(entry)},enabled=!generating && !ui.modelBusy) {Text("Forget")}
                             if (!entry.selected && entry.valid != false) {
                                 TextButton(

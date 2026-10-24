@@ -284,6 +284,11 @@ Java_com_kilkproduct_ember_backend_LlamaInference_nativeLogs(JNIEnv* env, jobjec
 }
 
 JNIEXPORT jbyteArray JNICALL
+Java_com_kilkproduct_ember_backend_LlamaInference_nativeCapabilities(JNIEnv* env,jobject) {
+    return utf8_to_jbytes(env,ember_llama_capabilities());
+}
+
+JNIEXPORT jbyteArray JNICALL
 Java_com_kilkproduct_ember_backend_LlamaInference_nativeBackendInfo(JNIEnv* env, jobject) {
     const char* info = ember_llama_backend_info();
     return utf8_to_jbytes(env, std::string("{\"ok\":true,\"backend\":\"") + (info ? info : "") + "\"}");
