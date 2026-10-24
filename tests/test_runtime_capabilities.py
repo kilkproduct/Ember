@@ -147,3 +147,16 @@ def test_native_validation_covers_the_published_private_inode(tmp_path,monkeypat
         assert seen==[Path(result['path']).stat().st_ino]
         assert result['textInferenceVerified'] and not list(b.trainer.library_dir.glob('*.partial'))
     finally:b.close()
+
+
+def test_actual_native_template_failure_cannot_be_registered(tmp_path):
+    path=tmp_path/'unsupported-template.gguf';qwen_fixture(path)
+    template=read_gguf_header(path).metadata['tokenizer.chat_template'].encode()
+    path.write_bytes(path.read_bytes().replace(template,b'?'*len(template),1))
+    b=EmberBackend(tmp_path/'app')
+    try:
+        with pytest.raises(InferenceError,match='first-token.*template'):
+            b.dispatch('model.importGguf',{'path':str(path)})
+        assert not list(b.trainer.library_dir.iterdir())
+        assert b.trainer._imported_gguf is None and not get_engine().is_loaded()
+    finally:b.close()

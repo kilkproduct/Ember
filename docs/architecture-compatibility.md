@@ -121,11 +121,11 @@ first-token verification separately from model-load progress.
 
 ## Executed verification and reproducibility
 
-Host build: CMake Release, CPU, pinned source; **181 Python tests passed** (two
+Host build: CMake Release, CPU, pinned source; **182 Python tests passed** (two
 expected overflow warnings from the divergence-rejection test). Includes existing
 EMB4/training/logit parity/Parquet/private-staging/cancel/switch tests and new
 registry/quant layouts, real recurrent/MoE graphs, malformed metadata, wrong
-Qwen3.5 graph rejection, first-token publication/cancel gating, same-model context reconfiguration and exact-private-inode validation.
+Qwen3.5 graph rejection, first-token publication/cancel gating, same-model context reconfiguration and exact-private-inode validation, and actual native unsupported-template first-token rejection (not a mock).
 
 ```sh
 scripts/fetch-llama-cpp.sh

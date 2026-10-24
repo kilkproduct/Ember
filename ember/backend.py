@@ -588,7 +588,7 @@ class EmberBackend:
                     raise ValueError("Invalid private model staging identity/path")
                 staged=True
             return self.trainer.import_gguf(src, name=str(p.get("name") or ""), select=p.get("select") is not False,staged=staged,
-                config=EngineConfig(n_ctx=int(p.get("nCtx",2048)),n_batch=int(p.get("nBatch",256)),
+                config=EngineConfig(n_ctx=int(p.get("nCtx",EngineConfig.n_ctx)),n_batch=int(p.get("nBatch",256)),
                     n_ubatch=int(p.get("nUbatch",64)),n_threads=int(p.get("nThreads",0)),use_mmap=p.get("useMmap") is not False))
 
         if method == "model.exportGguf":
