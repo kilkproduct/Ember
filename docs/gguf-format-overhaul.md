@@ -150,3 +150,18 @@ asserted. Historical SAF emulator grant-harness failure remains unresolved;
 its instrumentation would require another test APK, excluded under the standing
 universal-only APK requirement. Final CI/artifact evidence must refer to the
 new delivery run, not a historical build linked by older documents.
+
+## Delivered build
+
+[Final build 40074469137](https://github.com/kilkproduct/Ember/actions/runs/40074469137)
+**succeeded**, application commit `367bd0a539618b10a078d395a2a7e371be38fbfd`.
+Host/native/Python/HTTP/JVM checks, both Android ABIs, signature verification and
+packaged native/Python/capability-manifest checks passed.
+
+**[Download the universal development-signed APK](https://github.com/kilkproduct/Ember/actions/runs/40074469137/artifacts/12552503813)**
+(artifact contains only `Ember-universal-signed.apk`; GitHub sign-in may be needed).
+[CI test evidence](https://github.com/kilkproduct/Ember/actions/runs/40074469137/artifacts/12552671797).
+[Native ASan/UBSan/leak run](https://github.com/kilkproduct/Ember/actions/runs/40074324570)
+also passed; its native source tree is identical to the delivered app's.
+Full machine-readable provenance: `verification/gguf-format-android-build.json`.
+This final delivery record is documentation only and does not change the APK.
